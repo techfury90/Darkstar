@@ -367,7 +367,9 @@ December, 1997 (afterwards the clock can be set to whatever date you like):
 
     ViewPoint 1.1 / Services 10.0: J SH9R JX2A CH3N
     ViewPoint 2.0 / Services 11.0: 8 7T78 M8YL LFEQ
-    
+    ViewPoint 3.x (6085, XGV-PC): M FJLL 78QQ 3D6M
+    ViewPoint 3.x (Sun): W JYJM 8AQ5 53YE
+
 
 4.0 Configuration
 =================
