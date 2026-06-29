@@ -103,8 +103,9 @@ namespace D.Display
                 _scanline = 0;
                 _oddLine = (value & 0x10) != 0;
                 _syncPresent = true;
+                _captureFirstPicture = true;     // re-measure where the picture starts this field (see border phasing)
                 _system.Display.Render();
-            }            
+            }
 
             if ((value & 0x40) == 0)
             {
@@ -155,6 +156,26 @@ namespace D.Display
             int effectiveScanline = _scanline - visibleOffset;
 
             //
+            // Border phase: the border pattern's 2-scanline blocks must line up with the picture's stipple.
+            // The picture begins a guest-programmed number of sync + top-border lines below the vertical-sync
+            // reset, and that distance differs between guest OSes (e.g. ViewPoint and Interlisp-D program
+            // different vertical-sync lengths -- 16/17 vs 13/14 lines), so it cannot be a fixed constant.
+            // Instead, measure where the picture actually starts this field and phase the border off that, so
+            // the border tracks whatever vertical geometry the guest sets up.  Border-only lines (top/bottom
+            // border, display off) reuse the previous field's measurement.
+            // The two interlace fields start their picture at different _scanline values (one extra sync
+            // line on the odd field), so they must be measured separately -- otherwise a field's top/bottom
+            // border, which reuses the previous field's measurement, would be phased off the *other* parity
+            // and tear by one line right where the active region begins.
+            int field = _oddLine ? 1 : 0;
+            if (_picture && _captureFirstPicture)
+            {
+                _firstPictureScanline[field] = _scanline;
+                _captureFirstPicture = false;
+            }
+            int borderPhaseLine = _scanline - _firstPictureScanline[field] + _borderPhaseAdjust;
+
+            //
             // Render this scanline, if there's anything to do.
             //
             if (_blank)
@@ -170,8 +191,9 @@ namespace D.Display
                 if (_picture)
                 {
                     // Normal line : 32 bits of border pattern, 1024 bits of display, 32 bits of border pattern
-                    // Border pattern: low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3.
-                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
+                    // Border pattern: low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3 (phased off the
+                    // measured picture start, see borderPhaseLine above).
+                    int patternByte = (borderPhaseLine & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
                     ushort patternWord = (ushort)(patternByte | (patternByte << 8));
 
                     _scanlineData[0] = patternWord;
@@ -212,8 +234,9 @@ namespace D.Display
                 else
                 {
                     // Just display the border pattern everywhere:
-                    // low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3.
-                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
+                    // low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3 (phased off the measured
+                    // picture start, see borderPhaseLine above).
+                    int patternByte = (borderPhaseLine & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
                     ushort patternWord = (ushort)(patternByte | (patternByte << 8));
 
                     for (int i = 0; i < _scanlineData.Length; i++)
@@ -272,6 +295,17 @@ namespace D.Display
 
         // Border bitmap
         private ushort _displayBorder;
+
+        // Border phasing.  The border pattern is lined up with the picture's stipple by measuring where the
+        // picture starts rather than assuming it: _firstPictureScanline[field] is the _scanline of the first
+        // picture line seen since the last vertical sync, measured separately for the even (0) and odd (1)
+        // interlace fields (they differ by the odd field's extra sync line).  This is guest- and OS-dependent,
+        // so it must be measured rather than assumed.  _captureFirstPicture latches the measurement once per
+        // field.  _borderPhaseAdjust is a one-time global nudge for the stipple's own phase: +2 swaps the two
+        // border bytes, +1 shifts by one scanline.
+        private int[] _firstPictureScanline = { 36, 37 };
+        private bool _captureFirstPicture;
+        private const int _borderPhaseAdjust = 2;
 
         // Control FIFO.  Max 16 entries.
         private Queue<ushort> _fifo;
