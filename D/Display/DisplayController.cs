@@ -170,8 +170,11 @@ namespace D.Display
                 if (_picture)
                 {
                     // Normal line : 32 bits of border pattern, 1024 bits of display, 32 bits of border pattern
-                    // Border pattern: low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3.
-                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
+                    // DBorder holds two 8-bit scanline patterns.  The high byte is shown on the first
+                    // scanline-pair of each 4-line group (4n, 4n+1), the low byte on the second (4n+2, 4n+3).
+                    // (Swapping these two bytes was the fix: the original mapping was off by one block,
+                    // leaving the border stipple 2px out of phase with the picture along every seam.)
+                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder >> 8 : _displayBorder & 0xff;
                     ushort patternWord = (ushort)(patternByte | (patternByte << 8));
 
                     _scanlineData[0] = patternWord;
@@ -212,8 +215,8 @@ namespace D.Display
                 else
                 {
                     // Just display the border pattern everywhere:
-                    // low byte on lines 4n, 4n+1; high byte on 4n+2, 4n+3.
-                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder & 0xff : _displayBorder >> 8;
+                    // high byte on lines 4n, 4n+1; low byte on 4n+2, 4n+3 (see note in the picture case above).
+                    int patternByte = (effectiveScanline & 0x2) == 0 ? _displayBorder >> 8 : _displayBorder & 0xff;
                     ushort patternWord = (ushort)(patternByte | (patternByte << 8));
 
                     for (int i = 0; i < _scanlineData.Length; i++)
