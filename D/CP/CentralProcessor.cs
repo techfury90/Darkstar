@@ -134,6 +134,15 @@ namespace D.CP
             _outLatched = false;
 
             _exitKernel = false;
+
+            // Stop printer (task 1) wakeups; scheduler events survive a system reset.
+            // (_printerWakeupEvent is null on the initial Reset, before _system is set.)
+            _printerActive = false;
+            if (_printerWakeupEvent != null)
+            {
+                _system.Scheduler.Cancel(_printerWakeupEvent);
+                _printerWakeupEvent = null;
+            }
         }
 
         public ulong[] MicrocodeRam
@@ -1046,18 +1055,61 @@ namespace D.CP
                                 break;
 
                             case YIOOutFunction.PCtl:
-                                // Assume this is for the LSEP controller; docs are thin.
-                                if (Log.Enabled) Log.Write(LogType.Error, LogComponent.CPExecution, "PCtl<-0x{0}, unimplemented.", _xBus);
+                                // LSEP printer control register.
+                                // Bits: EnablePrinter=0x1, ~VideoWhite=0x2, ForceRequest=0x4, ~ClearLineActive=0x8.
+                                if (Log.Enabled) Log.Write(LogComponent.CPExecution, "PCtl<-0x{0:x}", _xBus);
 
                                 if ((_xBus & 0x1) != 0)
                                 {
-                                    // Per MoonCycle.mc,
-                                    // This wakes the LSEP/Refresh task (task 3).
+                                    // EnablePrinter gates both the printer and the memory
+                                    // refresh task wakeups ("enables printer and memory
+                                    // refresh task wakeups", Raven.mc).
                                     WakeTask(TaskType.Refresh);
+
+                                    if (_printerActive)
+                                    {
+                                        if ((_xBus & 0x4) != 0)
+                                        {
+                                            // ForceRequest (0x4): immediate printer service
+                                            // request regardless of line sync.
+                                            WakeTask(TaskType.Display);
+                                        }
+                                        else
+                                        {
+                                            // End-of-scan acknowledge (EndActiveScanCtl et al.):
+                                            // the printer task sleeps until the next line-sync
+                                            // wakeup from the scheduled pump.
+                                            SleepTask(TaskType.Display);
+                                        }
+                                    }
+                                    else if (!_system.DisplayController.DisplayOn)
+                                    {
+                                        //
+                                        // EnablePrinter written while the display is off: this is
+                                        // print-server microcode (StartMesa's Printer/Multiport
+                                        // configs) enabling the LSEP wakeup chain.  On that
+                                        // hardware the Raven printer microcode occupies the
+                                        // Display task slot (task 1), and the printer timing
+                                        // chain generates both its wakeups and the refresh
+                                        // task's.  Display builds write EnablePrinter too (it
+                                        // also gates refresh wakeups, see StartMesa.mc) but only
+                                        // after turning the display on, hence the DisplayOn gate.
+                                        //
+                                        _printerActive = true;
+                                        _printerWakeupEvent = _system.Scheduler.Schedule(_printerWakeupInterval, PrinterWakeupCallback);
+                                    }
                                 }
                                 else
                                 {
                                     SleepTask(TaskType.Refresh);
+
+                                    if (_printerActive)
+                                    {
+                                        _printerActive = false;
+                                        _system.Scheduler.Cancel(_printerWakeupEvent);
+                                        _printerWakeupEvent = null;
+                                        SleepTask(TaskType.Display);
+                                    }
                                 }
                                 break;
 
@@ -1074,7 +1126,9 @@ namespace D.CP
                                 break;
 
                             case YIOOutFunction.POData:
-                                throw new NotImplementedException("POData not implemented.");
+                                // LSEP printer video data.  The video shift path is not yet
+                                // implemented; sink the data so the printer microcode can run.
+                                if (Log.Enabled) Log.Write(LogComponent.CPExecution, "POData<-0x{0:x4}", _xBus);
                                 break;
 
                             case YIOOutFunction.Invalid0:
@@ -1307,7 +1361,36 @@ namespace D.CP
             _wakeup[(int)task] = false;
 
             if (Log.Enabled) Log.Write(LogComponent.CPTask, "Task {0} set to sleep.", task);
-        }      
+        }
+
+        /// <summary>
+        /// Invoked at the (placeholder) line-sync rate while the LSEP printer wakeup chain
+        /// is enabled via PCtl<-.  Stands in for the OPT card's wakeup logic: LineSync wakes
+        /// the printer video task (task 1, the Display slot the Raven microcode occupies)
+        /// and the timing chain also produces the refresh task's (task 3) wakeups.  The
+        /// refresh task maintains uClock and the periodic Mesa timer interrupt, so it must
+        /// keep running or Pilot's timeouts never fire.
+        /// </summary>
+        private void PrinterWakeupCallback(ulong skewNsec, object context)
+        {
+            if (!_printerActive)
+            {
+                return;
+            }
+
+            if (_system.DisplayController.DisplayOn)
+            {
+                // The display slot is back in use (e.g. the boot kernel restarting a
+                // workstation config); stop driving printer wakeups.
+                _printerActive = false;
+                _printerWakeupEvent = null;
+                return;
+            }
+
+            WakeTask(TaskType.Display);
+            WakeTask(TaskType.Refresh);
+            _printerWakeupEvent = _system.Scheduler.Schedule(_printerWakeupInterval, PrinterWakeupCallback);
+        }
 
         /// <summary>
         /// Invoked at the end of a click.  If a task switch is necessary the proper task is selected and switched to.
@@ -1353,6 +1436,14 @@ namespace D.CP
                     case ClickType.Display:
                         if (_system.DisplayController.DisplayOn)
                         {
+                            DoTaskSwitch(TaskType.Display);
+                        }
+                        else if (_printerActive && WakeStatus(TaskType.Display))
+                        {
+                            // Print server: the Raven printer microcode runs in the Display
+                            // task slot and has priority over refresh for the click
+                            // ("Printer has priority over refresh", OPT card wakeup logic).
+                            // Refresh takes the clicks the printer leaves idle.
                             DoTaskSwitch(TaskType.Display);
                         }
                         else
@@ -1423,7 +1514,7 @@ namespace D.CP
             // Switch to the new task.
             //
             _currentTask = nextTask;
-            
+
             if (Log.Enabled) Log.Write(LogComponent.CPTask, "Task switch to {0}", _currentTask);
         }        
 
@@ -1619,6 +1710,23 @@ namespace D.CP
         // Whether to exit the Kernel task at the end of this click
         //
         private bool _exitKernel;
+
+        //
+        // LSEP printer state.  On a print server the Raven/LSEP microcode runs in the
+        // Display task slot (task 1) and the refresh task (task 3) maintains uClock and
+        // the periodic Mesa timer interrupt.  While the printer wakeup chain is enabled
+        // (PCtl<- with EnablePrinter, written with the display off) this event supplies
+        // the periodic wakeups for both tasks that the display's retrace would otherwise
+        // provide on a workstation.
+        //
+        private bool _printerActive;
+        private Event _printerWakeupEvent;
+
+        // TODO: real Raven line rate -- measurable on hardware at LSEP connector pins 7/8
+        // (LineSync).  For now reuse the display's horizontal retrace period, which also
+        // makes uClock advance at the same rate as on a display machine; while no print
+        // job is active any wakeup cadence reaches the printer microcode's idle loop.
+        private readonly ulong _printerWakeupInterval = (ulong)(28.8 * Conversion.UsecToNsec);
 
         //
         // Debugging flag: Indicates that an IBDispatch has occurred,

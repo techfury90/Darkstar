@@ -60,6 +60,9 @@ namespace D
             NetHubHost = "localhost";
             NetHubPort = 3333;
 
+            TTYConsolePort = 9000;
+            KeyboardAttached = true;
+
             TODDateTime = new DateTime(1979, 12, 10);
             TODDate = new DateTime(1955, 11, 5);
             TODSetMode = TODPowerUpSetMode.HostTimeY2K;
@@ -154,7 +157,22 @@ namespace D
         /// <summary>
         /// Whether any packet interfaces are available on the host
         /// </summary>
-        public static bool HostRawEthernetInterfacesAvailable;       
+        public static bool HostRawEthernetInterfacesAvailable;
+
+        /// <summary>
+        /// TCP port (on the loopback address) exposing the IOP's TTY / maintenance
+        /// console UART -- the System Administrator's terminal on a headless server.
+        /// 0 disables the listener.
+        /// </summary>
+        public static ushort TTYConsolePort;
+
+        /// <summary>
+        /// Whether a keyboard is attached.  When false, the keyboard does not answer
+        /// the IOP's identification probe at boot, emulating a headless server: the
+        /// boot firmware's keyboard-type flag (KBFlag) then directs Pilot software
+        /// that supports both to its TTY / serial console rather than the display.
+        /// </summary>
+        public static bool KeyboardAttached;
 
         /// <summary>
         /// Whether to cap execution speed at native execution speed or not.

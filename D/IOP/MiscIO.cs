@@ -279,10 +279,9 @@ namespace D.IOP
                     // 
                     value = (byte)~(
                         (_iop.FloppyController.Interrupt ? 0x80 : 0x00) |
-                        (_iop.Keyboard.DataReady() ? 0x40 : 0x00)); 
-                        /* TODO: disabled until it can be completed
+                        (_iop.Keyboard.DataReady() ? 0x40 : 0x00) |
                         (_iop.Printer.TxRequest ? 0x20 : 0x00) |
-                        (_iop.Printer.RxRequest ? 0x10 : 0x00)); */
+                        (_iop.Printer.RxRequest ? 0x10 : 0x00));
 
                     // if (Log.Enabled) Log.Write(LogComponent.IOPMisc, "Misc IO port Interrupt Status read {0:x2}", value);
                     break;

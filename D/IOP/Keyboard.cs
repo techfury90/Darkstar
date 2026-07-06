@@ -192,6 +192,16 @@ namespace D.IOP
 
         public void EnableDiagnosticMode()
         {
+            if (!Configuration.KeyboardAttached)
+            {
+                //
+                // Headless server: no keyboard answers the IOP's identification
+                // probe.  The boot firmware's KBFlag then selects the TTY /
+                // maintenance console instead of the keyboard+display.
+                //
+                return;
+            }
+
             //
             // Per MoonIOPCSTest.asm:
             // "Return sequence of events should be all characters held down followed by D2, D1."
