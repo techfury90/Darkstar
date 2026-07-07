@@ -302,6 +302,103 @@ namespace D.UI
             }
         }
 
+        private void NewTridentDiskToolStripMenuItem_Click(object sender, EventArgs e)
+        {
+            // Ask for the new image's path.
+            string imagePath = ShowNewImageDialog(false);
+
+            if (string.IsNullOrWhiteSpace(imagePath))
+            {
+                return;
+            }
+
+            D.IO.TridentDriveType type = (D.IO.TridentDriveType)((ToolStripMenuItem)sender).Tag;
+
+            //
+            // Creating a factory-formatted Trident pack writes the whole surface
+            // (a T-300 image is ~250MB), so do it asynchronously with the progress
+            // bar, mirroring the load path.
+            //
+            Timer t = new Timer();
+            t.Interval = 100;
+            t.Enabled = true;
+            t.Tick += (o, i) =>
+            {
+                if (ProgressBar.Value >= ProgressBar.Maximum)
+                {
+                    ProgressBar.Value = 0;
+                }
+                ProgressBar.Increment(10);
+            };
+
+            System.Threading.ThreadPool.QueueUserWorkItem(
+            delegate
+            {
+                BeginInvoke((MethodInvoker)delegate
+                {
+                    ProgressBar.Visible = true;
+                    ProgressBar.Style = ProgressBarStyle.Blocks;
+                    ProgressBar.Value = 0;
+                    ProgressBar.Minimum = 0;
+                    ProgressBar.Maximum = 100;
+                    SystemMenu.Enabled = false;
+                });
+
+                bool isRunning = _system.IsExecuting;
+                SystemExecutionContext context = _system.ExecutionContext;
+
+                if (isRunning)
+                {
+                    _system.StopExecution();
+                }
+
+                DialogResult res = DialogResult.Yes;
+                try
+                {
+                    // Commit the current pack before replacing it.
+                    _system.HardDrive.Save();
+                    _system.TridentDrive.Save();
+                }
+                catch (Exception ex)
+                {
+                    res = MessageBox.Show(
+                        String.Format("Unable to save current hard drive's contents.  Error: {0}.  Continue creating new pack?", ex.Message),
+                        "Error:",
+                        MessageBoxButtons.YesNo);
+                }
+
+                if (res == DialogResult.Yes)
+                {
+                    try
+                    {
+                        D.IO.TridentDrive.CreateBlankPack(type, imagePath);
+                        _system.LoadHardDiskImage(imagePath);
+                        Configuration.HardDriveImage = imagePath;
+                    }
+                    catch (Exception ex)
+                    {
+                        MessageBox.Show(
+                            String.Format("Unable to create Trident pack.  Error: {0}", ex.Message),
+                            "Error:");
+                    }
+                }
+
+                if (isRunning)
+                {
+                    _system.StartExecution(context);
+                }
+
+                this.BeginInvoke((MethodInvoker)delegate
+                {
+                    t.Stop();
+                    ProgressBar.Visible = false;
+                    SystemMenu.Enabled = true;
+
+                    UpdateHardDriveLabel();
+                });
+            });
+        }
+
         private void OnAltBootOptionClick(object sender, EventArgs e)
         {
             ToolStripMenuItem item = (ToolStripMenuItem)sender;

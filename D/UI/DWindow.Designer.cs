@@ -72,6 +72,8 @@ namespace D.UI
             this.NewSA1004ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.NewQ2040ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.NewQ2080ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.NewTridentT80ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
+            this.NewTridentT300ToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.HardDiskLabelToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.ConfigurationToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
             this.FullScreenToolStripMenuItem = new System.Windows.Forms.ToolStripMenuItem();
@@ -204,7 +206,9 @@ namespace D.UI
             this.NewHardDiskToolStripMenuItem.DropDownItems.AddRange(new System.Windows.Forms.ToolStripItem[] {
             this.NewSA1004ToolStripMenuItem,
             this.NewQ2040ToolStripMenuItem,
-            this.NewQ2080ToolStripMenuItem});
+            this.NewQ2080ToolStripMenuItem,
+            this.NewTridentT80ToolStripMenuItem,
+            this.NewTridentT300ToolStripMenuItem});
             this.NewHardDiskToolStripMenuItem.Name = "NewHardDiskToolStripMenuItem";
             this.NewHardDiskToolStripMenuItem.Size = new System.Drawing.Size(191, 22);
             this.NewHardDiskToolStripMenuItem.Text = "New";
@@ -232,6 +236,22 @@ namespace D.UI
             this.NewQ2080ToolStripMenuItem.Tag = 3;
             this.NewQ2080ToolStripMenuItem.Text = "80MB (Q2080)";
             this.NewQ2080ToolStripMenuItem.Click += new System.EventHandler(this.NewHardDiskToolStripMenuItem_Click);
+            //
+            // NewTridentT80ToolStripMenuItem
+            //
+            this.NewTridentT80ToolStripMenuItem.Name = "NewTridentT80ToolStripMenuItem";
+            this.NewTridentT80ToolStripMenuItem.Size = new System.Drawing.Size(153, 22);
+            this.NewTridentT80ToolStripMenuItem.Tag = D.IO.TridentDriveType.T80;
+            this.NewTridentT80ToolStripMenuItem.Text = "80MB (Trident T-80)";
+            this.NewTridentT80ToolStripMenuItem.Click += new System.EventHandler(this.NewTridentDiskToolStripMenuItem_Click);
+            //
+            // NewTridentT300ToolStripMenuItem
+            //
+            this.NewTridentT300ToolStripMenuItem.Name = "NewTridentT300ToolStripMenuItem";
+            this.NewTridentT300ToolStripMenuItem.Size = new System.Drawing.Size(153, 22);
+            this.NewTridentT300ToolStripMenuItem.Tag = D.IO.TridentDriveType.T300;
+            this.NewTridentT300ToolStripMenuItem.Text = "300MB (Trident T-300)";
+            this.NewTridentT300ToolStripMenuItem.Click += new System.EventHandler(this.NewTridentDiskToolStripMenuItem_Click);
             // 
             // HardDiskLabelToolStripMenuItem
             // 
@@ -429,6 +449,8 @@ namespace D.UI
         private System.Windows.Forms.ToolStripStatusLabel MouseCaptureStatusLabel;
         private System.Windows.Forms.ToolStripMenuItem FloppyLabelToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem HardDiskLabelToolStripMenuItem;
+        private System.Windows.Forms.ToolStripMenuItem NewTridentT80ToolStripMenuItem;
+        private System.Windows.Forms.ToolStripMenuItem NewTridentT300ToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem NewSA1004ToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem aboutToolStripMenuItem;
         private System.Windows.Forms.ToolStripMenuItem NewQ2040ToolStripMenuItem;

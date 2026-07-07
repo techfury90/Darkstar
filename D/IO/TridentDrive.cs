@@ -130,6 +130,67 @@ namespace D.IO
             _diskImagePath = path;
         }
 
+        /// <summary>
+        /// Creates a new factory-formatted pack of the given type and writes it to
+        /// disk.  Real Century Data / CDC packs shipped low-level formatted, with a
+        /// valid sector-address header on every sector and an empty defect list; the
+        /// field diagnostics can only *re*format such a pack (a truly virgin surface
+        /// has no readable cylinder zero for the bad-page table, so the format aborts
+        /// with "Bad Page in cylinder zero").  So a "blank" pack here means every
+        /// sector carries its address header {cyl, head&lt;&lt;8|sector} over zeroed
+        /// label and data -- which the diagnostic's format and the installer's
+        /// physical-volume creation then build the Pilot volume on top of.
+        /// </summary>
+        public static void CreateBlankPack(TridentDriveType type, string path)
+        {
+            int cylinders;
+            int heads;
+            switch (type)
+            {
+                case TridentDriveType.T80: cylinders = 815; heads = 5; break;
+                case TridentDriveType.T300: cylinders = 815; heads = 19; break;
+                default: throw new InvalidOperationException("Cannot create a pack of an invalid drive type.");
+            }
+
+            string tempPath = Path.GetTempFileName();
+            using (FileStream fs = new FileStream(tempPath, FileMode.Create, FileAccess.Write))
+            {
+                fs.WriteByte((byte)type);
+
+                byte[] record = new byte[RecordWords * 2];
+                for (int c = 0; c < cylinders; c++)
+                {
+                    for (int h = 0; h < heads; h++)
+                    {
+                        for (int s = 0; s < SectorsPerTrack; s++)
+                        {
+                            Array.Clear(record, 0, record.Length);
+
+                            // Flags word: header/label/data all formatted.
+                            ushort flags = FlagHeaderWritten | FlagLabelWritten | FlagDataWritten;
+                            record[0] = (byte)flags;
+                            record[1] = (byte)(flags >> 8);
+
+                            // Header word 0 = cylinder, word 1 = head<<8 | sector
+                            // (the Pilot DiskAddress layout the controller frames).
+                            ushort hdr0 = (ushort)c;
+                            ushort hdr1 = (ushort)((h << 8) | s);
+                            record[2] = (byte)hdr0;
+                            record[3] = (byte)(hdr0 >> 8);
+                            record[4] = (byte)hdr1;
+                            record[5] = (byte)(hdr1 >> 8);
+
+                            // Label and data fields stay zeroed.
+                            fs.Write(record, 0, record.Length);
+                        }
+                    }
+                }
+            }
+
+            File.Copy(tempPath, path, true /* overwrite */);
+            File.Delete(tempPath);
+        }
+
         public void Load(string path)
         {
             try
