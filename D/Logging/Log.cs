@@ -74,6 +74,9 @@ namespace D.Logging
         // Shugart controller
         ShugartControl = 0x800000,
 
+        // Trident (HSIO-L) controller
+        TridentControl = 0x40000,
+
         // Ethernet
         EthernetControl = 0x1000000,
         HostEthernet =     0x2000000,

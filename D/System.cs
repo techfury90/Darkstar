@@ -79,6 +79,8 @@ namespace D
             _displayController = new DisplayController(this);
             _hardDrive = new SA1000Drive(this);
             _shugartController = new ShugartController(this, _hardDrive);
+            _tridentDrive = new TridentDrive(this);
+            _tridentController = new TridentController(this, _tridentDrive);
             _ethernetController = new EthernetController(this);
 
             try
@@ -111,6 +113,8 @@ namespace D
             _ethernetController.Reset();
             _hardDrive.Reset();
             _shugartController.Reset();
+            _tridentDrive.Reset();
+            _tridentController.Reset();
             // _scheduler.Reset();
 
             _cpCycles = 0;
@@ -127,8 +131,38 @@ namespace D
         {
             Console.WriteLine("Saving disk images and shutting down.  Please wait...");
             _hardDrive.Save();
+            if (_tridentDrive.IsLoaded)
+            {
+                _tridentDrive.Save();
+            }
             _iop.FloppyController.Drive.UnloadDisk();
             _ethernetController.Shutdown();
+        }
+
+        /// <summary>
+        /// Loads a hard disk image, routing it to the drive/controller type its
+        /// type byte indicates (SA1000-family or Trident).  The CP's K functions
+        /// follow the loaded controller.
+        /// </summary>
+        public void LoadHardDiskImage(string path)
+        {
+            int type;
+            using (System.IO.FileStream fs = new System.IO.FileStream(path, System.IO.FileMode.Open, System.IO.FileAccess.Read))
+            {
+                type = fs.ReadByte();
+            }
+
+            if (type == (int)TridentDriveType.T80 || type == (int)TridentDriveType.T300)
+            {
+                _tridentDrive.Load(path);
+                _tridentController.SignalDrivePowerOn();
+                Console.WriteLine("Loaded Trident {0} pack {1}.",
+                    (TridentDriveType)type, path);
+            }
+            else
+            {
+                _hardDrive.Load(path);
+            }
         }
 
         public bool IsExecuting
@@ -170,6 +204,22 @@ namespace D
         public ShugartController ShugartController
         {
             get { return _shugartController; }
+        }
+
+        /// <summary>
+        /// The disk controller the CP's K functions are routed to: the Trident
+        /// (HSIO-L) controller when a Trident pack is loaded, the Shugart
+        /// controller otherwise.  The boot microcode's Phase0 probes KTest to
+        /// learn which controller answered (see IDiskController).
+        /// </summary>
+        public IDiskController DiskController
+        {
+            get { return _tridentDrive.IsLoaded ? (IDiskController)_tridentController : _shugartController; }
+        }
+
+        public TridentDrive TridentDrive
+        {
+            get { return _tridentDrive; }
         }
 
         public SA1000Drive HardDrive
@@ -377,6 +427,8 @@ namespace D
         private MemoryController _memoryController;
         private DisplayController _displayController;
         private ShugartController _shugartController;
+        private TridentDrive _tridentDrive;
+        private TridentController _tridentController;
         private EthernetController _ethernetController;
         private SA1000Drive _hardDrive;
 

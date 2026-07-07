@@ -85,7 +85,8 @@ namespace D.UI
             {
                 try
                 {
-                    _system.HardDrive.Load(Configuration.HardDriveImage);
+                    // Routes to the SA1000 or Trident drive based on the image type byte.
+                    _system.LoadHardDiskImage(Configuration.HardDriveImage);
                 }
                 catch (Exception e)
                 {
@@ -249,8 +250,9 @@ namespace D.UI
 
                         try
                         {
-                            // Load new image.
-                            _system.HardDrive.Load(imagePath);
+                            // Load new image (routes to the SA1000 or Trident drive
+                            // based on the image type byte).
+                            _system.LoadHardDiskImage(imagePath);
                         }
                         catch (Exception ex)
                         {
@@ -526,12 +528,24 @@ namespace D.UI
 
         private void UpdateHardDriveLabel()
         {
-            HardDiskLabelToolStripMenuItem.Text = 
-                String.Format("{0} ({1})", 
-                    Path.GetFileName(_system.HardDrive.ImagePath),
-                    _system.HardDrive.Type);
+            if (_system.TridentDrive.IsLoaded)
+            {
+                HardDiskLabelToolStripMenuItem.Text =
+                    String.Format("{0} ({1})",
+                        Path.GetFileName(_system.TridentDrive.ImagePath),
+                        _system.TridentDrive.Type);
 
-            HardDiskLabelToolStripMenuItem.ToolTipText = _system.HardDrive.ImagePath;
+                HardDiskLabelToolStripMenuItem.ToolTipText = _system.TridentDrive.ImagePath;
+            }
+            else
+            {
+                HardDiskLabelToolStripMenuItem.Text =
+                    String.Format("{0} ({1})",
+                        Path.GetFileName(_system.HardDrive.ImagePath),
+                        _system.HardDrive.Type);
+
+                HardDiskLabelToolStripMenuItem.ToolTipText = _system.HardDrive.ImagePath;
+            }
         }
 
         private void UpdateFloppyDriveLabel()

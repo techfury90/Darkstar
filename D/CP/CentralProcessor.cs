@@ -415,15 +415,15 @@ namespace D.CP
                                 break;
 
                             case ZIOXIn.ReadKIData:
-                                _xBus = _system.ShugartController.ReadKIData();
+                                _xBus = _system.DiskController.ReadKIData();
                                 break;
 
                             case ZIOXIn.ReadKStatus:
-                                _xBus = _system.ShugartController.ReadKStatus();
+                                _xBus = _system.DiskController.ReadKStatus();
                                 break;
 
                             case ZIOXIn.KStrobe:
-                                _system.ShugartController.KStrobe();
+                                _system.DiskController.KStrobe();
                                 break;
 
                             case ZIOXIn.ReadMStatus:
@@ -431,7 +431,7 @@ namespace D.CP
                                 break;
 
                             case ZIOXIn.ReadKTest:
-                                _xBus = _system.ShugartController.ReadKTest();
+                                _xBus = _system.DiskController.ReadKTest();
                                 break;
 
                             case ZIOXIn.EStrobe:
@@ -894,7 +894,7 @@ namespace D.CP
                                 break;
 
                             case YNormFunction.ClrKFlags:
-                                _system.ShugartController.ClrKFlags();
+                                _system.DiskController.ClrKFlags();
                                 break;
                         }
                         break;
@@ -1027,11 +1027,11 @@ namespace D.CP
                                 break;
 
                             case YIOOutFunction.KOData:
-                                _system.ShugartController.SetKOData(_xBus);
+                                _system.DiskController.SetKOData(_xBus);
                                 break;
 
                             case YIOOutFunction.KCtl:
-                                _system.ShugartController.SetKCtl(_xBus);
+                                _system.DiskController.SetKCtl(_xBus);
                                 break;
 
                             case YIOOutFunction.EOData:
@@ -1122,7 +1122,7 @@ namespace D.CP
                                 break;
 
                             case YIOOutFunction.KCmd:
-                                _system.ShugartController.SetKCmd(_xBus);
+                                _system.DiskController.SetKCmd(_xBus);
                                 break;
 
                             case YIOOutFunction.POData:

@@ -173,8 +173,11 @@
     <Compile Include="IOP\IOPMemoryBus.cs" />
     <Compile Include="IOP\IOPIOBus.cs" />
     <Compile Include="IOP\MiscIO.cs" />
+    <Compile Include="IO\IDiskController.cs" />
     <Compile Include="IO\SA1000.cs" />
     <Compile Include="IO\ShugartController.cs" />
+    <Compile Include="IO\TridentController.cs" />
+    <Compile Include="IO\TridentDrive.cs" />
     <Compile Include="Logging\Log.cs" />
     <Compile Include="Memory\Memory.cs" />
     <Compile Include="Memory\MemoryController.cs" />

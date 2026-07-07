@@ -114,13 +114,19 @@ namespace D.IOP
             {
                 case 0x88:
                     //
-                    // Rx data.  TTYTask only reads this after RxRDY; if read blind
-                    // (diagnostics, no terminal) return the last transmitted byte,
-                    // preserving the loopback behavior the rigid diags expect.
+                    // Rx data.  With the receiver disabled, reads loop back the last
+                    // transmitted byte (the rigid diagnostics' loopback test).  With
+                    // the receiver enabled, a read with nothing queued returns 0 --
+                    // returning stale transmit data here would inject console output
+                    // back into the input stream on any spurious read.
                     //
-                    if ((_command & CMD_RXEN) == 0 || !_rxQueue.TryDequeue(out value))
+                    if ((_command & CMD_RXEN) == 0)
                     {
                         value = _lastTxData;
+                    }
+                    else if (!_rxQueue.TryDequeue(out value))
+                    {
+                        value = 0;
                     }
                     if (Log.Enabled) Log.Write(LogComponent.IOPPrinter, "TTY data read 0x{0:x2}", value);
                     break;
@@ -301,6 +307,7 @@ namespace D.IOP
         {
             byte[] buffer = new byte[512];
             TelnetState telnet = TelnetState.Data;
+            bool lastWasCR = false;
 
             while (true)
             {
@@ -320,8 +327,17 @@ namespace D.IOP
                             {
                                 telnet = TelnetState.Iac;
                             }
+                            else if (lastWasCR && (b == 0x0a || b == 0x00))
+                            {
+                                //
+                                // Telnet NVT sends Enter as CR LF (or CR NUL);
+                                // deliver only the CR to the console.
+                                //
+                                lastWasCR = false;
+                            }
                             else
                             {
+                                lastWasCR = b == 0x0d;
                                 _rxQueue.Enqueue(b);
                             }
                             break;

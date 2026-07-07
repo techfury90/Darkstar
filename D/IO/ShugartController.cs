@@ -38,7 +38,7 @@ namespace D.IO
     /// Implements the hardware end of the Shugart disk controller, currently only supplying the logic
     /// for an SA1000-style drive.
     /// </summary>
-    public class ShugartController
+    public class ShugartController : IDiskController
     {
         public ShugartController(DSystem system, SA1000Drive drive)
         {
