@@ -205,8 +205,12 @@ namespace D.CP
     /// </summary>
     public class Microinstruction
     {
+        /// <summary>The raw 48-bit microword this instruction was decoded from.</summary>
+        public readonly ulong Word;
+
         public Microinstruction(ulong word)
         {
+            Word = word;
             rA =                (int)((word & 0xf00000000000) >> 44);
             rB =                (int)((word & 0x0f0000000000) >> 40);
             aS =      (AluSourcePair)((word & 0x00e000000000) >> 37);

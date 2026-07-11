@@ -31,7 +31,7 @@ namespace D.IOP
     /// <summary>
     /// Encapsulates the entirety of the IOP hardware.
     /// </summary>
-    public class IOProcessor
+    public class IOProcessor : IIOProcessor
     {
         public IOProcessor(DSystem system)
         {

@@ -259,3 +259,10 @@ paket-files/
 # Python Tools for Visual Studio (PTVS)
 __pycache__/
 *.pyc
+
+# Dove/6085 bring-up: copyrighted Xerox firmware ROMs + EEPROM dumps + museum-derived
+# reference docs are runtime inputs, not source -- keep them out of the repo.
+dove_build_kit/
+
+# Scratch operator-question relay notes from the Dove bring-up sessions.
+OPERATOR_QUESTIONS_*.md

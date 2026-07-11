@@ -1,0 +1,200 @@
+/*
+    BSD 2-Clause License
+
+    Copyright Vulcan Inc. 2017-2018 and Living Computer Museum + Labs 2018
+    All rights reserved.
+
+    Redistribution and use in source and binary forms, with or without
+    modification, are permitted provided that the following conditions are met:
+
+    * Redistributions of source code must retain the above copyright notice, this
+      list of conditions and the following disclaimer.
+
+    * Redistributions in binary form must reproduce the above copyright notice,
+      this list of conditions and the following disclaimer in the documentation
+      and/or other materials provided with the distribution.
+
+    THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS"
+    AND ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+    IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
+    DISCLAIMED.IN NO EVENT SHALL THE COPYRIGHT HOLDER OR CONTRIBUTORS BE LIABLE
+    FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+    DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR
+    SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER
+    CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
+    OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
+    OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
+*/
+
+using System;
+using System.IO;
+
+namespace D.IOP
+{
+    /// <summary>
+    /// The Dove IOP's physical memory bus (IOP-TR §3.1).  Decodes:
+    ///
+    ///   0x00000 - 0x03FFF   Local SRAM  (16 KB, LMCS/LCS')  -- IVT, kernel data, ALL
+    ///                       handler stacks; private, NOT aliased into DRAM.
+    ///   0xFC000 - 0xFFFFF   Local EPROM (16 KB, UMCS/UCS')  -- boot ROM, reset 0xFFFF0
+    ///   0x04000 - 0xFBFFF   main system DRAM, windowed through 8 map registers
+    ///                       (E018-E01F, IOP's regs 8-15): each covers a 128 KB page,
+    ///                       phys = (mapreg[N] << 17) | (IOPlinear & 0x1FFFF).
+    ///
+    /// With the boot ROM's OUT 0xE018,0x05 (MapReg8=5, never changed), IOP linear
+    /// 0x4000..0x1FFFF = physical DRAM byte 0xA0000+L -- so the IORegion at IOP linear
+    /// 0x4000 = phys 0xA4000 = the CP's real word 0x52000, the SAME bytes.  RAM-Opie code
+    /// at IOP 0x10000+ = phys 0xB0000+.  Everything except the 16 KB SRAM and the EPROM
+    /// is the one shared DRAM array; there is NO separate mid-SRAM window.
+    /// </summary>
+    public class DoveIOPMemory : IPhysicalMemory
+    {
+        public const int EpromBase = 0xFC000;
+        public const int EpromSize = 0x4000;    // 16 KB
+        public const int SramBase = 0x00000;
+        public const int SramSize = 0x4000;     // 16 KB
+        public const int SystemSize = 0x400000; // 4 MB system DRAM backing
+
+        public DoveIOPMemory(string romPath)
+        {
+            _rom = new byte[EpromSize];
+            LoadRom(romPath);
+
+            _sram = new byte[SramSize];
+
+            // Backing store for the system DRAM that the IOP map window relocates
+            // into (and that the display DMA scans out of).  4 MB covers the real
+            // 3.7 MB configuration plus map-frame headroom.
+            _system = new byte[SystemSize];
+
+            for (int i = 0; i < _mapRegisters.Length; i++) _mapRegisters[i] = NilMapData;
+        }
+
+        public byte ReadByte(int address)
+        {
+            address &= 0xFFFFF;
+
+            if (address >= EpromBase)
+            {
+                return _rom[address - EpromBase];
+            }
+            if (address < SramBase + SramSize)
+            {
+                return _sram[address - SramBase];
+            }
+
+            int sys = TranslateMap(address);
+            return sys < 0 ? (byte)0xFF : _system[sys];
+        }
+
+        public void WriteByte(int address, byte value)
+        {
+            address &= 0xFFFFF;
+
+            if (address >= EpromBase)
+            {
+                // EPROM: read-only.
+                return;
+            }
+            if (address < SramBase + SramSize)
+            {
+                if (OnSramWrite != null) OnSramWrite(address, value);
+                _sram[address - SramBase] = value;
+                return;
+            }
+
+            int sys = TranslateMap(address);
+            if (sys >= 0)
+            {
+                // Diagnostic: track the vacant-stamp writes (high byte 0x60) into the map storage
+                // [0x80000,0xA0000) -- to see whether the fill crosses the 64KB boundary at 0x90000.
+                if (value == 0x60 && sys >= 0x80000 && sys < 0xA0000)
+                {
+                    MapStampCount++;
+                    if (sys < MapStampMinSys) MapStampMinSys = sys;
+                    if (sys > MapStampMaxSys) MapStampMaxSys = sys;
+                    if (sys >= 0x90000) MapStampSeg2++;
+                }
+                _system[sys] = value;
+            }
+        }
+
+        public long MapStampCount, MapStampSeg2;
+        public int MapStampMinSys = int.MaxValue, MapStampMaxSys = -1;
+
+        /// <summary>
+        /// Relocate an 80186 address through the IOP window map registers (8-15).
+        /// The 1 MB space is 8 pages of 128 KB; page p's register holds a 7-bit
+        /// frame that replaces A17-A23, placing the page anywhere in system DRAM.
+        /// Returns -1 for an unmapped (nil) page.
+        /// </summary>
+        private int TranslateMap(int address)
+        {
+            int page = (address >> 17) & 7;
+            byte reg = _mapRegisters[8 + page];
+            if (reg == NilMapData) return -1;
+            return (((reg & 0x7F) << 17) | (address & 0x1FFFF)) & (SystemSize - 1);
+        }
+
+        /// <summary>
+        /// Read a word directly from system/display DRAM by byte address, bypassing
+        /// the IOP window map.  Used by the display DMA to scan the bitmap that the
+        /// firmware wrote (via its map window) at bitMapOrg.
+        /// </summary>
+        public ushort ReadDisplayWord(int byteAddr)
+        {
+            byteAddr &= (SystemSize - 1);
+            int hi = (byteAddr + 1) & (SystemSize - 1);
+            return (ushort)(_system[byteAddr] | (_system[hi] << 8));
+        }
+
+        public ushort ReadWord(int address)
+        {
+            return (ushort)(ReadByte(address) | (ReadByte(address + 1) << 8));
+        }
+
+        public void WriteWord(int address, ushort value)
+        {
+            WriteByte(address, (byte)value);
+            WriteByte(address + 1, (byte)(value >> 8));
+        }
+
+        /// <summary>Set one of the 16 map registers (E010-E01F); regs 8-15 are the IOP window.</summary>
+        public void SetMapRegister(int index, byte value)
+        {
+            _mapRegisters[index & 0xF] = value;
+        }
+
+        public byte GetMapRegister(int index)
+        {
+            return _mapRegisters[index & 0xF];
+        }
+
+        /// <summary>Raw system/display DRAM backing (for diagnostics / VRAM dumps).</summary>
+        public byte[] SystemRaw { get { return _system; } }
+
+        /// <summary>Diagnostic hook fired on every SRAM byte write (address, value).</summary>
+        public System.Action<int, byte> OnSramWrite;
+
+        private void LoadRom(string romPath)
+        {
+            using (FileStream fs = new FileStream(romPath, FileMode.Open, FileAccess.Read))
+            {
+                if (fs.Length != EpromSize)
+                {
+                    throw new InvalidOperationException(
+                        String.Format("Dove boot ROM {0} has unexpected size 0x{1:X} (expected 0x{2:X})",
+                            romPath, fs.Length, EpromSize));
+                }
+                fs.Read(_rom, 0, EpromSize);
+            }
+        }
+
+        private const byte NilMapData = 0xFF;
+
+        private readonly byte[] _rom;
+        private readonly byte[] _sram;
+        private readonly byte[] _system;
+        private readonly byte[] _mapRegisters = new byte[16];
+    }
+}

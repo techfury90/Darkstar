@@ -40,7 +40,18 @@ namespace D
     {
         Windows,
         Unix
-    }    
+    }
+
+    /// <summary>
+    /// Which Xerox workstation Darkstar emulates.  Selects the IOP (8085 vs 80186),
+    /// the CP variant, and the peripheral set.  Daybreak/Daisy share the Dove IOP.
+    /// </summary>
+    public enum MachineType
+    {
+        DLion,      // Xerox 8010 "Star" / Dandelion -- the original Darkstar target
+        Daybreak,   // Xerox 6085 / Daybreak / "Dove"
+        Daisy,      // Daisy -- shares the Dove IOP subsystem
+    }
 
     /// <summary>
     /// Encapsulates user-configurable settings.  To be enhanced.
@@ -118,6 +129,18 @@ namespace D
         /// What kind of system we're running on.  (Not technically configurable.)
         /// </summary>
         public static PlatformType Platform;
+
+        /// <summary>
+        /// Which workstation to emulate (DLion by default; Daybreak/Daisy select the
+        /// Dove 80186 IOP).
+        /// </summary>
+        public static MachineType MachineType = MachineType.DLion;
+
+        /// <summary>
+        /// Path to the Dove IOP boot ROM (16 KB, loads at 0xFC000).  Used only when
+        /// MachineType is Daybreak/Daisy.
+        /// </summary>
+        public static string DoveBootRom = string.Empty;
 
         /// <summary>
         /// System memory size, in KW.
@@ -477,6 +500,12 @@ namespace D
                                     case "AltBootValues":
                                         {
                                             field.SetValue(null, Enum.Parse(typeof(AltBootValues), value, true));
+                                        }
+                                        break;
+
+                                    case "MachineType":
+                                        {
+                                            field.SetValue(null, Enum.Parse(typeof(MachineType), value, true));
                                         }
                                         break;
                                 }

@@ -1,0 +1,395 @@
+/*
+    BSD 2-Clause License
+
+    Copyright Vulcan Inc. 2017-2018 and Living Computer Museum + Labs 2018
+    All rights reserved.
+*/
+
+using System;
+using System.Collections.Generic;
+using D.IO;
+
+namespace D.IOP
+{
+    /// <summary>
+    /// Intel 8272A / NEC uPD765 floppy-disk controller, as wired on the Dove/6085
+    /// IOP (IOP-TR section 7).  Presents the programmer-visible registers to the
+    /// 80186:
+    ///   0x50  Main Status Register (read-only)   -- A0=0
+    ///   0x52  Data Register (command/result FIFO) -- A0=1
+    ///   0x54  DMA data port (execution-phase byte stream on DMA channel 0)
+    /// plus reset via the reset-control register (0xC0 bit 2) and the shared IOP
+    /// control register ("Port80", 0x80: motor / drive-select / AllowTmrTC).
+    ///
+    /// The controller runs the standard three-phase protocol -- Command (host
+    /// writes N opcode/parameter bytes), Execution (data transfer, DMA), Result
+    /// (host reads the status bytes) -- and raises INT on the slave 8259 IR4 at the
+    /// end of each read/write and each async seek/recalibrate.  The 9229 data
+    /// separator is analog-only and modelled as a no-op (the media layer holds
+    /// already-decoded bytes).
+    /// </summary>
+    public class I8272
+    {
+        // ---- Main Status Register bits (Fig 7.7). ----
+        private const int RQM = 0x80;   // request for master (byte ready)
+        private const int DIO = 0x40;   // 1 = FDC->CPU (result), 0 = CPU->FDC (command)
+        private const int NDM = 0x20;   // non-DMA execution
+        private const int CB  = 0x10;   // controller busy
+
+        private enum Phase { Command, Execution, Result }
+        private Phase _phase = Phase.Command;
+
+        private readonly byte[] _cmd = new byte[9];
+        private int _cmdLen, _cmdIdx;
+        private readonly byte[] _result = new byte[7];
+        private int _resLen, _resIdx;
+
+        private bool _int;                 // INT pin -> slave 8259 IR4
+        private int _presentCyl;           // PCN, current head position
+        private byte _st0;                 // last ST0 for Sense Interrupt Status
+        private int _resetSenses;          // pending post-reset drive-status senses
+        private bool _seekPending;         // a seek/recalibrate INT awaits Sense Int Status
+
+        // Specify parameters (retained across reset per the manual).
+        private byte _srtHut, _hltNd;
+
+        // Execution-phase data (Read Data / Read ID).
+        private byte[] _execData;
+        private int _execIdx;
+
+        /// <summary>Optional attached media: 4 double-sided drives (IMD images).</summary>
+        public FloppyDisk[] Drives = new FloppyDisk[4];
+
+        // No constructor reset: the controller powers up idle (RQM=1, no INT).  The
+        // boot driver issues the explicit 0xC0-bit2 reset when it wants the
+        // drive-status senses + reset interrupt.
+
+        /// <summary>INT pin state -> drive slave 8259 IR4.</summary>
+        public bool Interrupt { get { return _int; } }
+
+        /// <summary>
+        /// When set, Read Data drives the execution-phase byte stream through this
+        /// callback (the 80186 DMA channel 0 → main memory) instead of leaving it for
+        /// port-0x54 reads, then the transfer terminates and the result/INT fire.
+        /// </summary>
+        public System.Func<byte[], int> DmaOut;
+
+        /// <summary>Hard reset (reset-control-register bit 2 low): FDC -> idle, then
+        /// posts a drive-status interrupt for each of the 4 drives.  The last Specify
+        /// is NOT cleared (manual section 7.3.2).</summary>
+        public int ResetCount;
+
+        public void Reset()
+        {
+            ResetCount++;
+            _phase = Phase.Command;
+            _cmdIdx = _cmdLen = _resIdx = _resLen = 0;
+            _execData = null; _execIdx = 0;
+            _presentCyl = 0;
+            _resetSenses = 4;      // the reset routine senses all 4 drives until ST0=80H
+            _seekPending = false;
+            _int = true;           // FDC asserts INT after reset
+        }
+
+        // ---- Register access ----
+
+        /// <summary>Read the Main Status Register (port 0x50).</summary>
+        public byte ReadMainStatus()
+        {
+            int s = RQM;
+            if (_phase == Phase.Result) s |= DIO | CB;
+            else if (_phase == Phase.Execution) s |= CB | DIO;   // exec data reads FDC->CPU
+            else if (_cmdIdx > 0) s |= CB;                       // mid-command
+            return (byte)s;
+        }
+
+        /// <summary>Read the Data Register (port 0x52): a result byte, or an
+        /// execution byte in non-DMA mode.</summary>
+        public byte ReadData()
+        {
+            if (_phase == Phase.Result)
+            {
+                if (_resIdx == 0) _int = false;   // reading the result clears INT
+                byte b = _result[_resIdx++];
+                if (_resIdx >= _resLen) GoIdle();
+                return b;
+            }
+            if (_phase == Phase.Execution && _execData != null)
+            {
+                byte b = _execIdx < _execData.Length ? _execData[_execIdx] : (byte)0;
+                _execIdx++;
+                if (_execIdx >= _execData.Length) FinishExecution();
+                return b;
+            }
+            return 0xFF;
+        }
+
+        /// <summary>Read a byte through the DMA data port (0x54) during execution.</summary>
+        public byte ReadDmaData()
+        {
+            if (_phase == Phase.Execution && _execData != null)
+            {
+                byte b = _execIdx < _execData.Length ? _execData[_execIdx] : (byte)0;
+                _execIdx++;
+                if (_execIdx >= _execData.Length) FinishExecution();
+                return b;
+            }
+            return 0xFF;
+        }
+
+        /// <summary>Terminal count (from 80186 timer 1) ends the current transfer.</summary>
+        public void TerminalCount()
+        {
+            if (_phase == Phase.Execution) FinishExecution();
+        }
+
+        /// <summary>Write the Data Register (port 0x52): the next command byte.</summary>
+        public void WriteData(byte v)
+        {
+            if (_phase != Phase.Command) return;   // ignore during exec/result
+
+            if (_cmdIdx == 0)
+            {
+                _cmd[0] = v;
+                _cmdLen = CommandBytes(v);
+                _cmdIdx = 1;
+            }
+            else if (_cmdIdx < _cmd.Length)
+            {
+                _cmd[_cmdIdx++] = v;
+            }
+
+            if (_cmdIdx >= _cmdLen) Execute();
+        }
+
+        // ---- Command byte counts (App B / NumberOfFDCCommandBytes) ----
+        private static int CommandBytes(byte opcode)
+        {
+            switch (opcode & 0x1F)
+            {
+                case 0x02: return 9;   // Read a Track
+                case 0x03: return 3;   // Specify
+                case 0x04: return 2;   // Sense Drive Status
+                case 0x05: return 9;   // Write Data
+                case 0x06: return 9;   // Read Data
+                case 0x07: return 2;   // Recalibrate
+                case 0x08: return 1;   // Sense Interrupt Status
+                case 0x09: return 9;   // Write Deleted Data
+                case 0x0A: return 2;   // Read ID
+                case 0x0C: return 9;   // Read Deleted Data
+                case 0x0D: return 6;   // Format a Track
+                case 0x0F: return 3;   // Seek
+                case 0x11: case 0x19: case 0x1D: return 9;   // Scan
+                default: return 1;     // Invalid
+            }
+        }
+
+        /// <summary>Optional diagnostic log of executed commands.</summary>
+        public System.Collections.Generic.List<string> Log;
+
+        /// <summary>Diagnostic counters (total across the whole run, uncapped).</summary>
+        public long CommandCount;
+        public long ReadCount;
+        /// <summary>Last Read's cyl/head/sector, for trajectory tracing.</summary>
+        public int LastReadC = -1, LastReadH = -1, LastReadR = -1;
+
+        private static readonly string[] Names = new string[32] {
+            "?","?","ReadTrack","Specify","SenseDrive","Write","Read","Recalibrate",
+            "SenseInt","WriteDel","ReadID","?","ReadDel","Format","?","Seek",
+            "?","ScanEq","?","?","?","?","?","?","?","ScanLo","?","?","?","ScanHi","?","?" };
+
+        // ---- Execution ----
+        private void Execute()
+        {
+            int op = _cmd[0] & 0x1F;
+            CommandCount++;
+            if (op == 0x06) { ReadCount++; LastReadC = _cmd[2]; LastReadH = _cmd[3]; LastReadR = _cmd[4]; }
+            if (Log != null && Log.Count < 60)
+                Log.Add(Names[op] + "(" + BitConverter.ToString(_cmd, 0, _cmdLen) + ")");
+            int unit = _cmd.Length > 1 ? (_cmd[1] & 0x03) : 0;
+            int head = _cmd.Length > 1 ? ((_cmd[1] >> 2) & 0x01) : 0;
+
+            switch (op)
+            {
+                case 0x03:   // Specify -- no result, no INT
+                    _srtHut = _cmd[1];
+                    _hltNd = _cmd[2];
+                    GoIdle();
+                    break;
+
+                case 0x07:   // Recalibrate -- head to track 0, async INT, no result
+                    _presentCyl = 0;
+                    _st0 = (byte)(0x20 | unit);           // SeekEnd | drive
+                    _seekPending = true;
+                    _int = true;
+                    GoIdle();
+                    break;
+
+                case 0x0F:   // Seek -- head to NCN, async INT, no result
+                    _presentCyl = _cmd[2];
+                    _st0 = (byte)(0x20 | (head << 2) | unit);
+                    _seekPending = true;
+                    _int = true;
+                    GoIdle();
+                    break;
+
+                case 0x08:   // Sense Interrupt Status -- result ST0, PCN
+                    _int = false;
+                    if (_resetSenses > 0)
+                    {
+                        int drv = 4 - _resetSenses;
+                        _result[0] = (byte)(0xC0 | drv);  // IC=ReadyChanged | drive
+                        _result[1] = 0x00;
+                        _resetSenses--;
+                        if (Log != null && Log.Count > 0) Log[Log.Count - 1] += "->ST0=" + _result[0].ToString("X2");
+                        StartResult(2);
+                    }
+                    else if (_seekPending)
+                    {
+                        _result[0] = _st0;
+                        _result[1] = (byte)_presentCyl;
+                        _seekPending = false;
+                        if (Log != null && Log.Count > 0) Log[Log.Count - 1] += "->ST0=" + _result[0].ToString("X2");
+                        StartResult(2);
+                    }
+                    else
+                    {
+                        // No interrupt pending: the 8272 treats this like an invalid
+                        // command and returns ONLY ST0=0x80 (one result byte), not two.
+                        _result[0] = 0x80;
+                        if (Log != null && Log.Count > 0) Log[Log.Count - 1] += "->ST0=80(1b)";
+                        StartResult(1);
+                    }
+                    break;
+
+                case 0x04:   // Sense Drive Status -- result ST3
+                    _result[0] = St3(unit, head);
+                    StartResult(1);
+                    break;
+
+                case 0x0A:   // Read ID -- result ST0,ST1,ST2,C,H,R,N
+                    {
+                        FloppyDisk d = Drives[unit];
+                        Track t = (d != null && _presentCyl < 77) ? d.GetTrack(_presentCyl, head) : null;
+                        byte st1 = (t != null) ? (byte)0 : (byte)0x01;   // MissingAddressMark if no track
+                        _st0 = (byte)((t != null ? 0x00 : 0x40) | (head << 2) | unit);
+                        _result[0] = _st0; _result[1] = st1; _result[2] = 0;
+                        _result[3] = (byte)_presentCyl; _result[4] = (byte)head;
+                        _result[5] = 1;                                  // R = first sector
+                        _result[6] = (byte)(t != null ? SizeCode(t.SectorSize) : 2);
+                        _int = true;
+                        StartResult(7);
+                    }
+                    break;
+
+                case 0x06:   // Read Data -- DMA the sector(s), then result
+                    ReadData(unit, head);
+                    break;
+
+                default:     // Invalid command
+                    _st0 = 0x80;
+                    _result[0] = 0x80;
+                    StartResult(1);
+                    break;
+            }
+        }
+
+        // Cmd bytes for Read: C(2) H(3) R(4) N(5) EOT(6) GPL(7) DTL(8).
+        private void ReadData(int unit, int head)
+        {
+            int c = _cmd[2], r = _cmd[4], n = _cmd[5], eot = _cmd[6];
+            FloppyDisk d = Drives[unit];
+            Track t = (d != null && c < 77) ? d.GetTrack(c, head) : null;
+
+            if (t == null)
+            {
+                // No track/media: abnormal termination, missing address mark.
+                _st0 = (byte)(0x40 | (head << 2) | unit);   // IC=AbnormalTermination
+                SetReadResult(0x01, 0x00, c, head, r, n);   // ST1 MissingAddressMark
+                _int = true;
+                StartResult(7);
+                return;
+            }
+
+            // Gather sectors R..EOT on this track into the execution buffer; the
+            // DMA/TC handshake decides how many bytes are actually consumed.
+            int count = (eot >= r) ? (eot - r + 1) : 1;
+            var buf = new List<byte>();
+            for (int i = 0; i < count; i++)
+            {
+                Sector sec = null;
+                try { sec = d.GetSector(c, head, (r + i) - 1); } catch { }
+                if (sec != null) buf.AddRange(sec.Data);
+            }
+            _execData = buf.ToArray();
+            _execIdx = 0;
+            _phase = Phase.Execution;
+
+            _pendC = (byte)c; _pendH = (byte)head; _pendN = (byte)n; _pendUnit = unit;
+            _readR = r; _readEot = eot;
+
+            // DMA mode: push the transfer to main memory now (bounded by the DMA
+            // count), then terminate with a result that reflects how much was read.
+            if (DmaOut != null)
+            {
+                int sent = DmaOut(_execData);
+                _dmaSent = sent > 0 ? sent : _execData.Length;
+                FinishExecution();
+            }
+        }
+
+        private static byte SizeCode(int bytes)
+        {
+            switch (bytes) { case 128: return 0; case 256: return 1; case 512: return 2;
+                             case 1024: return 3; case 2048: return 4; default: return 2; }
+        }
+
+        private byte _pendR, _pendC, _pendH, _pendN; private int _pendUnit;
+        private int _readR, _readEot, _dmaSent;
+
+        private void FinishExecution()
+        {
+            int secBytes = 128 << (_pendN & 0x07);
+            int secsRead = System.Math.Max(1, (_dmaSent + secBytes - 1) / secBytes);
+            // Result C/H/R = the sector AFTER the last one transferred (8272 spec).
+            int rr = _readR + secsRead;
+            int cc = _pendC, hh = _pendH;
+            if (rr > _readEot) { rr = 1; cc = _pendC + 1; }   // rolled past end-of-track
+            _st0 = (byte)((hh << 2) | _pendUnit);             // normal termination
+            SetReadResult(0x00, 0x00, cc, hh, rr, _pendN);
+            _execData = null; _execIdx = 0; _dmaSent = 0;
+            _int = true;
+            StartResult(7);
+        }
+
+        private void SetReadResult(byte st1, byte st2, int c, int h, int r, int n)
+        {
+            _result[0] = _st0; _result[1] = st1; _result[2] = st2;
+            _result[3] = (byte)c; _result[4] = (byte)h; _result[5] = (byte)r; _result[6] = (byte)n;
+        }
+
+        // ST3 (Sense Drive Status): drive is ready + two-sided; track0 if at cyl 0.
+        private byte St3(int unit, int head)
+        {
+            int s = (head << 2) | unit;
+            FloppyDisk d = Drives[unit];
+            if (d != null) s |= 0x20;         // Ready (media present)
+            s |= 0x08;                        // TwoSided
+            if (_presentCyl == 0) s |= 0x10;  // Track0
+            if (d != null && d.IsWriteProtected) s |= 0x40;
+            return (byte)s;
+        }
+
+        private void StartResult(int len)
+        {
+            _resLen = len; _resIdx = 0;
+            _phase = Phase.Result;
+        }
+
+        private void GoIdle()
+        {
+            _phase = Phase.Command;
+            _cmdIdx = 0; _cmdLen = 0;
+        }
+    }
+}

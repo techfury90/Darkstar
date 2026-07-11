@@ -92,6 +92,18 @@ namespace D
 
             PrintHerald();
 
+            //
+            // Daybreak/Daisy (Dove) currently bring up only the 80186 IOP, headlessly:
+            // the Dove display and CP bridge are not yet implemented, so the machine
+            // cannot run under the (DLion-only) UI.  Branch here before that UI is
+            // created; the DLion path below is unaffected.
+            //
+            if (Configuration.MachineType != MachineType.DLion)
+            {
+                IOP.DoveBringup.Run();
+                return;
+            }
+
             // Cons up a system to run stuff on.
             DSystem system = new DSystem();
             system.Reset();

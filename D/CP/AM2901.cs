@@ -56,6 +56,7 @@ namespace D.CP
         public ushort Q
         {
             get { return _q; }
+            set { _q = value; }
         }
 
         /// <summary>
