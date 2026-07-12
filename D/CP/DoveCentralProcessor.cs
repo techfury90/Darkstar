@@ -534,10 +534,12 @@ namespace D.CP
             {
                 switch (mi.fY)
                 {
-                    case 0x0:   // ClrMPIntIOP: clear the CP->IOP interrupt latch (drops IR5;
-                                // the next SetMPIntIOP then presents a fresh rising edge)
+                    case 0x0:   // ClrMPIntIOP: lower ONLY the CP-side doorbell line (interface spec §3/§8).
+                                // @NOTIFYIOP is a Set->Clr pulse; the Clr just returns the line low so the
+                                // NEXT SetMPIntIOP re-edges.  It must NOT clear the IOP-side IR5 latch --
+                                // that latch is cleared solely by the IOP's IN 0xB0.  (Clearing IR5 here
+                                // kills the germ's own doorbell before the IOP ISR reads it = §8 pitfall #1.)
                         MesaInterruptRequest = false;
-                        if (OnClearMesaInterrupt != null) OnClearMesaInterrupt();
                         Note("ClrMPIntIOP");
                         break;
                     case 0x2:   // ClrIntErr: clear the error/trap latch (the trap code the germ
