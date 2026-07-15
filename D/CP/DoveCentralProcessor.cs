@@ -48,6 +48,8 @@ namespace D.CP
         private int _niaModifier;
         private bool _altUAddr;
         private bool _pc16;
+        private bool _lastRefWasMap;   // OQ52: was the last c1 memory ref a Map<- (translate)?  <-MD then returns the
+                                       // DECODED REAL PAGE (map's translation output), not a memory word (TechRef §2.5.3.2).
         private bool _mInt;             // IOP->CP doorbell (rInt bit 14).  A MesaIntBr source.
         private bool _timerInt;         // CP 8254 counter0 output (rInt bit 15 = the ~50ms Pilot
                                         // scheduler heartbeat).  Also a MesaIntBr source.
@@ -127,10 +129,29 @@ namespace D.CP
         public List<string> QLog;     // if set, logs every Q-register change
         public List<string> R5Log;    // if set, logs R5(PC)/RH5(rhPC) landing a code-address value
         public List<string> WriteLog; // if set, rolling log of MDR<- stores (frozen at the @666 wait)
+        public List<string> IORgnWriteLog; // TEMP: watch stores of the IORegion base pointer (0xC000 right / 0xE200 wrong)
         public List<string> ReadLog;  // if set, rolling log of <-MD reads of the IORegion (word >= 0x50000)
         public List<string> OpLog;    // if set, logs each dispatched mesa opcode (IBDisp ibFront)
+        public int OpLogFrom = 1700, OpLogTo = 1830;  // CPi window for OpLog
+        public List<string> LinkLog;  // TEMP: L2/link-register dump at XFER-entry LoadIBs (xcE/xcO parity diag)
+        public List<string> IbLog; public int IbLogFrom = 0x7FFFFFFF, IbLogTo = 0;  // TEMP: IB _ib[0]/refill trace
+        public List<string> LgcLog;  // TEMP: LGC global-frame resolution (UvG virtual addr -> real page); frame lands vp0x09/real0x489 wrong (should vp0x0B/real0x48B)
+        public List<string> LinkVecWriteLog;  // TEMP: writes to link-vector candidate pages real 0x489/0x48A/0x48B + BLTL dest 0x580 (find where the germ builds its EFC link vector)
+        public List<string> CaptureLog;        // TEMP: every aD=2/3 address-capture (find the field that separates RefillE @400 real MAR<- from legit Map<- captures)
+        public List<string> XferChainLog;      // OQ52: register-writing MAR<- microwords near the wedge (Rold/Y/F/splice + candidate write-back models)
+        public long XferTraceFrom = 0;         // start capturing XferChainLog after this CPi
+        public List<string> MapArrRead;        // OQ54: every CP-side <-MD of the map array 0x400C0-0x40100 (vp 0xC0..0x100 + vp 0xFF) = GetState[0xFF]/FindStartOfIORegion inputs
+        public List<string> SdReadLog;         // OQ59: every <-MD of the SD trap table (real 0x48200-0x48220) = trap dispatch reading SD[n] handler [gf,pc]; catch the CodeTrap(SD7)->ControlTrap(SD6) escalation
         public List<string> StackLog; // if set, logs stack push/pop with stackP + value (to trace @BLTL arg build)
         public List<string> R0Log;    // if set, logs every R0(TOS) change (to trace TOS<-value / TOS<-STK writes)
+        public List<string> TrapLog;   // TEMP: map-fault gate (XRefBr/XwdDisp) X-bus values in the loop
+        public List<string> SemaLog;   // TEMP: every access to the FloppyQueueSemaphore word (aLOCKMEM xchg trace)
+        public int SemaWord = 0x58000; // word to trace for SemaLog
+        public List<string> LoopTrace; // TEMP: one full 0900-loop iteration at microinstruction level
+        public long LoopTraceFrom = 10430575;
+        public List<string> MapReadLog; // TEMP: Map<- references near the IORegion end (aGMF / FindStartOfIORegion)
+        public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
+        private int _escCd;            // countdown of instructions to log after an F8 dispatch
         private bool _writeFrozen;
         public readonly Dictionary<string, long> FuncHits = new Dictionary<string, long>();
         public readonly List<string> Unimplemented = new List<string>();
@@ -256,6 +277,24 @@ namespace D.CP
             int addr = _tpc[_task];
             Microinstruction mi = Fetch(_execBank, addr);
 
+            // TEMP: @ESC alpha-dispatch trace (log the microaddr path after an F8 dispatch).
+            if (_escCd > 0 && EscLog != null)
+            {
+                EscLog.Add("  @" + addr.ToString("X3") + " c" + _cycle + " ib=" + _ibFront.ToString("X2")
+                    + " mar=" + _mar.ToString("X5") + " mapA=" + _mapA.ToString("X") + " X=" + _xBus.ToString("X4")
+                    + " R0=" + _alu.R[0].ToString("X4") + " R1=" + _alu.R[1].ToString("X4") + " R2=" + _alu.R[2].ToString("X4")
+                    + "  " + mi.Disassemble(-1));
+                _escCd--;
+            }
+
+            // TEMP: capture one full 0900-loop iteration at the microinstruction level.
+            if (LoopTrace != null && InstructionCount >= LoopTraceFrom && InstructionCount < LoopTraceFrom + 520)
+                LoopTrace.Add("@" + addr.ToString("X3") + " c" + _cycle + " CPi=" + InstructionCount
+                    + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " ibF=" + _ibFront.ToString("X2")
+                    + " Q=" + _alu.Q.ToString("X4") + " X=" + _xBus.ToString("X4") + " Y=" + _yBus.ToString("X4") + " mar=" + _mar.ToString("X5")
+                    + " R[0-7]=" + _alu.R[0].ToString("X4") + "," + _alu.R[1].ToString("X4") + "," + _alu.R[2].ToString("X4") + "," + _alu.R[3].ToString("X4") + "," + _alu.R[4].ToString("X4") + "," + _alu.R[6].ToString("X4") + "," + _alu.R[7].ToString("X4")
+                    + "  " + mi.Disassemble(-1));
+
             if (Trace != null && Trace.Count < 4000)
                 Trace.Add("[" + _execBank + ":" + addr.ToString("X3") + "] c" + _cycle
                     + " fSfY=" + (int)mi.fSfY + " fY=" + mi.fY.ToString("X") + " fSfZ=" + (int)mi.fSfZ + " fZ=" + mi.fZ.ToString("X")
@@ -303,6 +342,8 @@ namespace D.CP
                         _xBus = _ibFront;
                         break;
                     case 0xD:   // <-ib (front, then advance: refill ibFront from IB and decrement ibPtr)
+                        if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
+                            IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " <-ib reads front=" + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " (next front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + ") ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]" + (_ibPtr == IBState.Empty ? "  <<< READ FROM EMPTY (DLion would trap/refill)" : ""));
                         _xBus = _ibFront;
                         _ibFront = _ib[((int)_ibPtr) & 0x1];
                         _ibPtr = _nextIBPtr[(int)_ibPtr];
@@ -362,12 +403,33 @@ namespace D.CP
             // <-MD : memory read result appears on the X bus in C3.
             if (mi.mem && _cycle == 3 && ReadWord != null)
             {
-                _xBus = ReadWord(_mar);
+                _xBus = ReadWord(_mar);   // (OQ52: reverted <-MD=decode(mw) — germ reads RAW map word + splices in ucode)
+                // TEMP: GetHandlerIORegionPtr:126 reads IORegion.segments[16] at IORegion+0x22 words.
+                // Real segment table is at CP word 0x52000 (real 0x520 = IORegion vp 0xC0); segments[16] at 0x52022.
+                // If this fires, GetHandlerIORegionPtr ran on the CORRECT IORegion. If it never fires, IORegion is the default.
+                if (IORgnWriteLog != null && IORgnWriteLog.Count < 70 && _mar >= 0x52000 && _mar <= 0x52040)
+                    IORgnWriteLog.Add("SEGTBL read word " + _mar.ToString("X5") + " = " + _xBus.ToString("X4") + " @" + addr.ToString("X3") + " CPi=" + InstructionCount);
                 if (ReadLog != null && !_writeFrozen && _mar >= 0x50000)   // reads of the IORegion/high mailbox
                 {
                     ReadLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " <-MD word " + _mar.ToString("X5") + " = " + _xBus.ToString("X4"));
                     if (ReadLog.Count > 40) ReadLog.RemoveAt(0);
                 }
+                // OQ54: map-array reads = GetState inputs.  vp = _mar - 0x40000; decode realpage = ((w&0x1F)<<8)|(w>>8).
+                if (MapArrRead != null && _mar >= 0x400C0 && _mar <= 0x40101 && MapArrRead.Count < 300)
+                {
+                    int rp = ((_xBus & 0x1F) << 8) | (_xBus >> 8);
+                    MapArrRead.Add("<-MD map[vp 0x" + (_mar - 0x40000).ToString("X3") + "] = " + _xBus.ToString("X4") + " -> real 0x" + rp.ToString("X3") + " @" + addr.ToString("X3") + " CPi=" + InstructionCount);
+                }
+                // OQ59: SD trap-table reads (real 0x48200+, SD[n].gf@+2n, SD[n].pc@+2n+1). Watch the trap dispatch
+                // read SD[7](sCodeTrap 0x4820E/F) then escalate to SD[6](sControlTrap 0x4820C/D)=[0B5D,06F4]=GermWorldError.
+                if (SdReadLog != null && _mar >= 0x48200 && _mar <= 0x48220 && SdReadLog.Count < 200)
+                {
+                    int slot = (_mar - 0x48200) / 2; string field = ((_mar & 1) == 0) ? "gf" : "pc";
+                    SdReadLog.Add("<-MD SD[" + slot.ToString("X2") + "]." + field + " (real " + _mar.ToString("X5") + ") = " + _xBus.ToString("X4") + " @" + addr.ToString("X3") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " CPi=" + InstructionCount);
+                }
+                if (SemaLog != null && _mar == SemaWord && SemaLog.Count < 70)
+                    SemaLog.Add("@" + addr.ToString("X3") + " <-MD word " + _mar.ToString("X5") + " -> Xbus " + _xBus.ToString("X4")
+                        + " (R0/TOS=" + _alu.R[0].ToString("X4") + " T=" + _alu.R[mi.rA].ToString("X4") + ") CPi=" + InstructionCount + "  " + mi.Disassemble(-1));
             }
 
             // ---- EARLY L-rotate: the shifter feeds the 2901's D input ----
@@ -427,6 +489,19 @@ namespace D.CP
                             // (MAR<- never translates -- the boot path relies on that.)
                             int va = (_rh[mi.rB] << 16) | _yBus;
                             _mar = ((_mapA & 0xF) << 16) | ((va >> 8) & 0xFFFF);
+                            _lastRefWasMap = true;   // OQ52: this c1 ref is a Map<-(translate) -> <-MD returns the decoded real page
+                            int _vpg = (va >> 8) & 0xFFFF;
+                            if (LgcLog != null && _vpg <= 0x0F && LgcLog.Count < 40 && ReadWord != null)
+                            {
+                                int mw = ReadWord(0x40000 + _vpg); int rp = ((mw & 0x1F) << 8) | (mw >> 8);
+                                LgcLog.Add("Map<- va=" + va.ToString("X6") + " (RH" + mi.rB + "=" + _rh[mi.rB].ToString("X2") + " Y=" + _yBus.ToString("X4") + ") vp=0x" + _vpg.ToString("X3") + " -> mapword " + mw.ToString("X4") + " -> real 0x" + rp.ToString("X3") + " @" + addr.ToString("X3") + " CPi=" + InstructionCount);
+                            }
+                            // OQ56: catch EVERY aGMF (GetState) @8E5 for all vpages, tagged with call-site R5/RH5:
+                            // distinguishes FindStart's GetState[0xFF] (baked arg 0xFF -> vp 0xFF) from
+                            // GetRealPage[PageFromLongPointer] (computed arg -> vp 0x100). Which sites & which pages?
+                            if (MapReadLog != null && (addr == 0x8E5 || (_vpg >= 0x0C0 && _vpg <= 0x110)) && MapReadLog.Count < 250)
+                                MapReadLog.Add("Map<- @" + addr.ToString("X3") + (addr == 0x8E5 ? "(aGMF)" : "") + " callsite R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " vpage=0x" + _vpg.ToString("X3") + " -> MAR=" + _mar.ToString("X5")
+                                    + " | va=" + va.ToString("X6") + " rh[" + mi.rB + "]=" + _rh[mi.rB].ToString("X2") + " Ybus=" + _yBus.ToString("X4") + " Rold=" + _bOld.ToString("X4") + " CPi=" + InstructionCount);
                             Note("Map<-");
                         }
                         else
@@ -443,28 +518,64 @@ namespace D.CP
                                 : (ushort)((~_bOld) & 0xff00);
                             _marLowSplice = (ushort)((_yBus & 0x00ff) | hi);
                             _mar = ((_rh[mi.rB] & 0xf) << 16) | _marLowSplice;
+                            _lastRefWasMap = false;   // OQ52: this c1 ref is a MAR<-(real) -> <-MD returns the memory word
                             if (MarAccess != null && MarAccess.Count < 4000)
                             { long mc; MarAccess.TryGetValue(_mar, out mc); MarAccess[_mar] = mc + 1; }
                             if (mi.mem && (_alu.PgCarry ^ (((int)mi.aF & 0x1) == 1)))
                             {
                                 _niaModifier |= 0x2;                     // pageCross branch
                             }
-                            // Address-capture (operator: reg <- [rh,offset], e.g. MAR <- Q <- [rhPC,Q+0]):
-                            // a c1 MAR<- that also writes a register captures the SPLICED real address
-                            // (the MAR low-16), not the plain ALU result -- this is how PC ends up holding
-                            // the real code pointer (@AAE Q<-0xB1C6 -> @33F R5<-Q).  aD=0 writes Q; aD 2/3
-                            // write R[rB].  (A c3 <-MD register write instead loads MD, handled above.)
+                            // OQ52: address-capture (working MP-0900 baseline; instrumented below to give the other
+                            // agent this emulator's ACTUAL execution of the XFER-entry ①②③④ chain).  Split-2901
+                            // write-back (hi|F_low) regressed to MP 0200 = same collapse as removing the aD=2 capture:
+                            // for aD=3 it EQUALS the capture (both swallow the byte carry), so it doesn't fix the
+                            // aD=3 swallowed-advance -- confirming the real fix is plain-F-for-all-aD + a correct <-MD.
                             if (mi.aD == 0) _alu.Q = _marLowSplice;
                             else if (mi.aD == 2 || mi.aD == 3) _alu.R[mi.rB] = _marLowSplice;
+                            // XFER-CHAIN TRACE (OQ52): dump the last N register-writing MAR<- microwords with every
+                            // input the reconciliation needs -- old-rB, Ybus, ALU F, the map-decoded real page for
+                            // this rh, the splice, and what each candidate model would write to the dest register.
+                            if (XferChainLog != null && InstructionCount > XferTraceFrom)
+                            {
+                                if (XferChainLog.Count > 600) XferChainLog.RemoveRange(0, 300);   // rolling, amortized O(1)
+                                int fAlu = (mi.aD == 0) ? _alu.Q : _alu.R[mi.rB];   // AM2901 already wrote F here
+                                XferChainLog.Add(
+                                    "@" + addr.ToString("X3") + " CPi=" + InstructionCount +
+                                    " aD=" + mi.aD + " aF=" + ((int)mi.aF).ToString("X") + " rB=" + mi.rB +
+                                    " rh[rB]=" + _rh[mi.rB].ToString("X2") + " Rold=" + _bOld.ToString("X4") +
+                                    " Y=" + _yBus.ToString("X4") + " F=" + fAlu.ToString("X4") +
+                                    " splice=" + _marLowSplice.ToString("X4") + " MAR=" + _mar.ToString("X5") +
+                                    " | cap(splice)=" + _marLowSplice.ToString("X4") +
+                                    " plainF=" + fAlu.ToString("X4") +
+                                    " split(hi|Flo)=" + (hi | (fAlu & 0xff)).ToString("X4"));
+                            }
                         }
                         break;
                     case 2:
                         if (WriteWord != null) WriteWord(_mar, _yBus);   // MDR<-
+                        if (LinkVecWriteLog != null && LinkVecWriteLog.Count < 200)
+                        {
+                            // DECISIVE (OQ48): trace the SD-install burst (GermOpsImpl:1099-1102).  SD[sCodeTrap]=SD[7]@real0x4820E
+                            // is NULL while siblings SD[6]@0x4820C / SD[3]@0x48206 are bound.  Does 0x4820E ever get a store,
+                            // and with what value?  Capture real 0x48200-0x48230 (SD table + margin to catch mis-addressed stores).
+                            if (_mar >= 0x48200 && _mar <= 0x48230)
+                                LinkVecWriteLog.Add("SD-W real " + _mar.ToString("X5") + " = " + _yBus.ToString("X4") + " @" + addr.ToString("X3")
+                                    + " R0=" + _alu.R[0].ToString("X4") + " R1=" + _alu.R[1].ToString("X4") + " R2=" + _alu.R[2].ToString("X4") + " R3=" + _alu.R[3].ToString("X4") + " Q=" + _alu.Q.ToString("X4") + " CPi=" + InstructionCount);
+                        }
+                        // TEMP: watch the FindStartOfIORegion write of the IORegion LONG POINTER (LongPointerFromPage[base]).
+                        // base 0xC0 -> 0xC000 (correct), base 0xE2 -> 0xE200 (wrong). Also catch page forms 0x00C0/0x00E2.
+                        // Watch every page-pointer store 0x??00 with high byte 0x80..0xFF (catches IORegion 0x9F00/0xC000/0xE200) — any value, any address, both banks.
+                        if (IORgnWriteLog != null && IORgnWriteLog.Count < 70
+                            && (_yBus & 0x00FF) == 0 && (_yBus >> 8) >= 0x80 && (_yBus >> 8) <= 0xFF)
+                            IORgnWriteLog.Add("PGPTR [bank" + _execBank + "] store word " + _mar.ToString("X5") + " = " + _yBus.ToString("X4") + " @" + addr.ToString("X3") + " CPi=" + InstructionCount);
                         if (WriteLog != null && !_writeFrozen)
                         {
                             WriteLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " MDR<- word " + _mar.ToString("X5") + " = " + _yBus.ToString("X4"));
                             if (WriteLog.Count > 48) WriteLog.RemoveAt(0);
                         }
+                        if (SemaLog != null && _mar == SemaWord && SemaLog.Count < 70)
+                            SemaLog.Add("@" + addr.ToString("X3") + " MDR<- word " + _mar.ToString("X5") + " <- Ybus " + _yBus.ToString("X4")
+                                + " (R0/TOS=" + _alu.R[0].ToString("X4") + ") CPi=" + InstructionCount + "  " + mi.Disassemble(-1));
                         break;
                 }
             }
@@ -507,7 +618,17 @@ namespace D.CP
                         break;
                     case YDispBrFunction.PgCarryBr: if (_alu.PgCarry) _niaModifier |= 1; break;
                     case YDispBrFunction.CarryBr: if (_alu.CarryOut) _niaModifier |= 1; break;
-                    case YDispBrFunction.XRefBr: _niaModifier |= (_xBus & 0x10) >> 4; break;
+                    case YDispBrFunction.XRefBr:
+                        // Map-fault gate: dispatch on the map entry's REFERENCED bit.  On Daybreak the
+                        // hardware map word carries flags at bits 5-7 (writeProtect 0x20, dirty 0x40,
+                        // referenced 0x80) -- NOT the DLion's X[11]/0x10.  The MapFix ORs referenced in
+                        // (`MDR <- Rx or map.referenced`) then retries + re-checks here; testing 0x10
+                        // (mis-ported from the DLion) never cleared for an entry with referenced already
+                        // set (e.g. 0x80C5), so the germ's boot-file inload page-walk MapFix looped
+                        // forever on the same page.  Test 0x0080 so the OK/no-fault branch is taken when
+                        // referenced is present.  (XwdDisp already tests dirty 0x40/writeProtect 0x20.)
+                        _niaModifier |= (_xBus & 0x80) >> 7;
+                        break;
                     case YDispBrFunction.NibCarryBr: if (_alu.NibCarry) _niaModifier |= 1; break;
                     case YDispBrFunction.XDisp: _niaModifier |= (_xBus & 0xf); break;
                     case YDispBrFunction.YDisp: _niaModifier |= (_yBus & 0xf); break;
@@ -515,11 +636,29 @@ namespace D.CP
                         _niaModifier |= (_xBus & 0xc) | (_cycle == 2 ? 0x2 : 0x0) | (_pc16 ? 0x0 : 0x1);
                         break;
                     case YDispBrFunction.YIODisp:
-                        // Ethernet/IO dispatch; the IORegion side isn't modelled yet.
-                        _niaModifier |= (_yBus & 0xc);
-                        Note("YIODisp");
+                        // fY 0xB: on the DAYBREAK this slot is XWtOKDisp -- the map WRITE-permission
+                        // gate (TmMacroTablesDaybreak: XWtOKDisp=11) -- NOT the DLion's YIODisp, which
+                        // reused the same fY code (reused fY slots collide across machines; the port
+                        // kept the DLion meaning).  It feeds BRANCH[upDMap, DMapOK, 0D]: the write
+                        // proceeds (DMapOK) iff the map entry is dirty (0x40) AND not writeProtect
+                        // (0x20); referenced was already guaranteed by XRefBr running first.  Every
+                        // other state -- dirty clear (needs set-dirty) or writeProtect set (protection)
+                        // -- faults to upDMap.  Running this as YIODisp computed a garbage niaModifier
+                        // off the Y bus, so a write to an already-dirty writable page (e.g. 0x80C5) took
+                        // the fault branch, fell into the MapFix set-dirty retry loop, and the germ's
+                        // boot-file inload page-walk never advanced past cGerm 0900.
+                        if ((_xBus & 0x40) != 0 && (_xBus & 0x20) == 0) _niaModifier |= 1;   // -> DMapOK
+                        if (TrapLog != null && InstructionCount > 10400000 && TrapLog.Count < 24)
+                            TrapLog.Add("XWtOKDisp @" + addr.ToString("X3") + " X=" + _xBus.ToString("X4") +
+                                        " INIA=" + mi.INIA.ToString("X3") + " trueINIA=" + (mi.INIA ^ 0x00F).ToString("X3") +
+                                        " (base low nib=" + ((mi.INIA ^ 0x00F) & 0xF).ToString("X") + ", mask0D free bits=" +
+                                        (0x0D & ~((mi.INIA ^ 0x00F) & 0xF)).ToString("X") + ") OK=" + ((_xBus&0x40)!=0 && (_xBus&0x20)==0));
                         break;
-                    case YDispBrFunction.XwdDisp: _niaModifier |= (_xBus & 0x60) >> 5; break;
+                    case YDispBrFunction.XwdDisp:
+                        _niaModifier |= (_xBus & 0x60) >> 5;
+                        if (TrapLog != null && InstructionCount > 10400000 && TrapLog.Count < 30)
+                            TrapLog.Add("XwdDisp @" + addr.ToString("X3") + " X=" + _xBus.ToString("X4") + " &0x60=" + (_xBus&0x60).ToString("X2") + " CPi=" + InstructionCount);
+                        break;
                     case YDispBrFunction.XHDisp: _niaModifier |= ((_xBus & 0x8000) >> 15) | ((_xBus & 0x0800) >> 10); break;
                     case YDispBrFunction.XLDisp: _niaModifier |= (_xBus & 0x1) | ((_xBus & 0x80) >> 6); break;
                     case YDispBrFunction.PgCrOvDisp:
@@ -589,14 +728,29 @@ namespace D.CP
                                 else
                                     _niaModifier |= (_ibPtr == IBState.Empty) ? 0x400 : 0x500;
                                 _niaModType = 2;   // IBRefillTrap
+                                if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
+                                    IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp TRAP ptr=" + _ibPtr + " -> refill vector 0x" + (_niaModifier & 0x700).ToString("X3") + (_ibPtr == IBState.Empty ? " (RefillE)" : " (RefillNE)"));
                             }
                             else
                             {
                                 // Normal dispatch: ibFront replaces INIA[4-7] and ORs INIA[8-11].
-                                if (OpLog != null && OpLog.Count < 200)
-                                    OpLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " OPCODE=0x" + _ibFront.ToString("X2") + " (PC R5=" + _alu.R[5].ToString("X4") + " ibPtr=" + _ibPtr + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "])");
+                                // Log opcodes in the CPi window OR anywhere in Start's code page (RH5=4, R5 0xAE00-0xAEFF = real page 0x4AE)
+                                bool inStartPage = (_rh[5] == 4 && _alu.R[5] >= 0xAE00 && _alu.R[5] < 0xAF00);
+                                if (OpLog != null && OpLog.Count < 400 && ((InstructionCount >= OpLogFrom && InstructionCount < OpLogTo) || inStartPage))
+                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP);
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
+                                // TEMP: trigger the @ESC alpha-dispatch trace on an F8 (zESC) opcode.
+                                if (EscLog != null && _ibFront == 0xF8 && EscLog.Count < 160)
+                                {
+                                    byte alpha = _ib[((int)_ibPtr) & 0x1];
+                                    EscLog.Add("=== F8 (zESC) @" + addr.ToString("X3") + " alpha=0x" + alpha.ToString("X2")
+                                        + " (ibHigh=0x" + ((alpha >> 4) & 0xf).ToString("X") + " ibLow=0x" + (alpha & 0xf).ToString("X")
+                                        + ") ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] ibPtr=" + _ibPtr + " CPi=" + InstructionCount + " ===");
+                                    _escCd = 26;
+                                }
+                                if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
+                                    IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp dispatched " + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " -> advance front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]");
                                 _ibFront = _ib[((int)_ibPtr) & 0x1];
                                 _ibPtr = _nextIBPtr[(int)_ibPtr];   // DecrementIBPtr
                             }
@@ -606,6 +760,16 @@ namespace D.CP
                     case 0x6:   // LoadIB: fill the instruction buffer from the X bus (2 opcode bytes).
                         {
                             bool loadIBPtr1 = (mi.fSfZ == FunctionSelectFZ.fzNorm && mi.fZ == 0x1);
+                            // DIAG: at XFER-entry LoadIBs (xcE has Cin<-pc16 / xcO has IBPtr<-1), dump L2 (=_link[2])
+                            // and all links + pc16 so we can see whether the entry parity comes from pc16 or L2's low bit.
+                            if (false && LinkLog != null && LinkLog.Count < 60 && (invertPc16 || loadIBPtr1))
+                            {
+                                string lk = ""; for (int i = 0; i < 8; i++) lk += _link[i].ToString("X");
+                                LinkLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IB<- fZ=" + mi.fZ.ToString("X")
+                                    + (loadIBPtr1 ? " [IBPtr<-1/xcO]" : "") + (invertPc16 ? " [Cin<-pc16/xcE]" : "")
+                                    + " pc16=" + (_pc16 ? 1 : 0) + " L2=" + _link[2].ToString("X") + "(lo=" + (_link[2] & 1) + ")"
+                                    + " links[0-7]=" + lk + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " X=" + _xBus.ToString("X4"));
+                            }
                             if (loadIBPtr1)
                             {
                                 if (_ibPtr != IBState.Empty)
@@ -634,6 +798,8 @@ namespace D.CP
                                     _ibPtr = IBState.Word;
                                 }
                             }
+                            if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
+                                IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " LoadIB " + (loadIBPtr1 ? "[,,1/odd]" : "[even]") + " X=" + _xBus.ToString("X4") + " -> ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] front=" + _ibFront.ToString("X2") + " ptr=" + _ibPtr + (_ib[0] == 0x37 ? "  <<< _ib[0] STALE 0x37 (empty-path left it)" : ""));
                             Note("LoadIB");
                         }
                         break;
@@ -748,8 +914,17 @@ namespace D.CP
 
             if (mi.LinkAddress != -1)
             {
-                if ((nia & 0x10) == 0) _link[mi.LinkAddress] = nia & 0xf;   // link write
-                else _niaModifier |= _link[mi.LinkAddress];                 // link read
+                // Link write (capture, NIA[7]=0): store the RESOLVED NIA[8-11] = INIA OR latched-DispBr OR
+                // THIS cycle's coincident DispBr (_niaModifier).  The coincident term is essential: an XC2npcDisp
+                // in the same microword (Xfer.mc THe: XC2npcDisp, L2<-L2.TRAPSpc) deposits ~pc16 into the link's
+                // LSB, which a later L2Disp replays to pick xcE/xcO.  Using only `nia` (latched DispBr) dropped it.
+                if ((nia & 0x10) == 0) _link[mi.LinkAddress] = (nia | _niaModifier) & 0xf;   // link write (capture resolved NIA[8-11])
+                else _niaModifier |= _link[mi.LinkAddress];                 // link read (LnDisp) — latched (current-cycle broke germ boot)
+                if (LinkLog != null && mi.LinkAddress == 2 && LinkLog.Count < 80)
+                    LinkLog.Add("L2op @" + addr.ToString("X3") + " CPi=" + InstructionCount + " " + ((nia & 0x10) == 0 ? "WRITE" : "READ ")
+                        + " nia=" + nia.ToString("X3") + " trueINIA=" + trueINIA.ToString("X3") + " latchedMod=" + niaModifier.ToString("X3")
+                        + " curMod=" + _niaModifier.ToString("X3") + " L2now=" + _link[2].ToString("X") + " pc16=" + (_pc16 ? 1 : 0)
+                        + " ~pc16=" + (_pc16 ? 0 : 1) + " fY=" + mi.fY.ToString("X") + " fSfY=" + (int)mi.fSfY);
             }
 
             // Watch: R5(PC) / RH5(rhPC) ever landing a code-address-like value (the XCode-tail signature).
@@ -759,6 +934,10 @@ namespace D.CP
                     R5Log.Add("@" + addr.ToString("X3") + " RH5 " + _rh5old.ToString("X") + "->" + _rh[5].ToString("X") + " (R5=" + _alu.R[5].ToString("X4") + " X=" + _xBus.ToString("X4") + " CPi=" + InstructionCount + ")  " + mi.Disassemble(-1));
                 if (_alu.R[5] != _r5old && _alu.R[5] > 0x0100)
                     R5Log.Add("@" + addr.ToString("X3") + " R5 " + _r5old.ToString("X4") + "->" + _alu.R[5].ToString("X4") + " (RH5=" + _rh[5].ToString("X") + " Y=" + _yBus.ToString("X4") + " CPi=" + InstructionCount + ")  " + mi.Disassemble(-1));
+            }
+            if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo && _alu.R[5] != _r5old)
+            {
+                IbLog.Add("   R5-WRITE @" + addr.ToString("X3") + " CPi=" + InstructionCount + " R5 " + _r5old.ToString("X4") + "->" + _alu.R[5].ToString("X4") + "  " + mi.Disassemble(-1));
             }
 
             InstructionCount++;

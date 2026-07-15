@@ -110,8 +110,9 @@ namespace D.IOP
             {
                 case RegTypeSize:
                     // Controller-type / CRT-size status.  bit1: 1 = gate-array DCM,
-                    // 0 = CMOS DCM/DDC (App A diff #10).  Model the CMOS single-chip
-                    // part at the common 15" size.
+                    // 0 = CMOS DCM/DDC (App A diff #10).  bit0: 0 = 19", 1 = 15".
+                    // _typeSize = 0x00 => CMOS controller + 19" CRT.
+                    TypeSizeReads++;
                     return _typeSize;
 
                 case RegControl:  // DDC status (gate-array only); benign constant
@@ -319,7 +320,8 @@ namespace D.IOP
         private readonly byte[] _reg = new byte[0x800];
         private byte[] _frame;
         private int _displayLines = 0;   // 0 = auto (derive from quadwords/monitor)
-        private byte _typeSize = 0x00;     // CMOS DCM/DDC (bit1=0)
+        private byte _typeSize = 0x00;     // CMOS DCM/DDC (bit1=0), 19" CRT (bit0=0)
+        public long TypeSizeReads = 0;     // TEMP: how many times firmware reads 0xECCC (monitor-size strap)
         private bool _traceRegisters;
         private readonly List<string> _regLog = new List<string>();
     }

@@ -84,7 +84,12 @@ namespace D.IOP
             }
 
             int sys = TranslateMap(address);
-            return sys < 0 ? (byte)0xFF : _system[sys];
+            byte rv = sys < 0 ? (byte)0xFF : _system[sys];
+            // TEMP: log the IOP's access to the whole ProcessorHead FCB header (phys 0xB0000..0xB001F).
+            // Whether the mesa task ever READS fcb.command (0xB0010/11) and dispatches decides the wedge.
+            if (CmdByteLog != null && sys >= 0xB0000 && sys < 0xB0020 && CmdByteLog.Count < 140)
+                CmdByteLog.Add("R  phys=" + sys.ToString("X5") + " -> " + rv.ToString("X2") + " @IOP " + HostClock);
+            return rv;
         }
 
         public void WriteByte(int address, byte value)
@@ -115,9 +120,16 @@ namespace D.IOP
                     if (sys > MapStampMaxSys) MapStampMaxSys = sys;
                     if (sys >= 0x90000) MapStampSeg2++;
                 }
+                if (CmdByteLog != null && sys >= 0xB0000 && sys < 0xB0020 && CmdByteLog.Count < 140)
+                    CmdByteLog.Add("W  phys=" + sys.ToString("X5") + " <- " + value.ToString("X2") + " @IOP " + HostClock);
                 _system[sys] = value;
             }
         }
+
+        /// <summary>TEMP: IOP-side reads/writes of the ProcessorHead FCB header (0xB0000..0xB001F).</summary>
+        public System.Collections.Generic.List<string> CmdByteLog;
+        /// <summary>TEMP: current IOP instruction count, set by the harness for CmdByteLog timestamps.</summary>
+        public long HostClock;
 
         public long MapStampCount, MapStampSeg2;
         public int MapStampMinSys = int.MaxValue, MapStampMaxSys = -1;

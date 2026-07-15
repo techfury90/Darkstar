@@ -345,6 +345,14 @@ namespace D.IOP
                 case 0x52: return _fdc.ReadData();
                 case 0x54: return _fdc.ReadDmaData();
 
+                // i8255 PPI (Burdock/Bindweed umbilical debugger interface): 0x70=Port A, 0x72=Port B,
+                // 0x74=Port C, 0x76=control.  No umbilical is connected, so all inputs read 0 -- in particular
+                // Port C bit3 (outReady) and bit4 (PC4 loopback) are clear, so the ROM's Bindweed debugger-detect
+                // fails (PC4 loopback mismatches + the PC3 IOPAlive poll times out) -> NoDebugger -> StartOPIE.
+                case 0x70: return 0x00;
+                case 0x72: return 0x00;
+                case 0x74: return 0x00;
+
                 case InputPort:
                     // Input port low byte: machine-ID and RS232/modem bits.  b6
                     // (machineIDMask 0x40) = 1 -> Daybreak (6085), 0 -> Daisy; DoveCP.asm
@@ -478,6 +486,11 @@ namespace D.IOP
                 case 0x52: _fdc.WriteData(value); return;
                 case 0x54: return;
 
+                // i8255 PPI (Burdock/Bindweed umbilical): 0x70=Port A out, 0x76=control (mode/BSR).  No umbilical
+                // attached, so writes drive nothing; capture Port A output for debug only.
+                case 0x70: if (DiagUartTxRaw.Count < 40000) DiagUartTxRaw.Add(value); return;
+                case 0x76: return;
+
                 case HostProm:                 // hex LED display (low byte)
                     _led = (ushort)((_led & 0xFF00) | value);
                     RecordLed();
@@ -558,8 +571,10 @@ namespace D.IOP
             }
         }
 
+        public long WcsWordWrites = 0;   // TEMP: count 16-bit OUTs that land in the WCS window (0x8000-0xDFFF)
         public void WriteWord(ushort port, ushort value)
         {
+            if (port >= WcsBase && port <= WcsEnd) WcsWordWrites++;
             if (port == RetraceLatch)
             {
                 // WriteConfigReg (0xD0): drives the 93C46 config EEPROM (CS/clock/DI)
@@ -577,6 +592,15 @@ namespace D.IOP
         /// <summary>Latest and full history of the 4-digit hex LED (WriteLED @ 0x90) = POST progress.</summary>
         public ushort Led { get { return _led; } }
         public List<ushort> LedHistory { get { return _ledHistory; } }
+
+        // ---- Diagnostic RS232 UART (ports 0x70 TX data, 0x72 RX data, 0x74 status, 0x76 control) ----
+        // Used by the microcode-diagnostics disk (130p26403) for its serial console.  Status bit0=RX-ready,
+        // bit3=TX-ready.  We keep TX always ready and capture the transmitted bytes; RX is fed from a queue.
+        public readonly System.Text.StringBuilder DiagUartTx = new System.Text.StringBuilder();
+        public readonly List<byte> DiagUartTxRaw = new List<byte>();
+        public readonly Queue<byte> DiagUartRx = new Queue<byte>();
+        public byte DiagUartStatusExtra = 0x00;   // extra status bits OR'd into 0x74 (e.g. 0x10) for probing
+        public bool DiagUartLoopback = true;       // loop TX back to RX so the UART self-test passes
 
         public ushort ControlReg { get { return _controlReg; } }
         public ushort ResetReg { get { return _resetReg; } }

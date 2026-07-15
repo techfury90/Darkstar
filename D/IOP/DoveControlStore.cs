@@ -33,6 +33,7 @@ namespace D.IOP
         private static readonly byte[] BankMap = { 0x00, 0x0C, 0x0A, 0x09 };
 
         private readonly ulong[][] _words;      // [bank][csAddr] raw 48-bit microword
+        public readonly System.Collections.Generic.List<string> LaneLog = new System.Collections.Generic.List<string>(); // TEMP: first WCS lane writes
         private int _bank;
 
         public DoveControlStore()
@@ -69,6 +70,12 @@ namespace D.IOP
             if (lane < 0 || lane > 5) return;
             int csAddr = port & 0x0FFF;
             _words[_bank][csAddr] = PackLane(_words[_bank][csAddr], lane, value);
+            // TEMP: rolling capture of every write to word 0, lane 5 (port 0xD000, the LSB/PNIA byte).
+            if (LaneLog != null && csAddr == 0 && lane == 5)
+            {
+                LaneLog.Add("bank" + _bank + " port=" + port.ToString("X4") + " val=" + value.ToString("X2") + " -> word0=" + _words[_bank][0].ToString("X12"));
+                if (LaneLog.Count > 30) LaneLog.RemoveAt(0);
+            }
             LaneWrites++;
             if (csAddr > MaxAddr[_bank]) MaxAddr[_bank] = csAddr;
         }
