@@ -81,6 +81,12 @@ namespace D.CP
         // colliding with D.CP.IBState in the full-app build.
         private enum IBState { Empty = 0, Byte = 1, Full = 2, Word = 3 }
         private readonly byte[] _ib = new byte[2];
+        // MEASUREMENT (operator step 2): track the CP-word address each IB byte came from, so we can
+        // compare R5 (the fetch pointer) against the IB-FRONT word at each dispatch.  Uniform offset =>
+        // R5 is consistently one word ahead => word[R5] everywhere is correct; non-uniform => R5's
+        // advance (pc16/dispatch-exit) is the real bug and no fetch patch holds.  Diagnostic-only.
+        private int _ibFrontWord;   // word offset (R5-format, = mar & 0xFFFF) the front byte was loaded from
+        private int _ibWord;        // word offset the _ib[] pair was loaded from
         private IBState _ibPtr = IBState.Empty;
         private int _niaModType;        // 0=Normal (OR), 1=IBDispatch (replace [4-7], OR [8-11]), 2=IBRefillTrap (replace [0-3])
         private static readonly IBState[] _nextIBPtr = { IBState.Empty, IBState.Empty, IBState.Word, IBState.Byte };
@@ -88,6 +94,8 @@ namespace D.CP
         // Memory latches.
         private int _mar;
         private ushort _marLowSplice;   // the spliced MAR low-16 (for address-capture register writes)
+        private bool _refillEPending;   // set by RefillE (@400); consumed by the immediately-following RefillNE (@500)
+                                        // so the two-word empty-buffer refill fetches CONSECUTIVE words (see @500 below).
 
         // Control signals driven by the IOP.
         private bool _reset = true;     // powers up held in reset (resetMesaProcessor)
@@ -149,6 +157,7 @@ namespace D.CP
         public int SemaWord = 0x58000; // word to trace for SemaLog
         public List<string> LoopTrace; // TEMP: one full 0900-loop iteration at microinstruction level
         public long LoopTraceFrom = 10430575;
+        public List<string> XWtLog;    // TEMP: microword-field decode + XWtOKDisp(fY=0xB) branch at the net-0 zSGB faulting store (CPi 1300-1400)
         public List<string> MapReadLog; // TEMP: Map<- references near the IORegion end (aGMF / FindStartOfIORegion)
         public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
         private int _escCd;            // countdown of instructions to log after an F8 dispatch
@@ -202,10 +211,13 @@ namespace D.CP
             _niaModType = 0;
             _altUAddr = false;
             _pc16 = false;
+            _refillEPending = false;
             _mInt = false;
             _timerInt = false;
             _timerCounter = 0;
             _ibFront = 0;
+            _ibFrontWord = 0;
+            _ibWord = 0;
             _ibPtr = IBState.Empty;
             Array.Clear(_ib, 0, _ib.Length);
             _xBus = _yBus = _lastYBus = 0;
@@ -287,10 +299,19 @@ namespace D.CP
                 _escCd--;
             }
 
+            // TEMP: microword-field decode at execution time for the net-0 zSGB faulting deref path.
+            if (XWtLog != null && InstructionCount >= 1250 && InstructionCount <= 1400)
+                XWtLog.Add("MW @" + addr.ToString("X3") + " c" + _cycle + " CPi=" + InstructionCount
+                    + " mem=" + (mi.mem ? 1 : 0) + " LoadMap=" + (mi.LoadMap ? 1 : 0) + " MarMapMDR=" + (mi.MarMapMDR ? 1 : 0)
+                    + " fSfY=" + (int)mi.fSfY + " fY=" + mi.fY.ToString("X") + " rB=" + mi.rB
+                    + " INIA=" + mi.INIA.ToString("X3") + " X=" + _xBus.ToString("X4") + " Y=" + _yBus.ToString("X4") + " mar=" + _mar.ToString("X5")
+                    + "  " + mi.Disassemble(-1));
+
             // TEMP: capture one full 0900-loop iteration at the microinstruction level.
             if (LoopTrace != null && InstructionCount >= LoopTraceFrom && InstructionCount < LoopTraceFrom + 520)
                 LoopTrace.Add("@" + addr.ToString("X3") + " c" + _cycle + " CPi=" + InstructionCount
                     + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " ibF=" + _ibFront.ToString("X2")
+                    + " fw=" + _ibFrontWord.ToString("X4") + " off=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4")   // MEASUREMENT: R5 vs IB-front word
                     + " Q=" + _alu.Q.ToString("X4") + " X=" + _xBus.ToString("X4") + " Y=" + _yBus.ToString("X4") + " mar=" + _mar.ToString("X5")
                     + " R[0-7]=" + _alu.R[0].ToString("X4") + "," + _alu.R[1].ToString("X4") + "," + _alu.R[2].ToString("X4") + "," + _alu.R[3].ToString("X4") + "," + _alu.R[4].ToString("X4") + "," + _alu.R[6].ToString("X4") + "," + _alu.R[7].ToString("X4")
                     + "  " + mi.Disassemble(-1));
@@ -347,6 +368,7 @@ namespace D.CP
                         _xBus = _ibFront;
                         _ibFront = _ib[((int)_ibPtr) & 0x1];
                         _ibPtr = _nextIBPtr[(int)_ibPtr];
+                        _ibFrontWord = _ibWord;   // MEASUREMENT: front now comes from the _ib pair's word
                         break;
                     case 0xE:   // <-ibLow
                         _xBus = (ushort)(_ibFront & 0xf);
@@ -403,7 +425,14 @@ namespace D.CP
             // <-MD : memory read result appears on the X bus in C3.
             if (mi.mem && _cycle == 3 && ReadWord != null)
             {
-                _xBus = ReadWord(_mar);   // (OQ52: reverted <-MD=decode(mw) — germ reads RAW map word + splices in ucode)
+                // Two-source <-MD contract (analyst source dig 2026-07-15, GetMapFlags/SMFa Misc.mc +
+                // XCode/XMapG/@FF/@WRMDS): the two "sources" are the two c1 ADDRESS computations, not two
+                // read forms.  Map<- addresses the map array (MAPA_base + vpage); MAR<- addresses real
+                // memory.  In BOTH cases <-MD returns the RAW word at _mar -- there is NO decode.  The germ
+                // ucode consumes the raw map entry two ways: translation loads it straight into rhRx/Rx and
+                // the real page falls out of the register nibble/byte routing (map fmt |rp[5-12]|r|d|w|rp[0-4]|),
+                // GetMapFlags LRot12's out the flag bits.  A pre-decoded <-MD re-mangles it -> R5=EEEE / MP-0200.
+                _xBus = ReadWord(_mar);
                 // TEMP: GetHandlerIORegionPtr:126 reads IORegion.segments[16] at IORegion+0x22 words.
                 // Real segment table is at CP word 0x52000 (real 0x520 = IORegion vp 0xC0); segments[16] at 0x52022.
                 // If this fires, GetHandlerIORegionPtr ran on the CORRECT IORegion. If it never fires, IORegion is the default.
@@ -491,7 +520,7 @@ namespace D.CP
                             _mar = ((_mapA & 0xF) << 16) | ((va >> 8) & 0xFFFF);
                             _lastRefWasMap = true;   // OQ52: this c1 ref is a Map<-(translate) -> <-MD returns the decoded real page
                             int _vpg = (va >> 8) & 0xFFFF;
-                            if (LgcLog != null && _vpg <= 0x0F && LgcLog.Count < 40 && ReadWord != null)
+                            if (LgcLog != null && _vpg <= 0x1FF && LgcLog.Count < 400 && ReadWord != null)
                             {
                                 int mw = ReadWord(0x40000 + _vpg); int rp = ((mw & 0x1F) << 8) | (mw >> 8);
                                 LgcLog.Add("Map<- va=" + va.ToString("X6") + " (RH" + mi.rB + "=" + _rh[mi.rB].ToString("X2") + " Y=" + _yBus.ToString("X4") + ") vp=0x" + _vpg.ToString("X3") + " -> mapword " + mw.ToString("X4") + " -> real 0x" + rp.ToString("X3") + " @" + addr.ToString("X3") + " CPi=" + InstructionCount);
@@ -506,39 +535,59 @@ namespace D.CP
                         }
                         else
                         {
-                            // Daybreak MAR = the map-decode SPLICE (operator: XReadx, Xfer.mc:966-971 —
-                            // the splice IS how a real address is formed from a split map entry, and it
-                            // is universal, not a DLion-only quirk):
-                            //   bits 16-19 <- RH[rB] (= rpHigh, the map word's low nibble)
-                            //   bits  8-15 <- R[rB]_old upper byte (= rpLow, the map word's high byte)
-                            //   bits  0- 7 <- Ybus low byte (the offset); no carry across byte 8.
+                            // Daybreak MAR<- (real ref): the address is the map-decode SPLICE (baseline) --
+                            //   bits 16-19 <- RH[rB] (rpHigh);  bits 8-15 <- R[rB]_old high byte (rpLow);
+                            //   bits  0- 7 <- Ybus low byte (offset), no carry across byte 8.
                             // aF|3 => RorS (aF 0-3 => R[rB]) or notRxorS (aF 4-7 => ~R[rB]).
                             ushort hi = (((int)mi.aF | 0x3) == (int)AluFunction.RorS)
                                 ? (ushort)(_bOld & 0xff00)
                                 : (ushort)((~_bOld) & 0xff00);
                             _marLowSplice = (ushort)((_yBus & 0x00ff) | hi);
                             _mar = ((_rh[mi.rB] & 0xf) << 16) | _marLowSplice;
-                            _lastRefWasMap = false;   // OQ52: this c1 ref is a MAR<-(real) -> <-MD returns the memory word
+                            // ---- RefillE->RefillNE two-word gap fix ----
+                            // The empty-buffer refill fetches TWO words: RefillE (@400) fetches word[PC], then falls
+                            // through to RefillNE (@500) for word[PC+1].  RefillE's aD=2 register-capture is the
+                            // prefetch convention -- it leaves R5 one word ahead (R5 = PC+1) rather than PC-1 -- and
+                            // is load-bearing (removing it collapses the germ at the very first refill).  But that +1
+                            // is ALSO applied by RefillNE's own `MAR<-[rhPC, PC+1]` (Ybus = R5+1), so the second fetch
+                            // lands at PC+2 and SKIPS the middle code word.  Usually harmless, but when that middle
+                            // word is real 0x4B1D7 = C1 F8 73 (WriteWDC + the sCodeTrap install) the germ mis-decodes,
+                            // SD[7] stays null, and it wedges in the CodeTrap->ControlTrap loop at MP 0900.  Fix: in the
+                            // RefillE->RefillNE path ONLY, fetch word[R5] (the +1 is already baked into R5), not
+                            // word[R5+1].  Standalone RefillNE (no preceding RefillE) is untouched -- it keeps Ybus.
+                            // word[R5] on ALL RefillNE (@500), not RefillE-only: under the one-word-ahead R5
+                            // (the @400 prefetch +1), word[R5] == the hardware's word[PC+1] = the next word after
+                            // the dispatch, so every RefillNE tops the IB with the CONSECUTIVE word.  The former
+                            // fetch of word[R5+1] (=_yBus) lands one word too far and skips (D7, then D8 after a
+                            // word-consuming 2-byte ESC).  off=0xFFFF was a measurement artifact (R5 committed at
+                            // L487 before the IBDisp); the real defect is this two-ahead RefillNE fetch.
+                            _refillEPending = (addr == 0x400);   // (retained; no longer gates the fetch)
+                            _lastRefWasMap = false;   // this c1 ref is a MAR<-(real) -> <-MD returns the raw memory word
                             if (MarAccess != null && MarAccess.Count < 4000)
                             { long mc; MarAccess.TryGetValue(_mar, out mc); MarAccess[_mar] = mc + 1; }
                             if (mi.mem && (_alu.PgCarry ^ (((int)mi.aF & 0x1) == 1)))
                             {
                                 _niaModifier |= 0x2;                     // pageCross branch
                             }
-                            // OQ52: address-capture (working MP-0900 baseline; instrumented below to give the other
-                            // agent this emulator's ACTUAL execution of the XFER-entry ①②③④ chain).  Split-2901
-                            // write-back (hi|F_low) regressed to MP 0200 = same collapse as removing the aD=2 capture:
-                            // for aD=3 it EQUALS the capture (both swallow the byte carry), so it doesn't fix the
-                            // aD=3 swallowed-advance -- confirming the real fix is plain-F-for-all-aD + a correct <-MD.
+                            // Address-capture (aD=0/3 ONLY): the register/Q receives the map-translated real
+                            // address (the splice) -- the germ's translation-extraction write.  aD=2 (RAMA, the
+                            // RefillE @400 microword) is NOT captured: the register keeps the ALU F (=PC-1), which
+                            // the following @208/@500 restores to PC (net-0, the ISA-correct macro-PC).  Capturing
+                            // the splice for aD=2 was the "crutch" that over-advanced R5 by one word and corrupted
+                            // the entire mesa decode (RefillNE then skipped operand bytes from dispatch #1);
+                            // offC!=0 was its signature.  Deleting it restores offC=0 across every dispatch.
+                            int fAluTrue = (mi.aD == 0) ? _alu.Q : _alu.R[mi.rB];   // (diagnostic) the ALU output, before the capture
                             if (mi.aD == 0) _alu.Q = _marLowSplice;
-                            else if (mi.aD == 2 || mi.aD == 3) _alu.R[mi.rB] = _marLowSplice;
+                            else if (mi.aD == 3) _alu.R[mi.rB] = _marLowSplice;
                             // XFER-CHAIN TRACE (OQ52): dump the last N register-writing MAR<- microwords with every
                             // input the reconciliation needs -- old-rB, Ybus, ALU F, the map-decoded real page for
                             // this rh, the splice, and what each candidate model would write to the dest register.
-                            if (XferChainLog != null && InstructionCount > XferTraceFrom)
+                            // Bounded window (XferTraceFrom..+300) so a low XferTraceFrom captures the RefillE region
+                            // (CPi ~1458) without the 10.4M wedge loop rolling it out of the buffer.
+                            if (XferChainLog != null && InstructionCount > XferTraceFrom && InstructionCount < XferTraceFrom + 700)
                             {
-                                if (XferChainLog.Count > 600) XferChainLog.RemoveRange(0, 300);   // rolling, amortized O(1)
-                                int fAlu = (mi.aD == 0) ? _alu.Q : _alu.R[mi.rB];   // AM2901 already wrote F here
+                                if (XferChainLog.Count > 4000) XferChainLog.RemoveRange(0, 300);   // rolling, amortized O(1)
+                                int fAlu = fAluTrue;
                                 XferChainLog.Add(
                                     "@" + addr.ToString("X3") + " CPi=" + InstructionCount +
                                     " aD=" + mi.aD + " aF=" + ((int)mi.aF).ToString("X") + " rB=" + mi.rB +
@@ -648,6 +697,11 @@ namespace D.CP
                         // the fault branch, fell into the MapFix set-dirty retry loop, and the germ's
                         // boot-file inload page-walk never advanced past cGerm 0900.
                         if ((_xBus & 0x40) != 0 && (_xBus & 0x20) == 0) _niaModifier |= 1;   // -> DMapOK
+                        if (XWtLog != null && InstructionCount >= 1250 && InstructionCount <= 1400)
+                            XWtLog.Add("  ** XWtOKDisp(fY=0xB) @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                                + " X=" + _xBus.ToString("X4") + " dirty(0x40)=" + ((_xBus & 0x40) != 0 ? 1 : 0) + " wp(0x20)=" + ((_xBus & 0x20) != 0 ? 1 : 0)
+                                + " -> OK/DMapOK=" + (((_xBus & 0x40) != 0 && (_xBus & 0x20) == 0) ? 1 : 0) + " niaMod=" + _niaModifier.ToString("X3")
+                                + " INIA=" + mi.INIA.ToString("X3") + " trueNIA=" + (mi.INIA ^ 0xFFF).ToString("X3"));
                         if (TrapLog != null && InstructionCount > 10400000 && TrapLog.Count < 24)
                             TrapLog.Add("XWtOKDisp @" + addr.ToString("X3") + " X=" + _xBus.ToString("X4") +
                                         " INIA=" + mi.INIA.ToString("X3") + " trueINIA=" + (mi.INIA ^ 0x00F).ToString("X3") +
@@ -737,7 +791,9 @@ namespace D.CP
                                 // Log opcodes in the CPi window OR anywhere in Start's code page (RH5=4, R5 0xAE00-0xAEFF = real page 0x4AE)
                                 bool inStartPage = (_rh[5] == 4 && _alu.R[5] >= 0xAE00 && _alu.R[5] < 0xAF00);
                                 if (OpLog != null && OpLog.Count < 400 && ((InstructionCount >= OpLogFrom && InstructionCount < OpLogTo) || inStartPage))
-                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP);
+                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP);
+                                    // offC = committed-R5 offset (sampled post-L487 ALU commit, unlike the top-of-Step off at L307
+                                    // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
                                 // TEMP: trigger the @ESC alpha-dispatch trace on an F8 (zESC) opcode.
@@ -753,6 +809,7 @@ namespace D.CP
                                     IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp dispatched " + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " -> advance front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]");
                                 _ibFront = _ib[((int)_ibPtr) & 0x1];
                                 _ibPtr = _nextIBPtr[(int)_ibPtr];   // DecrementIBPtr
+                                _ibFrontWord = _ibWord;             // MEASUREMENT: front now comes from the _ib pair's word
                             }
                             Note("IBDisp");
                         }
@@ -760,6 +817,7 @@ namespace D.CP
                     case 0x6:   // LoadIB: fill the instruction buffer from the X bus (2 opcode bytes).
                         {
                             bool loadIBPtr1 = (mi.fSfZ == FunctionSelectFZ.fzNorm && mi.fZ == 0x1);
+                            bool wasEmptyLoad = (_ibPtr == IBState.Empty);   // MEASUREMENT: empty-path load sets the front byte from this word
                             // DIAG: at XFER-entry LoadIBs (xcE has Cin<-pc16 / xcO has IBPtr<-1), dump L2 (=_link[2])
                             // and all links + pc16 so we can see whether the entry parity comes from pc16 or L2's low bit.
                             if (false && LinkLog != null && LinkLog.Count < 60 && (invertPc16 || loadIBPtr1))
@@ -798,6 +856,9 @@ namespace D.CP
                                     _ibPtr = IBState.Word;
                                 }
                             }
+                            // MEASUREMENT: the _ib pair (and, on the empty path, the front byte) now come from _mar's word.
+                            _ibWord = _mar & 0xFFFF;
+                            if (wasEmptyLoad) _ibFrontWord = _ibWord;
                             if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
                                 IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " LoadIB " + (loadIBPtr1 ? "[,,1/odd]" : "[even]") + " X=" + _xBus.ToString("X4") + " -> ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] front=" + _ibFront.ToString("X2") + " ptr=" + _ibPtr + (_ib[0] == 0x37 ? "  <<< _ib[0] STALE 0x37 (empty-path left it)" : ""));
                             Note("LoadIB");
@@ -914,11 +975,12 @@ namespace D.CP
 
             if (mi.LinkAddress != -1)
             {
-                // Link write (capture, NIA[7]=0): store the RESOLVED NIA[8-11] = INIA OR latched-DispBr OR
-                // THIS cycle's coincident DispBr (_niaModifier).  The coincident term is essential: an XC2npcDisp
-                // in the same microword (Xfer.mc THe: XC2npcDisp, L2<-L2.TRAPSpc) deposits ~pc16 into the link's
-                // LSB, which a later L2Disp replays to pick xcE/xcO.  Using only `nia` (latched DispBr) dropped it.
-                if ((nia & 0x10) == 0) _link[mi.LinkAddress] = (nia | _niaModifier) & 0xf;   // link write (capture resolved NIA[8-11])
+                // Link write (capture, NIA[7]=0): store the RESOLVED NIA[8-11] = latched-DispBr only.
+                // Reverted the coincident `| _niaModifier` term: it leaked THIS cycle's XWtOKDisp OK bit into
+                // the L2<-L2.SG return link at @SGB c2 (LoadStore.mc:388), so an already-dirty-page zSGB store
+                // (OK=1) had its return link corrupted and mis-routed to the wild Map<- deref (real 0x5C=0xBBBB)
+                // while not-yet-dirty stores (OK=0) worked.  The reference line captures only `nia`.
+                if ((nia & 0x10) == 0) _link[mi.LinkAddress] = nia & 0xf;   // link write (capture resolved NIA[8-11])
                 else _niaModifier |= _link[mi.LinkAddress];                 // link read (LnDisp) — latched (current-cycle broke germ boot)
                 if (LinkLog != null && mi.LinkAddress == 2 && LinkLog.Count < 80)
                     LinkLog.Add("L2op @" + addr.ToString("X3") + " CPi=" + InstructionCount + " " + ((nia & 0x10) == 0 ? "WRITE" : "READ ")
