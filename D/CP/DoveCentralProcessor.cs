@@ -293,8 +293,11 @@ namespace D.CP
             if (_escCd > 0 && EscLog != null)
             {
                 EscLog.Add("  @" + addr.ToString("X3") + " c" + _cycle + " ib=" + _ibFront.ToString("X2")
-                    + " mar=" + _mar.ToString("X5") + " mapA=" + _mapA.ToString("X") + " X=" + _xBus.ToString("X4")
-                    + " R0=" + _alu.R[0].ToString("X4") + " R1=" + _alu.R[1].ToString("X4") + " R2=" + _alu.R[2].ToString("X4")
+                    + " mar=" + _mar.ToString("X5") + " X=" + _xBus.ToString("X4")
+                    + " sp=" + _stackP + " TOS=" + _alu.R[0].ToString("X4")
+                    + " push=" + (mi.Push ? 1 : 0) + " pop=" + (mi.Pop ? 1 : 0) + " dpop=" + (mi.DoublePop ? 1 : 0)
+                    + " stkOp=" + (mi.StackOperation ? 1 : 0) + " stkTest=" + mi.StackTest + " ldSP=" + (mi.LoadStackP ? 1 : 0)
+                    + " niaMod=" + _niaModifier.ToString("X3")
                     + "  " + mi.Disassemble(-1));
                 _escCd--;
             }
@@ -352,8 +355,17 @@ namespace D.CP
                         _timerInt = false;
                         _trapCode = 0;   // read-to-clear: the InitTrap code is acked by the @0 read
                         break;
-                    case 0xA:   // <-ErrnIBnStkp: X[8-9]=trap, X[10-11]=~ibPtr, X[12-15]=~stackP
-                        _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4) | ((~_stackP) & 0xf));
+                    case 0xA:   // <-ErrnIBnStkp: X[8-9]=trap, X[10-11]=~ibPtr, X[12-15]=~stackP.
+                                // The StkP field reports ~stackP_hw, and the hardware's stackP counts DOWN from
+                                // full, so ~stackP_hw == the TRUE stack DEPTH.  Our _stackP counts the SU-array
+                                // spills and does NOT include the TOS (cached in R0), so depth = _stackP + 1.
+                                // Reporting (~_stackP) sent BitBlt's HowBigStack dispatch (BBInit.mc:28/29,
+                                // DISP4[HowBigStack]) to hbs.E (BandBLT's interrupt-resume entry, BandBLT.mc:58)
+                                // instead of hbs.2 (bbNormEntry) -- so bbGetArg/MDtoRbb0 never read the bbTable
+                                // and the germ's 16x1 probe blt ran BandBLT's unbounded band walk (MP stuck 0900).
+                                // Depth checks out across the table: 1-word Arg0 -> hbs.1 (BandBLT fresh),
+                                // 2-word BBptr -> hbs.2 (BitBlt fresh), 12 -> hbs.C (interrupt resume).
+                        _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4) | (((_stackP + 1)) & 0xf));
                         _trapCode = 0;   // read-to-clear
                         break;
                     case 0xB:   // <-RH
@@ -796,14 +808,19 @@ namespace D.CP
                                     // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
-                                // TEMP: trigger the @ESC alpha-dispatch trace on an F8 (zESC) opcode.
-                                if (EscLog != null && _ibFront == 0xF8 && EscLog.Count < 160)
+                                // TEMP: BitBlt probe -- catch aBITBLT (F8 2B = ESC2n[0x0B]) or PILOTBITBLT (0x76),
+                                // the BitBlt at the end of ProcessorHeadDove.Start.  Trace the setup so the bbTable
+                                // geometry the microcode reads (Width @offset+8, Height @offset+0) is visible:
+                                // the following microwords' mar = [rhSrcA, SrcA+offset] read addr, X = the value.
+                                if (EscLog != null && EscLog.Count < 400 &&
+                                    (_ibFront == 0x76 || (_ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x2B)))
                                 {
                                     byte alpha = _ib[((int)_ibPtr) & 0x1];
-                                    EscLog.Add("=== F8 (zESC) @" + addr.ToString("X3") + " alpha=0x" + alpha.ToString("X2")
-                                        + " (ibHigh=0x" + ((alpha >> 4) & 0xf).ToString("X") + " ibLow=0x" + (alpha & 0xf).ToString("X")
-                                        + ") ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] ibPtr=" + _ibPtr + " CPi=" + InstructionCount + " ===");
-                                    _escCd = 26;
+                                    EscLog.Add("=== BITBLT ENTRY OP=0x" + _ibFront.ToString("X2")
+                                        + (_ibFront == 0xF8 ? " alpha=0x" + alpha.ToString("X2") : "")
+                                        + " @" + addr.ToString("X3") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2")
+                                        + "] CPi=" + InstructionCount + "  (next mar/X = bbTable field reads) ===");
+                                    _escCd = 60;
                                 }
                                 if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
                                     IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp dispatched " + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " -> advance front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]");
