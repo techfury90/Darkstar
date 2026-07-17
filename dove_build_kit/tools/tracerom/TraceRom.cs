@@ -638,6 +638,27 @@ namespace DoveTrace
             Console.WriteLine("    THE FIRST ENTRY IS WHERE THE CLICK PHASE BREAKS -- everything after is downstream.");
             foreach (var l in _cp.MapPhaseLog) Console.WriteLine(l);
 
+            {
+                long h1 = _cp.CycleHist[1], h2 = _cp.CycleHist[2], h3 = _cp.CycleHist[3];
+                long ht = h1 + h2 + h3;
+                Console.WriteLine("=== ROTATION CENSUS -- THE LANE-PICKER: overall microwords per cycle ===");
+                Console.WriteLine("    Clicks rotate uniformly, so ~1/3 each is the null hypothesis.");
+                Console.WriteLine("      EVEN   => rotation SOUND, pure PHASE OFFSET  -> hunt the one event (~CPi 15,340).");
+                Console.WriteLine("      SKEWED => the ROTATION itself is broken      -> the click model needs real work.");
+                if (ht > 0)
+                    Console.WriteLine("    c1=" + h1 + " (" + (100.0 * h1 / ht).ToString("F2") + "%)  c2=" + h2
+                        + " (" + (100.0 * h2 / ht).ToString("F2") + "%)  c3=" + h3
+                        + " (" + (100.0 * h3 / ht).ToString("F2") + "%)   total=" + ht);
+                Console.WriteLine("=== PINNED-MACRO INVARIANTS (TmMacroTablesDaybreak `cy:`) ===");
+                Console.WriteLine("    the click IS the memory cycle: c1 issue address / c2 write data / c3 read data");
+                Console.WriteLine("    Map<-  cy:c1  -> c1=" + _cp.LoadMapByCycle[1] + "  c2=" + _cp.LoadMapByCycle[2]
+                    + "  c3=" + _cp.LoadMapByCycle[3] + (_cp.LoadMapByCycle[2] + _cp.LoadMapByCycle[3] > 0 ? "   *** VIOLATION (DLion throws) ***" : "  ok"));
+                Console.WriteLine("    MDR<-  cy:c2  -> c1=" + _cp.MdrByCycle[1] + "  c2=" + _cp.MdrByCycle[2]
+                    + "  c3=" + _cp.MdrByCycle[3] + "   (mem words; c1=MAR<- issue, c3=<-MD read, so c1/c3 here are NOT all bugs)");
+                Console.WriteLine("    IBDisp cy:c2  -> c1=" + _cp.IbDispByCycle[1] + "  c2=" + _cp.IbDispByCycle[2]
+                    + "  c3=" + _cp.IbDispByCycle[3] + (_cp.IbDispByCycle[3] > 0 ? "   *** VIOLATION: IBDisp outside c1/c2 ***" : "  ok"));
+            }
+
             Console.WriteLine("=== LoadMap MICROWORDS BY EXECUTED CYCLE ===");
             Console.WriteLine("    Map<- is c1-ONLY in the microcode (19/19 `Map <-` in uc/*.mc are ,c1; none at c2/c3),");
             Console.WriteLine("    so ONLY the c1 column actually performs a map reference.  c2/c3 hits are SILENTLY DROPPED.");

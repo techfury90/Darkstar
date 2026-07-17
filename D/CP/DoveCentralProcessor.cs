@@ -186,6 +186,19 @@ namespace D.CP
         // code it should never have reached), and no map fix-up downstream of it can ever converge.
         public readonly long[] LoadMapByCycle = new long[4];
         public List<string> MapPhaseLog;   // the FIRST Map<- executed outside c1 (the invariant DLion asserts)
+        // OVERALL microword distribution across c1/c2/c3.  This picks the lane:
+        //   ~1/3 each  => the rotation is SOUND and we have a pure PHASE OFFSET (hunt the one event).
+        //   skewed     => the ROTATION itself is broken (the click model needs real work).
+        // Clicks rotate uniformly, so an even split is the null hypothesis.
+        public readonly long[] CycleHist = new long[4];
+        // Per-macro cycle pinning is a CONSTRAINT, not a convention (TmMacroTablesDaybreak `cy:`):
+        //   c1 = issue address : MAR<- (real), Map<- (map array), IO<-, Refresh
+        //   c2 = write data    : MDR<-, IBDisp
+        //   c3 = read data     : <-MD   (gated mem && _cycle==3)
+        // The click IS the memory cycle.  A Map<- at c2 is not "the wrong slot" -- it is issuing an
+        // address during the data phase.  That is why the DLion reference throws on it.
+        public readonly long[] MdrByCycle = new long[4];    // MDR<- (mem, c2) -- c1/c3 => BUG
+        public readonly long[] IbDispByCycle = new long[4]; // IBDisp (c2)     -- outside c1/c2 => BUG
         // A/B switch for the <-ErrnIBnStkp StkP field.  DOVE_STK_DEPTH=1 -> report true depth
         // (_stackP+1, the c2c301c model); default -> report ~_stackP, which is what
         // ProcListXferDaybreak DSKf assumes: `TT <- ~ErrnIBnStkp; TT <- TT and 0F` recovers the RAW
@@ -612,6 +625,11 @@ namespace D.CP
                 ShiftLog.Add("@" + addr.ToString("X3") + " shift fX=" + mi.fX.ToString("X") + " R[" + mi.rA + "]=" + _shiftIn.ToString("X4")
                     + " Cin=" + (mi.Cin ? 1 : 0) + " cIn=" + (cIn ? 1 : 0) + " aD=" + mi.aD + " AluDst=" + mi.AluDestination + " -> Y=" + _yBus.ToString("X4") + " R[" + mi.rB + "]=" + _alu.R[mi.rB].ToString("X4"));
 
+            // Overall rotation census -- the lane-picker (see CycleHist).  Counted for EVERY microword.
+            CycleHist[_cycle & 3]++;
+            // The other two pinned macros, as free invariants: MDR<- is cy:c2, IBDisp is cy:c2.
+            if (mi.mem && !mi.LoadMap) MdrByCycle[_cycle & 3]++;
+
             // Tally LoadMap microwords by the cycle they land in (see LoadMapByCycle), and log the
             // FIRST offences.  The DLion reference asserts this is impossible -- CentralProcessor.cs
             // case 2/case 3 both `throw new InvalidOperationException("Map<- in c2"/"c3")`.  The Dove
@@ -1026,6 +1044,7 @@ namespace D.CP
                                 _ibPtr = _nextIBPtr[(int)_ibPtr];   // DecrementIBPtr
                                 _ibFrontWord = _ibWord;             // MEASUREMENT: front now comes from the _ib pair's word
                             }
+                            IbDispByCycle[_cycle & 3]++;   // IBDisp is pinned cy:c2 -- outside c1/c2 => BUG
                             Note("IBDisp");
                         }
                         break;
