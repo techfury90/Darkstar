@@ -262,7 +262,28 @@ __pycache__/
 
 # Dove/6085 bring-up: copyrighted Xerox firmware ROMs + EEPROM dumps + museum-derived
 # reference docs are runtime inputs, not source -- keep them out of the repo.
-dove_build_kit/
+# ...but OUR OWN work under that tree IS source and must be tracked.  This has now bitten
+# twice: TraceRom.cs was destroyed with no git copy to restore from (it was only ever
+# force-added), and the harness's operating manual was untracked for a whole session.
+# Track our sources/docs by exception so nobody has to remember `git add -f`.
+#
+# NB the pattern below is deliberate: git will NOT descend into an excluded DIRECTORY, so a
+# bare `dove_build_kit/` makes every `!dove_build_kit/...` negation below it silently dead.
+# Exclude the CONTENTS (`/*`) and re-include one level at a time instead.
+#
+# Keep the exceptions to things WE wrote.  Do NOT except the Xerox artifacts -- the boot ROMs,
+# the 93C46 U128/U56 dumps, the 8X305 PROMs, the .db microcode, the de-blobbed .mc sources, or
+# the museum docs.  eeprom_floppy.bin is deliberately NOT excepted: it is a 3-byte edit of the
+# museum U128 dump and still carries that machine's serial, so it IS an EEPROM dump --
+# regenerate it with tools/tracerom/make_eeprom_floppy.py rather than committing it.
+dove_build_kit/*
+!dove_build_kit/tools/
+dove_build_kit/tools/*
+!dove_build_kit/tools/tracerom/
+dove_build_kit/tools/tracerom/*
+!dove_build_kit/tools/tracerom/*.cs
+!dove_build_kit/tools/tracerom/*.py
+!dove_build_kit/tools/tracerom/HANDOFF.md
 
 # Scratch operator-question relay notes from the Dove bring-up sessions.
 OPERATOR_QUESTIONS_*.md

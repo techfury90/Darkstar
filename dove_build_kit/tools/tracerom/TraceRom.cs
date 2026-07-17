@@ -107,6 +107,9 @@ namespace DoveTrace
             _cp.LoopFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_LOOP_FROM") ?? "2147483647");
             _cp.RingFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_RING_FROM") ?? "2147483647");
             _cp.StkTrapLog = new List<string>();   // TechRef Table 2.11 stack over/underflow detector
+            _cp.SpinMapLog = new List<string>();   // THE map set-ref spin probe (MAPA base + resolved entry)
+            _cp.MapPhaseLog = new List<string>();  // FIRST Map<- outside c1 -- the invariant the DLion reference throws on
+            _cp.SpinMapFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_SPINMAP_FROM") ?? "9223372036854775807");
             _cp.OpLog = new List<string>();
             _cp.LinkLog = new List<string>();
             _cp.IbLog = new List<string>();
@@ -628,6 +631,22 @@ namespace DoveTrace
             // everything after it is silent-wrap noise (once one underflow wraps, every sp reading is fiction).
             Console.WriteLine("=== TABLE 2.11 STACK TRAPS (first " + _cp.StkTrapLog.Count + " shown) ===");
             foreach (var l in _cp.StkTrapLog) Console.WriteLine(l);
+
+            Console.WriteLine("=== FIRST Map<- OUTSIDE c1 -- the invariant the DLion reference THROWS on ===");
+            Console.WriteLine("    D/CP/CentralProcessor.cs case 2/3: throw new InvalidOperationException(\"Map<- in c2\"/\"c3\").");
+            Console.WriteLine("    Dove dropped the assertion; each one is silently turned into an MDR<- wild store to a stale MAR.");
+            Console.WriteLine("    THE FIRST ENTRY IS WHERE THE CLICK PHASE BREAKS -- everything after is downstream.");
+            foreach (var l in _cp.MapPhaseLog) Console.WriteLine(l);
+
+            Console.WriteLine("=== LoadMap MICROWORDS BY EXECUTED CYCLE ===");
+            Console.WriteLine("    Map<- is c1-ONLY in the microcode (19/19 `Map <-` in uc/*.mc are ,c1; none at c2/c3),");
+            Console.WriteLine("    so ONLY the c1 column actually performs a map reference.  c2/c3 hits are SILENTLY DROPPED.");
+            Console.WriteLine("    c1=" + _cp.LoadMapByCycle[1] + "  c2=" + _cp.LoadMapByCycle[2] + "  c3=" + _cp.LoadMapByCycle[3]
+                + "   (c1 should equal the 'Map<-=' function-hit count)");
+
+            Console.WriteLine("=== MAP-SPIN PROBE: every Map<- after DOVE_SPINMAP_FROM (" + _cp.SpinMapLog.Count + ") ===");
+            Console.WriteLine("    0x0000 = NEVER WRITTEN (vacant would be 0x60).  base sane + vp climbing => walked past the end of the map; base wrong => MAPA stale.");
+            foreach (var l in _cp.SpinMapLog) Console.WriteLine(l);
             Console.WriteLine("=== MICROWORD PATH / LOOP STATE (" + _cp.LoopLog.Count + " lines) ===");
             foreach (var l in _cp.LoopLog) Console.WriteLine(l);
             // STATIC DECODE: TechRef, below Fig 2.44 -- "The mem field should not be set in c1 along with

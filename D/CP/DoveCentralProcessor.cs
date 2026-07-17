@@ -167,6 +167,25 @@ namespace D.CP
         public int LoopAddr = -1, LoopFrom = int.MaxValue;
         public int RingFrom = int.MaxValue;   // TEMP: arm the entry-path ring buffer
         public List<string> StkTrapLog;       // TechRef Table 2.11 stack over/underflow detector
+        // THE MAP-SPIN PROBE.  The live wound is a 13-microword map set-ref fix-up that never
+        // converges (@49C Q+1 / @062 Map<- / @140 byte(80) or R6), 247,891 iterations = 99.9% of
+        // the run.  Inside it the map word reads back 0x0000 every pass.  0x0000 is NOT "vacant"
+        // (vacant == 0x60 in the Daybreak map format) -- all-zeros means NEVER WRITTEN.  So either
+        // Q+1 has walked past the end of the initialized map array, or we are addressing the wrong
+        // array.  The map address is MAPA-relative, not a constant: mar = (_mapA<<16) | vpage,
+        // and boot does MAPA<-4 => base 0x40000 (InitDaybreak.mc:154); the DLion reference
+        // hardcodes 0x10000.  Dump the computed address, MAPA, and Q's trajectory to tell
+        // "walked past the end" (base sane, vpage climbing) from "wrong base" (MAPA stale/unset).
+        public List<string> SpinMapLog;
+        public long SpinMapFrom = long.MaxValue;
+        // Count microwords carrying LoadMap=1 by the cycle they actually execute in.
+        // Map<- is c1-ONLY in the microcode: 19 of 19 `Map <- ...` in dove_build_kit/daybreak_ucode/uc
+        // are annotated ,c1; ZERO at ,c2 or ,c3.  So the `case 1:` gate below is right, and any
+        // LoadMap microword reaching c2/c3 is silently dropped -- its map reference never happens.
+        // If that count is large, the germ is executing Map<- at the wrong click phase (or running
+        // code it should never have reached), and no map fix-up downstream of it can ever converge.
+        public readonly long[] LoadMapByCycle = new long[4];
+        public List<string> MapPhaseLog;   // the FIRST Map<- executed outside c1 (the invariant DLion asserts)
         // A/B switch for the <-ErrnIBnStkp StkP field.  DOVE_STK_DEPTH=1 -> report true depth
         // (_stackP+1, the c2c301c model); default -> report ~_stackP, which is what
         // ProcListXferDaybreak DSKf assumes: `TT <- ~ErrnIBnStkp; TT <- TT and 0F` recovers the RAW
@@ -593,6 +612,26 @@ namespace D.CP
                 ShiftLog.Add("@" + addr.ToString("X3") + " shift fX=" + mi.fX.ToString("X") + " R[" + mi.rA + "]=" + _shiftIn.ToString("X4")
                     + " Cin=" + (mi.Cin ? 1 : 0) + " cIn=" + (cIn ? 1 : 0) + " aD=" + mi.aD + " AluDst=" + mi.AluDestination + " -> Y=" + _yBus.ToString("X4") + " R[" + mi.rB + "]=" + _alu.R[mi.rB].ToString("X4"));
 
+            // Tally LoadMap microwords by the cycle they land in (see LoadMapByCycle), and log the
+            // FIRST offences.  The DLion reference asserts this is impossible -- CentralProcessor.cs
+            // case 2/case 3 both `throw new InvalidOperationException("Map<- in c2"/"c3")`.  The Dove
+            // port dropped that assertion, so the condition now happens ~992,007 times per boot and is
+            // silently turned into an unconditional MDR<- wild store to a stale MAR (MarMapMDR =
+            // mem||LoadMap lets a mem=0 Map<- word into the block, and case 2 writes without checking
+            // mi.mem).  Log, do NOT throw: the first offence is what we want, not a crash at offence
+            // one million.  (Same reasoning as the Table 2.11 detector above.)
+            if (mi.LoadMap)
+            {
+                LoadMapByCycle[_cycle & 3]++;
+                if (_cycle != 1 && MapPhaseLog != null && MapPhaseLog.Count < 40)
+                    MapPhaseLog.Add("*** Map<- IN c" + _cycle + " (DLion throws here) @" + addr.ToString("X3")
+                        + " CPi=" + InstructionCount + "  mem=" + (mi.mem ? 1 : 0)
+                        + " rB=" + mi.rB + " RH" + mi.rB + "=" + _rh[mi.rB].ToString("X2")
+                        + " Y=" + _yBus.ToString("X4")
+                        + "  -> would MDR<- stale MAR " + _mar.ToString("X5") + " = " + _yBus.ToString("X4")
+                        + "   " + mi.Disassemble(-1));
+            }
+
             // ---- MAR<- / Map<- / MDR<- (Y bus + YH=_rh[rB]) ----
             if (mi.MarMapMDR)
             {
@@ -622,6 +661,21 @@ namespace D.CP
                             if (MapReadLog != null && (addr == 0x8E5 || (_vpg >= 0x0C0 && _vpg <= 0x110)) && MapReadLog.Count < 250)
                                 MapReadLog.Add("Map<- @" + addr.ToString("X3") + (addr == 0x8E5 ? "(aGMF)" : "") + " callsite R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " vpage=0x" + _vpg.ToString("X3") + " -> MAR=" + _mar.ToString("X5")
                                     + " | va=" + va.ToString("X6") + " rh[" + mi.rB + "]=" + _rh[mi.rB].ToString("X2") + " Ybus=" + _yBus.ToString("X4") + " Rold=" + _bOld.ToString("X4") + " CPi=" + InstructionCount);
+                            // THE MAP-SPIN PROBE: every Map<- once armed, with the base and the
+                            // resolved entry.  Answers the operator's question directly --
+                            // is _mar inside the initialized map array, and is _mapA still 4?
+                            if (SpinMapLog != null && InstructionCount >= SpinMapFrom && SpinMapLog.Count < 60)
+                            {
+                                int mw = ReadWord != null ? ReadWord(_mar) : -1;
+                                SpinMapLog.Add("Map<- @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                                    + "  MAPA=" + _mapA.ToString("X") + " -> base 0x" + ((_mapA & 0xF) << 16).ToString("X5")
+                                    + "  va=" + va.ToString("X6") + " (RH" + mi.rB + "=" + _rh[mi.rB].ToString("X2")
+                                    + " Y=" + _yBus.ToString("X4") + ")  vp=0x" + _vpg.ToString("X4")
+                                    + "  MAR=" + _mar.ToString("X5")
+                                    + "  mapword=" + (mw < 0 ? "??" : mw.ToString("X4"))
+                                    + "  Q=" + _alu.Q.ToString("X4") + " R6=" + _alu.R[6].ToString("X4")
+                                    + " RH2=" + _rh[2].ToString("X2"));
+                            }
                             Note("Map<-");
                         }
                         else

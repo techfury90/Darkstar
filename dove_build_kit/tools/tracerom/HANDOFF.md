@@ -13,6 +13,26 @@ scratchpad). Everything is diagnostic-only; the real emulator behavior lives in
 
 ---
 
+## 0a. READ THE SOURCES — they are already in this kit
+
+**The de-blobbed Daybreak microcode is in `dove_build_kit/daybreak_ucode/uc/` (55 `.mc` files).**
+Read it. `BBInit.mc`, `BandBLT.mc`, `Floyd.mc`, `TextBlt.mc`, `LoadStore.mc`, `Misc.mc` answer
+opcode / dispatch / slot questions in minutes.
+
+Any older instruction to "route source questions through the operator" is **withdrawn, and it was
+actively harmful**: it put a human round-trip between a lying probe and the file that disproved it.
+That is how the phantom "the germ reaches BitBlt at depth 1" survived a whole session and became the
+premise of a handoff. `LoadStore.mc:404` says `0x76` is `@SGDB`, not a BLT — one `grep` would have
+killed it on day one.
+
+**The one genuine gap is the defs layer**: no `Set[hbs.N]` / `SetLabel[...]` exists anywhere in the
+kit. That is the only thing worth asking the operator for (`Extensions.dfn`, `BandBlt.dfn`,
+`TmMacroTablesDaybreak`, under `DaybreakMicrocode/Private/`). Known so far, from the operator's Duke
+(15.2) `Extensions.dfn`: `SetLabel[HowBigStack, 0030]` — table base `0x0030`, corroborated by the
+trace (`0x0030 | (~2 & 0xF) = 0x003D` = the measured `bbNormEntry`). Don't adopt Duke's slot names.
+
+Still the museum's lane: the Xerox **Mesa/Pilot** trees and anything not already de-blobbed here.
+
 ## 0. Prerequisites
 
 - **Compiler:** Roslyn `csc.exe`. On this machine:
@@ -20,7 +40,10 @@ scratchpad). Everything is diagnostic-only; the real emulator behavior lives in
   (Git-Bash path: `/c/Program\ Files/Microsoft\ Visual\ Studio/18/Community/MSBuild/Current/Bin/Roslyn/csc.exe`).
 - **Inputs (durable):**
   - Boot ROM (positional arg): `dove_build_kit/firmware/boot_rom/dove_iop_V2_K_merged_load_at_FC000.bin` (repo-relative).
-  - EEPROM config (`DOVE_EEPROM`): `eeprom_floppy.bin` (in this dir).
+  - EEPROM config (`DOVE_EEPROM`): `eeprom_floppy.bin` (in this dir). **Not in git** — it is a 3-byte
+    edit of the museum U128 dump (and still carries that machine's serial), so it is an EEPROM dump
+    and `.gitignore` deliberately excludes it. Regenerate it from the kit:
+    `python dove_build_kit/tools/tracerom/make_eeprom_floppy.py`
   - Germ floppy (`DOVE_FLOPPY`): `C:/Users/techf/Desktop/Darkstar/130P26405_6085_Xerox_ViewPoint_Installer_#1.imd` (outside the repo — an IMD ImageDisk of the 6085 ViewPoint installer disk #1).
 - Run from the **repo root** (`.../worktrees/<name>/`) so the `D/...` source paths resolve.
 
@@ -126,27 +149,60 @@ Address decoders you'll need constantly:
 
 ## 5. Current diagnosis (where the fix goes)
 
-Root cause is confirmed and banked in memory (`darkstar-dove-milestone2-cp-bridge`,
-OQ53–OQ61). Short version:
+**★ 2026-07-17. Everything the old §5 said here (SD[7]-null / `C1 F8 73` word-cross / "fix lives in
+the not-empty refill") is REFUTED — do not chase it.** So is the BitBlt/`HowBigStack`/stack-depth
+thread: measured, the germ's `aBITBLT` dispatch is CORRECT (`sp=2` → `~2=0x0D` → microstore `0x03D`
+= `hbs.2` = `bbNormEntry`, and `bbGetArg` reads the bbTable with `UWidth=0x10`). See memory
+`dove-bitblt-howbigstack`.
 
-- The wedge = infinite **CodeTrap → ControlTrap** loop. `sCodeTrap` (`SD[7]`) is
-  **null**; it should be `[0B5D, 0x391B]` (installed at germ src `:1099`).
-- The install is the LOOPHOLE-build `CE 39 1B`, in the `C1 F8 73` (WriteWDC)
-  region at word `0xB1D7–0xB1DA`. It **desyncs across a word boundary** — the
-  `zESC` alpha / next-word immediate byte isn't resident.
-- **Fix lives in the not-empty refill / `pc16` advance** (the 3-byte-IB invariant
-  / `RefillNE` top-to-3 across a word boundary). It is **NOT** the
-  `RefillE`/split-2901/address-capture path — edits there collapse the germ to
-  MP 0200 (tried and reverted; the capture is retained in the baseline).
+**THE LIVE ROOT LEAD: `Map<-` is executing in c2, and ~all of it is being dropped.**
 
-Confirming trace for the next pass:
+```
+LoadMap microwords by executed cycle:   c1=324   c2=992007   c3=0
+```
+
+- `Map<-` is **c1-only** in the microcode: 19 of 19 `Map <- ...` in `daybreak_ucode/uc/*.mc` are
+  annotated `,c1`; **zero** at `,c2`/`,c3`. So the emulator's `case 1:` gate is right, and every
+  c2 hit is a map reference that **never happens**.
+- The **DLion reference asserts this is impossible** — `D/CP/CentralProcessor.cs` case 2 and case 3
+  each `throw new InvalidOperationException("Map<- in c2"/"c3")`. **The Dove port dropped that
+  assertion.** Worse, `Microinstruction.cs:286` has `MarMapMDR = mem || LoadMap`, so a `mem=0`
+  `Map<-` word still enters the memory block, and `case 2:` does an **unconditional `MDR<-`** — it
+  never checks `mi.mem`. Each dropped `Map<-` therefore becomes a **wild store to a stale MAR**
+  (~992k of them; the spin repeatedly writes `0x020C` to real word `0x00005`).
+- **THE FIRST OFFENCE (this is where to start):**
+  ```
+  *** Map<- IN c2 @A4E CPi=15340  mem=0 rB=5 RH5=84 Y=B1FF
+      -> would MDR<- stale MAR 4B100 = B1FF   pCall/Ret2 Map<- RH5,,push Q<- R5
+  ```
+  That is **inside `Start`'s `zRET` window**: zRET at CPi 15,325 → `sControlTrap` (SD[06] read) at
+  15,383. The failing microword maps the **code pointer** (`RH5,,R5`) for the XFER. Its translation
+  is dropped ⟹ the transfer reads a map entry that was never loaded ⟹ ControlTrap ⟹
+  `GermWorldError` ⟹ the 247,891-iteration map set-ref spin (`@49C`/`@062`/`@140`) that eats 99.9%
+  of the run. **One chain, not two wounds.**
+
+**NEXT (in order):**
+1. Why is the click phase +1 at CPi 15340? The detector only sees `Map<-` words, so the phase may
+   break slightly earlier — walk back from `@A4E` (the `pCall/Ret2` return-cycle bookkeeping around
+   `zRET`/XFER is the prime suspect).
+2. Independently: `case 2:` must not write memory when `mem=0`. That is wrong regardless of phase
+   and is what converts a phase error into a million wild stores. (Fix it *after* 1, so the
+   first-offence signal stays loud.)
+3. Do **not** "fix" this by honouring `LoadMap` in c2 — that is the "make the dispatch land where I
+   want" mistake that produced `c2c301c`. The microcode is unanimous that `Map<-` is c1.
+
+Repro:
 ```bash
 DOVE_BUDGET=17000000 DOVE_POKE_AT=12000000 DOVE_POKE_DELAY=0 DOVE_POKE_CODE=64 \
-  DOVE_IBLOG_FROM=1470 DOVE_IBLOG_TO=1545 DOVE_LOOPTRACE_FROM=1470 DOVE_XFER_FROM=99999999 \
-  DOVE_EEPROM="$OUT/eeprom_floppy.bin" DOVE_FLOPPY="$IMD" "$OUT/tracerom.exe" "$BIN" > f8.txt 2>&1
+  DOVE_XFER_FROM=99999999 DOVE_EEPROM="$OUT/eeprom_floppy.bin" DOVE_FLOPPY="$IMD" \
+  "$OUT/tracerom.exe" "$BIN" > t.txt 2>&1
+grep -A9 "FIRST Map<- OUTSIDE c1" t.txt      # the first offence + the c1/c2/c3 tally
 ```
-then read the `IbLog` + `LoopTrace` around the `F8 73` dispatch (CPi ~1500–1545).
-Success = MP advances past `0900` and `SD[7]` gets `[0B5D,0x391B]` in `SD-INSTALL WRITES`.
+Also useful: `DOVE_LOOP_ADDR=C61 DOVE_LOOP_FROM=20000` (one spin iteration, microword-level),
+`DOVE_HIST_FROM=20000` (microword histogram), `DOVE_SPINMAP_FROM=<CPi>` (every honoured `Map<-`
+with `MAPA`, the resolved entry, and `Q`). NB `MAPA<-` fires exactly **once** per boot (`MAPA<-4`
+⇒ base `0x40000`, `InitDaybreak.mc:154`) and the base is **correct** — that branch is ruled out.
+A map word of `0x0000` is **never-written**; vacant would be `0x60`.
 
 ---
 
