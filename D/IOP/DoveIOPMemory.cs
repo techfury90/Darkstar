@@ -120,8 +120,13 @@ namespace D.IOP
                     if (sys > MapStampMaxSys) MapStampMaxSys = sys;
                     if (sys >= 0x90000) MapStampSeg2++;
                 }
-                if (CmdByteLog != null && sys >= 0xB0000 && sys < 0xB0020 && CmdByteLog.Count < 140)
-                    CmdByteLog.Add("W  phys=" + sys.ToString("X5") + " <- " + value.ToString("X2") + " @IOP " + HostClock);
+                // The ACTIVE FCB the germ reads is at CP word 0x53E1E = phys 0xA7C3C (NOT the 0xB0000
+                // germ-view, which the IOP only zeroed once).  Watch IOP writes to the active FCB
+                // (phys 0xA7C20..0xA7C60) so we can see whether, at the boot-transfer completion (IOP ~16.2M),
+                // the IOP wrote a POLLABLE completion status -- or only rang the doorbell (CSReg b8).  An
+                // interrupts-off germ can ONLY observe completion via a polled status.
+                if (CmdByteLog != null && sys >= 0xA7C20 && sys <= 0xA7C60 && CmdByteLog.Count < 200)
+                    CmdByteLog.Add("W  phys=" + sys.ToString("X5") + " (CPword 0x" + (sys >> 1).ToString("X5") + ") <- " + value.ToString("X2") + " @IOP " + HostClock);
                 _system[sys] = value;
             }
         }
