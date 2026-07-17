@@ -342,14 +342,15 @@ namespace D.IOP
 
             // Gather sectors R..EOT on this track into the execution buffer; the
             // DMA/TC handshake decides how many bytes are actually consumed.
-            int count = (eot >= r) ? (eot - r + 1) : 1;
             var buf = new List<byte>();
-            for (int i = 0; i < count; i++)
-            {
-                Sector sec = null;
-                try { sec = d.GetSector(c, head, (r + i) - 1); } catch { }
-                if (sec != null) buf.AddRange(sec.Data);
-            }
+            GatherSectors(d, c, head, r, eot, buf);
+            // Multi-Track (MT, bit7 of the command): after the last sector on this
+            // head, the read continues on the OTHER head of the SAME cylinder from
+            // sector 1 through EOT.  Without this a multi-track read returns only
+            // half the requested data; the germ's boot-file inLoad issues MT reads
+            // (opcode 0xC6) and, if under-delivered, its DMA count never drains.
+            bool mt = (_cmd[0] & 0x80) != 0;
+            if (mt) GatherSectors(d, c, head ^ 1, 1, eot, buf);
             _execData = buf.ToArray();
             _execIdx = 0;
             _phase = Phase.Execution;
@@ -364,6 +365,19 @@ namespace D.IOP
                 int sent = DmaOut(_execData);
                 _dmaSent = sent > 0 ? sent : _execData.Length;
                 FinishExecution();
+            }
+        }
+
+        // Append sectors [first..last] of (cylinder, head) to buf.  Missing sectors
+        // are skipped (their absence shows up as a short buffer, not an exception).
+        private void GatherSectors(FloppyDisk d, int c, int head, int first, int last, List<byte> buf)
+        {
+            int count = (last >= first) ? (last - first + 1) : 1;
+            for (int i = 0; i < count; i++)
+            {
+                Sector sec = null;
+                try { sec = d.GetSector(c, head, (first + i) - 1); } catch { }
+                if (sec != null) buf.AddRange(sec.Data);
             }
         }
 
