@@ -226,6 +226,8 @@ namespace D.CP
         public long _mIntAsserts;
         public List<string> MIntLog;
         public List<string> FrameChainLog;   // Mesa frame/return-link chain at the @AB0 invocation
+        public List<string> IntStatSpinLog;   // <-IntStat reads in the spin -- does the germ beat at the timer period?
+        private long _lastIntStatCPi;
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -496,6 +498,14 @@ namespace D.CP
                                 // X[8-9]=trap code.  Reading acks the timer edge (read-to-clear).
                         _xBus = (ushort)(((_trapCode & 3) << 6) | (_mInt ? 0x2 : 0) | (_timerInt ? 0x1 : 0));
                         IntStatReads++;
+                        // TIMER-DRIVEN-SPIN PROBE: log <-IntStat reads in the spin window with the CPi delta
+                        // since the last read, and whether the timer bit was set.  If the germ reads IntStat
+                        // (un-IE-gated, so the timer bit is visible with IE off) at ~TimerPeriod (40000 CPi)
+                        // cadence, the free-running 8254 is driving the @AB0 Scan spin despite IE=off.
+                        if (IntStatSpinLog != null && InstructionCount >= 8000000 && IntStatSpinLog.Count < 40)
+                            IntStatSpinLog.Add("<-IntStat @CPi " + InstructionCount + "  dCPi=" + (InstructionCount - _lastIntStatCPi)
+                                + "  timerBit=" + (_timerInt ? 1 : 0) + " mIntBit=" + (_mInt ? 1 : 0) + " IE=" + (_ie ? 1 : 0));
+                        _lastIntStatCPi = InstructionCount;
                         _timerInt = false;
                         _trapCode = 0;   // read-to-clear: the InitTrap code is acked by the @0 read
                         break;

@@ -102,6 +102,7 @@ namespace DoveTrace
             _cp.MapReadLog = new List<string>();
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
+            _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
             _cp.LoopLog = new List<string>();
@@ -692,6 +693,10 @@ namespace DoveTrace
                 long ht = h1 + h2 + h3;
                 {
                 var cp = _cp;
+                Console.WriteLine("=== TIMER-DRIVEN-SPIN PROBE: <-IntStat cadence in the spin (TimerPeriod=" + cp.TimerPeriod + ") ===");
+                Console.WriteLine("    If dCPi ~= TimerPeriod and timerBit=1 with IE=0, the free-running 8254 drives the @AB0 Scan spin despite IE off.");
+                if (cp.IntStatSpinLog != null) foreach (var l in cp.IntStatSpinLog) Console.WriteLine("   " + l);
+
                 Console.WriteLine("=== FRAME CHAIN at the @AB0 invocation (names the germ routine that entered the scheduler) ===");
                 Console.WriteLine("    The floppy transfer-wait POLLS (no reschedule), so @AB0 was entered by a DIFFERENT block.");
                 Console.WriteLine("    globallink(GF) + the code page name the module; returnlink chains up to the caller.");
