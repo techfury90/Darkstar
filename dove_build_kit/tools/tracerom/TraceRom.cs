@@ -77,6 +77,7 @@ namespace DoveTrace
             catch (Exception e) { Console.WriteLine("EEPROM load FAILED: " + e.Message); }
             _io.ConfigEeprom.ReadLog = new List<int>();
             _io.Fdc.Log = new List<string>();
+            _io.Fdc.RecentLog = new string[80];   // ring: the LAST 80 FDC commands (Log caps at the FIRST 60)
             _io.CpLoadLog = new List<string>();
 
             // ---- Dove Central Processor: executes the microcode the IOP loads ----
@@ -509,6 +510,13 @@ namespace DoveTrace
             Console.WriteLine();
             Console.WriteLine("Floppy DMA span (IOP linear): [" + (_io.MinDmaDest < 0 ? "none" : "0x" + _io.MinDmaDest.ToString("X5")) +
                               " .. 0x" + _io.MaxDmaDest.ToString("X5") + "]  totalBytes=" + _io.DmaByteTotal);
+            {
+                var recent = _io.Fdc.RecentInOrder();
+                Console.WriteLine("=== 8272: the LAST " + recent.Count + " FDC commands (what the stall loop actually IS) ===");
+                Console.WriteLine("    NB ReadCount counts Read commands ISSUED (I8272.cs:206), not sectors delivered.");
+                Console.WriteLine("    A frozen ReadCount with a climbing CommandCount = the germ STOPPED ASKING for data.");
+                foreach (var l in recent) Console.WriteLine("   " + l);
+            }
             Console.WriteLine("8272 totals: commands=" + _io.Fdc.CommandCount + "  reads=" + _io.Fdc.ReadCount +
                               "  lastRead C/H/R=" + _io.Fdc.LastReadC + "/" + _io.Fdc.LastReadH + "/" + _io.Fdc.LastReadR +
                               "  lastFDCcmd@instr=" + _lastFdcInstr);

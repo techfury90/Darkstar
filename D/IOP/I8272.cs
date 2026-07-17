@@ -193,6 +193,34 @@ namespace D.IOP
         /// <summary>Last Read's cyl/head/sector, for trajectory tracing.</summary>
         public int LastReadC = -1, LastReadH = -1, LastReadR = -1;
 
+        /// <summary>
+        /// Ring buffer of the LAST N commands.  `Log` above caps at the FIRST 60, which shows the boot's
+        /// opening moves but is useless for a stall: the germ issues 115 Read commands, stops requesting
+        /// data entirely, and then polls forever (CommandCount climbs into the thousands while ReadCount
+        /// stays pinned at 115 -- NB ReadCount counts Reads ISSUED, not sectors delivered, so a frozen
+        /// ReadCount means the germ stopped ASKING, not that reads are failing).  This ring answers what
+        /// the loop actually consists of.
+        /// </summary>
+        public string[] RecentLog;
+        public long RecentPos;
+        private void Recent(string s)
+        {
+            if (RecentLog == null) return;
+            RecentLog[(int)(RecentPos % RecentLog.Length)] = "#" + CommandCount + " " + s;
+            RecentPos++;
+        }
+        /// <summary>The ring, oldest-first, for printing.</summary>
+        public System.Collections.Generic.List<string> RecentInOrder()
+        {
+            var outp = new System.Collections.Generic.List<string>();
+            if (RecentLog == null) return outp;
+            int n = RecentLog.Length;
+            long start = RecentPos > n ? RecentPos - n : 0;
+            for (long i = start; i < RecentPos; i++)
+            { var v = RecentLog[(int)(i % n)]; if (v != null) outp.Add(v); }
+            return outp;
+        }
+
         private static readonly string[] Names = new string[32] {
             "?","?","ReadTrack","Specify","SenseDrive","Write","Read","Recalibrate",
             "SenseInt","WriteDel","ReadID","?","ReadDel","Format","?","Seek",
@@ -206,6 +234,7 @@ namespace D.IOP
             if (op == 0x06) { ReadCount++; LastReadC = _cmd[2]; LastReadH = _cmd[3]; LastReadR = _cmd[4]; }
             if (Log != null && Log.Count < 60)
                 Log.Add(Names[op] + "(" + BitConverter.ToString(_cmd, 0, _cmdLen) + ")");
+            Recent(Names[op] + "(" + BitConverter.ToString(_cmd, 0, _cmdLen) + ")");
             int unit = _cmd.Length > 1 ? (_cmd[1] & 0x03) : 0;
             int head = _cmd.Length > 1 ? ((_cmd[1] >> 2) & 0x01) : 0;
 
