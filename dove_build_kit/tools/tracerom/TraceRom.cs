@@ -100,6 +100,10 @@ namespace DoveTrace
             _cp.MapReadLog = new List<string>();
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
+            _cp.LoopLog = new List<string>();
+            { var _la = Environment.GetEnvironmentVariable("DOVE_LOOP_ADDR"); _cp.LoopAddr = string.IsNullOrEmpty(_la) ? -1 : Convert.ToInt32(_la, 16); }
+            _cp.LoopFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_LOOP_FROM") ?? "2147483647");
+            _cp.RingFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_RING_FROM") ?? "2147483647");
             _cp.StkTrapLog = new List<string>();   // TechRef Table 2.11 stack over/underflow detector
             _cp.OpLog = new List<string>();
             _cp.LinkLog = new List<string>();
@@ -622,6 +626,8 @@ namespace DoveTrace
             // everything after it is silent-wrap noise (once one underflow wraps, every sp reading is fiction).
             Console.WriteLine("=== TABLE 2.11 STACK TRAPS (first " + _cp.StkTrapLog.Count + " shown) ===");
             foreach (var l in _cp.StkTrapLog) Console.WriteLine(l);
+            Console.WriteLine("=== MICROWORD PATH / LOOP STATE (" + _cp.LoopLog.Count + " lines) ===");
+            foreach (var l in _cp.LoopLog) Console.WriteLine(l);
             Console.WriteLine("=== aGMF / FindStartOfIORegion Map<- references near IORegion end (target: reads vp 0x0FF; MAPA=4 -> MAR 0x400FF) ===");
             foreach (var l in _cp.MapReadLog) Console.WriteLine("   " + l);
             Console.WriteLine("=== GetHandlerIORegionPtr math (fcb = base + 8*(ByteSwap[segments[16]] - 0x400); correct = vp 0x0DE) ===");

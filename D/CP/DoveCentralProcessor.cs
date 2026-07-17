@@ -167,6 +167,12 @@ namespace D.CP
         public int LoopAddr = -1, LoopFrom = int.MaxValue;
         public int RingFrom = int.MaxValue;   // TEMP: arm the entry-path ring buffer
         public List<string> StkTrapLog;       // TechRef Table 2.11 stack over/underflow detector
+        // A/B switch for the <-ErrnIBnStkp StkP field.  DOVE_STK_DEPTH=1 -> report true depth
+        // (_stackP+1, the c2c301c model); default -> report ~_stackP, which is what
+        // ProcListXferDaybreak DSKf assumes: `TT <- ~ErrnIBnStkp; TT <- TT and 0F` recovers the RAW
+        // stackP by complementing this field, so the field must BE ~stackP.
+        public static readonly bool _stkFieldDepth =
+            System.Environment.GetEnvironmentVariable("DOVE_STK_DEPTH") == "1";
         private int _stkTraps;
         private readonly string[] _ring = new string[64];
         private int _ringPos; private bool _ringDumped;
@@ -425,7 +431,8 @@ namespace D.CP
                                 // and the germ's 16x1 probe blt ran BandBLT's unbounded band walk (MP stuck 0900).
                                 // Depth checks out across the table: 1-word Arg0 -> hbs.1 (BandBLT fresh),
                                 // 2-word BBptr -> hbs.2 (BitBlt fresh), 12 -> hbs.C (interrupt resume).
-                        _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4) | (((_stackP + 1)) & 0xf));
+                        _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4)
+                            | ((_stkFieldDepth ? (_stackP + 1) : ~_stackP) & 0xf));
                         _trapCode = 0;   // read-to-clear
                         break;
                     case 0xB:   // <-RH
