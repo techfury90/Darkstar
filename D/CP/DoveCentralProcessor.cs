@@ -713,16 +713,23 @@ namespace D.CP
                     if (ReadWord != null && FrameChainLog != null)
                     {
                         int L = ((_lastDispRH3 & 0xF) << 16) | _lastDispR3;
+                        int mds = L & 0xFF0000;   // MDS bank; frame/GF links are MDS-relative 16-bit words
                         FrameChainLog.Add("=== FRAME CHAIN at @AB0 invocation (L=0x" + L.ToString("X5")
-                            + ", PC=0x" + va.ToString("X5") + ") ===");
-                        for (int depth = 0; depth < 8 && L > 0x400 && L < 0x100000; depth++)
+                            + ", PC=0x" + va.ToString("X5") + ", MDS base=0x" + mds.ToString("X5") + ") ===");
+                        for (int depth = 0; depth < 10 && (L & 0xFFFF) >= 4; depth++)
                         {
                             int fsi = ReadWord(L - 4), ret = ReadWord(L - 3), gl = ReadWord(L - 2), pc = ReadWord(L - 1);
+                            // Global frame (module) from the globallink; its codebase pointer names the module.
+                            int gf = mds | (gl & 0xFFFF);
+                            int cbLo = ReadWord(gf - 2), cbHi = ReadWord(gf - 1);   // GF-relative codebase (GFT-style [gf,cb])
                             FrameChainLog.Add("  [" + depth + "] L=0x" + L.ToString("X5")
                                 + "  fsi/LW=0x" + fsi.ToString("X4") + "  returnlink=0x" + ret.ToString("X4")
-                                + "  globallink(GF)=0x" + gl.ToString("X4") + "  pc=0x" + pc.ToString("X4"));
-                            if (ret == 0 || (ret & 1) != 0 || ret == L) break;   // NIL / non-frame link / self
-                            L = ret;   // ShortControlLink to the caller's frame (MDS-relative word)
+                                + "  GF=0x" + gf.ToString("X5") + "(gl=0x" + gl.ToString("X4") + ")"
+                                + "  codebase~[0x" + cbHi.ToString("X4") + ":" + cbLo.ToString("X4") + "]  pc=0x" + pc.ToString("X4"));
+                            if (ret == 0 || (ret & 1) != 0) break;                 // NIL / non-frame (proc-desc) link
+                            int next = mds | (ret & 0xFFFF);
+                            if (next == L) break;                                  // self-loop
+                            L = next;                                              // caller frame (MDS-relative link)
                         }
                     }
                 }
