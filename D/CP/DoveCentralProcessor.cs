@@ -422,15 +422,27 @@ namespace D.CP
                         _trapCode = 0;   // read-to-clear: the InitTrap code is acked by the @0 read
                         break;
                     case 0xA:   // <-ErrnIBnStkp: X[8-9]=trap, X[10-11]=~ibPtr, X[12-15]=~stackP.
-                                // The StkP field reports ~stackP_hw, and the hardware's stackP counts DOWN from
-                                // full, so ~stackP_hw == the TRUE stack DEPTH.  Our _stackP counts the SU-array
-                                // spills and does NOT include the TOS (cached in R0), so depth = _stackP + 1.
-                                // Reporting (~_stackP) sent BitBlt's HowBigStack dispatch (BBInit.mc:28/29,
-                                // DISP4[HowBigStack]) to hbs.E (BandBLT's interrupt-resume entry, BandBLT.mc:58)
-                                // instead of hbs.2 (bbNormEntry) -- so bbGetArg/MDtoRbb0 never read the bbTable
-                                // and the germ's 16x1 probe blt ran BandBLT's unbounded band walk (MP stuck 0900).
-                                // Depth checks out across the table: 1-word Arg0 -> hbs.1 (BandBLT fresh),
-                                // 2-word BBptr -> hbs.2 (BitBlt fresh), 12 -> hbs.C (interrupt resume).
+                                // The StkP field is ~stackP, and _stackP counts UP from 0 == the true depth
+                                // (TechRef Table 2.11: push -> +1, trap at 15).  MEASURED CORRECT -- do not
+                                // "fix" this field again:
+                                //   At the germ's aBITBLT (zESC alpha 0x2B) _stackP=2 (a 2-word BBptr), so this
+                                //   returns ~2 = 0x0D; BBInit.mc:28/29 (Xbus <- ErrnIBnStkp, XDisp;
+                                //   DISP4[HowBigStack,08]) then lands on microstore 0x03D, and 0x03D IS
+                                //   bbNormEntry -- the trace executes BBInit.mc:35/37/38 (VS <- UBitBltArg;
+                                //   VS <- VS and ~0F; rhRet <- argMap, CALL[SrcMapSpec]) and goes on to run
+                                //   bbGetArg (BBInit.mc:44-60), reading the bbTable at offsets 8,A,3,7,9 in
+                                //   source order with UWidth = 0x0010 = the 16x1 probe blt.  It does NOT reach
+                                //   BandBLT's interrupt entry.
+                                // The trap for the unwary: `hbs.N` names the stackP VALUE N, not a microstore
+                                // offset.  The assembler places hbs.N at base|(~N & 7) -- so ~2=0x0D reaching
+                                // 0x038|5 = 0x03D is exactly how you arrive at hbs.2.  Reading "hbs.2" as a
+                                // dispatch value of 2 is what produced the (false) story that this field was
+                                // broken.  cf. TextBlt.mc:186 `TTgetsSTKRet[0B] {1011 is one's complement of
+                                // stackP = 4}` -- the same complement convention, spelled out in the source.
+                                // Other consumers agree the field is ~stackP: ProcListXferDaybreak.mc:372 DSKf
+                                // (`TT <- ~ErrnIBnStkp` to recover the raw pointer), Floyd.mc:37, Misc.mc:369.
+                                // c2c301c reported (_stackP+1) here and was reverted by bc9d83e; DOVE_STK_DEPTH=1
+                                // re-creates it (DSKf then clamps to 0E at every trap entry -- ProcListXfer:381).
                         _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4)
                             | ((_stkFieldDepth ? (_stackP + 1) : ~_stackP) & 0xf));
                         _trapCode = 0;   // read-to-clear
@@ -902,9 +914,17 @@ namespace D.CP
                                     // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
-                                // TEMP: BitBlt probe -- catch aBITBLT (F8 2B = ESC2n[0x0B]) or PILOTBITBLT (0x76),
-                                // the BitBlt at the end of ProcessorHeadDove.Start.  Trace the setup so the bbTable
-                                // geometry the microcode reads (Width @offset+8, Height @offset+0) is visible:
+                                // TEMP: BitBlt probe -- catch aBITBLT, the blt at the end of ProcessorHeadDove.Start.
+                                // aBITBLT is reachable ONLY as zESC alpha 0x2B: BBInit.mc:23 places @BITBLT at
+                                // at[0B,10,ESC2n], and Misc.mc:63/64 dispatch ESCHi on alpha's high nibble then
+                                // ESC2n on its low nibble.  There is NO opcode[] for any BLT.
+                                // The old `_ibFront == 0x76` arm was WRONG: 0x76 == 166'b == @SGDB
+                                // (LoadStore.mc:404 `opcode[166'b]`), a Store-Global -- not "PILOTBITBLT".  It fired
+                                // on every @SGDB dispatch and printed a "BITBLT ENTRY" banner with whatever stack
+                                // state @SGDB happened to have (6 of 7 banners in a 17M run were phantoms).  Those
+                                // phantom numbers are the likely source of the "TOS=0x0A06, sp=1 at the BitBlt
+                                // probe" claim, which does not reproduce.  Match alpha only.
+                                // Trace the setup so the bbTable geometry the microcode reads is visible:
                                 // the following microwords' mar = [rhSrcA, SrcA+offset] read addr, X = the value.
                                 // zRET (0xEF, opcode 357'b, ProcListXferDaybreak.mc:182 @RET: MAR <- [rhL, L-LF.word]).
                                 // Start's zRET @CPi 15325 XFERs through a NULL link read from real 0x489C0/1 -> sControlTrap.
@@ -919,7 +939,7 @@ namespace D.CP
                                     _escCd = 40;
                                 }
                                 if (EscLog != null && EscLog.Count < 400 &&
-                                    (_ibFront == 0x76 || (_ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x2B)))
+                                    _ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x2B)
                                 {
                                     byte alpha = _ib[((int)_ibPtr) & 0x1];
                                     // THE DUMP: the eval-stack state at the aBITBLT dispatch.  Under the
