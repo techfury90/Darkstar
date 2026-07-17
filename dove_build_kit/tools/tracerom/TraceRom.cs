@@ -101,6 +101,8 @@ namespace DoveTrace
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
             _cp.LoopLog = new List<string>();
+            _cp.AddrHist = new int[4096];
+            _cp.HistFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_HIST_FROM") ?? "2147483647");
             { var _la = Environment.GetEnvironmentVariable("DOVE_LOOP_ADDR"); _cp.LoopAddr = string.IsNullOrEmpty(_la) ? -1 : Convert.ToInt32(_la, 16); }
             _cp.LoopFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_LOOP_FROM") ?? "2147483647");
             _cp.RingFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_RING_FROM") ?? "2147483647");
@@ -628,6 +630,13 @@ namespace DoveTrace
             foreach (var l in _cp.StkTrapLog) Console.WriteLine(l);
             Console.WriteLine("=== MICROWORD PATH / LOOP STATE (" + _cp.LoopLog.Count + " lines) ===");
             foreach (var l in _cp.LoopLog) Console.WriteLine(l);
+            { long tot = 0; for (int i = 0; i < 4096; i++) tot += _cp.AddrHist[i];
+              Console.WriteLine("=== MICROWORD HISTOGRAM (from CPi " + _cp.HistFrom + ", total " + tot + ") -- top 14 ===");
+              foreach (int i in Enumerable.Range(0, 4096).OrderByDescending(i => _cp.AddrHist[i]).Take(14))
+              { if (_cp.AddrHist[i] == 0) break;
+                Console.WriteLine("   @" + i.ToString("X3") + "  " + _cp.AddrHist[i] + "  ("
+                    + (tot > 0 ? (100.0 * _cp.AddrHist[i] / tot).ToString("F1") : "0") + "%)  "
+                    + new D.CP.Microinstruction(_io.ControlStore.GetWord(_cp.Bank, i)).Disassemble(-1)); } }
             Console.WriteLine("=== aGMF / FindStartOfIORegion Map<- references near IORegion end (target: reads vp 0x0FF; MAPA=4 -> MAR 0x400FF) ===");
             foreach (var l in _cp.MapReadLog) Console.WriteLine("   " + l);
             Console.WriteLine("=== GetHandlerIORegionPtr math (fcb = base + 8*(ByteSwap[segments[16]] - 0x400); correct = vp 0x0DE) ===");
