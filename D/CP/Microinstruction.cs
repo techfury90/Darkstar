@@ -305,6 +305,10 @@ namespace D.CP
 
             bool fxPop = (fX == XFunction.pop);
             bool fzPop = (fSfZ == FunctionSelectFZ.fzNorm && ((ZNormFunction)fZ) == ZNormFunction.pop);
+            // Table 2.11 needs these SEPARATELY: fXpop+push and push+fZpop both move stackP by 0,
+            // but trap on underflow(0) vs overflow(15) respectively.  Pop = fxPop||fzPop cannot
+            // distinguish them, and Push||Pop cannot express "both, net zero" at all.
+            FxPop = fxPop; FzPop = fzPop;
 
             Pop = fxPop || fzPop;
 
@@ -495,6 +499,11 @@ namespace D.CP
         /// Whether any stack operations (pushes or pops) occur in this instruction.
         /// </summary>
         public readonly bool StackOperation;
+
+        /// <summary>fX pop field, kept separately: Table 2.11 distinguishes fXpop from fZpop.</summary>
+        public readonly bool FxPop;
+        /// <summary>fZ pop field, kept separately: Table 2.11 distinguishes fXpop from fZpop.</summary>
+        public readonly bool FzPop;
 
         /// <summary>
         /// Specifies the kind of test specified by the various

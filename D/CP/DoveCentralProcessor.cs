@@ -166,6 +166,8 @@ namespace D.CP
         public List<string> LoopLog;    // TEMP: full-state dump across microcode-spin iterations
         public int LoopAddr = -1, LoopFrom = int.MaxValue;
         public int RingFrom = int.MaxValue;   // TEMP: arm the entry-path ring buffer
+        public List<string> StkTrapLog;       // TechRef Table 2.11 stack over/underflow detector
+        private int _stkTraps;
         private readonly string[] _ring = new string[64];
         private int _ringPos; private bool _ringDumped;
         private int _loopCd, _loopIters;
@@ -1057,7 +1059,64 @@ namespace D.CP
             }
 
             // ---- Stack pointer update (end of microinstruction) ----
-            if (mi.LoadStackP) _stackP = (_yBus & 0xf);
+            // stackP<- (fYnorm slot 5, TmMacroTablesDaybreak [["stackP<-",5],[fS01:norm,fY:a1,yIn:t,yl:t]])
+            // takes the Y bus and BYPASSES Table 2.11 entirely -- the table governs only pop/push, so this
+            // can install any value, legal or not.  GermOpsImpl:848-849 CodeTrap wraps the module-start call
+            // in a save/restore pair: `d.state <- STATE` ("Must be first"; ControlTrap's comment on the
+            // identical construct says reading STATE "resets stack pointer") ... Call[MainBody[d.gfi]] ...
+            // `STATE <- d.state` ("Must be last"), where state is a PrincOps.StateVector carrying
+            // stk[0..14) AND stkptr -- "holds args of called procedure".  If STATE<- doesn't restore stkptr,
+            // the germ resumes on a pointer nobody set.  Log every non-pop/push write to _stackP.
+            if (mi.LoadStackP)
+            {
+                if (StkTrapLog != null && StkTrapLog.Count < 40)
+                    StkTrapLog.Add("--- stackP<- @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                        + "   sp " + _stackP + " -> " + (_yBus & 0xf) + "   (Ybus=" + _yBus.ToString("X4") + ")   "
+                        + mi.Disassemble(-1));
+                _stackP = (_yBus & 0xf);
+            }
+
+            // ---- TechRef Table 2.11: stack pointer overflow/underflow DETECTOR ----
+            //   functions            stackP   trap is      if stackP is
+            //   pop                   -1      underflow      0
+            //   push                  +1      overflow      15
+            //   fXpop, push            0      underflow      0
+            //   push, fZpop            0      overflow      15
+            //   fXpop, fZpop          -1      underflow      0 or 1
+            //   fXpop, fZpop, push     0      underflow      0 or 1
+            // "If a pop or push is executed with the values of the stackPointer given in Table 2.11
+            //  then a trap to location 0 in c1 occurs.  However, stackP is still modified."
+            // The MOTION above is already correct for all six rows (StackTest gates the three
+            // combined rows to delta 0); what was missing is the trap.  Rows 3 and 4 have the SAME
+            // delta but OPPOSITE conditions, so FxPop/FzPop must be tested separately -- Pop
+            // (= fxPop||fzPop) cannot distinguish them.
+            // Tested on the PRE-update _stackP, which is what the table's column means.
+            // *** NOT VECTORED ON PURPOSE ***: microstore 0 is BootTrap (InitDaybreak.mc:19
+            // StartAddress[BootTrap], :41 "From trap branch in Refill.mc") = the boot-button/INIT
+            // vector -- ClrIntErr, ClrLOCK, ClrMPIntIOP, G<-0, reprogram the 8254s = a FULL MACHINE
+            // RE-INIT.  Nothing "relies on" this trap; it is the hardware's detector for broken
+            // microcode.  Vectoring it before the first underflow is fixed would faithfully reboot
+            // the machine at the first offence.  Detector first, vector later as the regression test.
+            if (mi.StackOperation)
+            {
+                bool fx = mi.FxPop, fz = mi.FzPop, pu = mi.Push;
+                bool trap; string row;
+                if (fx && fz && pu) { row = "fXpop,fZpop,push (d=0,  underflow@0|1)"; trap = (_stackP <= 1); }
+                else if (fx && fz)  { row = "fXpop,fZpop      (d=-1, underflow@0|1)"; trap = (_stackP <= 1); }
+                else if (pu && fz)  { row = "push,fZpop       (d=0,  overflow@15)";   trap = (_stackP == 15); }
+                else if (pu && fx)  { row = "fXpop,push       (d=0,  underflow@0)";   trap = (_stackP == 0); }
+                else if (pu)        { row = "push             (d=+1, overflow@15)";   trap = (_stackP == 15); }
+                else                { row = "pop              (d=-1, underflow@0)";   trap = (_stackP == 0); }
+                if (trap)
+                {
+                    _trapCode = 2;   // Table 2.10 priority 2; surfaces on X[8-9] via <-ErrnIBnStkp
+                    _stkTraps++;
+                    if (StkTrapLog != null && StkTrapLog.Count < 40)
+                        StkTrapLog.Add("*** STACK TRAP #" + _stkTraps + " @" + addr.ToString("X3")
+                            + " CPi=" + InstructionCount + "  sp(before)=" + _stackP
+                            + "  " + row + "   " + mi.Disassemble(-1));
+                }
+            }
 
             // Only StackTest==None actually moves the 16-deep pointer.  Push+pop combos are
             // NON-modifying over/underflow TESTS (HWref p.33) -- applying Push/Pop raw corrupted depth.
