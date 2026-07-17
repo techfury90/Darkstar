@@ -225,6 +225,7 @@ namespace D.CP
         // IOP->CP doorbell (wakeup) watch: did the IOP ring the CP after the transfer, and was IE off?
         public long _mIntAsserts;
         public List<string> MIntLog;
+        public List<string> FrameChainLog;   // Mesa frame/return-link chain at the @AB0 invocation
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -704,6 +705,26 @@ namespace D.CP
                         + "  TOS=" + _lastDispTOS.ToString("X4") + " sp=" + _lastDispSp
                         + "  |  @AB0 scan-state now: R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X2")
                         + " R2=" + _alu.R[2].ToString("X4") + " RH2=" + _rh[2].ToString("X2") + " mar=" + _mar.ToString("X5");
+                    // FRAME CHAIN at the invocation: L = (RH3<<16)|R3.  Mesa frame header (PrincOps): L-4=fsi/
+                    // LocalWord, L-3=returnlink (caller's L), L-2=globallink (module global frame GF), L-1=pc.
+                    // Follow returnlink to build the call stack -- names WHICH germ routine entered the scheduler
+                    // (the poll-based floppy transfer-wait canNOT put the germ in @AB0, so this is a DIFFERENT
+                    // block: a Monitor.Wait / Process op / fault).  GF (globallink) + codebase name the module.
+                    if (ReadWord != null && FrameChainLog != null)
+                    {
+                        int L = ((_lastDispRH3 & 0xF) << 16) | _lastDispR3;
+                        FrameChainLog.Add("=== FRAME CHAIN at @AB0 invocation (L=0x" + L.ToString("X5")
+                            + ", PC=0x" + va.ToString("X5") + ") ===");
+                        for (int depth = 0; depth < 8 && L > 0x400 && L < 0x100000; depth++)
+                        {
+                            int fsi = ReadWord(L - 4), ret = ReadWord(L - 3), gl = ReadWord(L - 2), pc = ReadWord(L - 1);
+                            FrameChainLog.Add("  [" + depth + "] L=0x" + L.ToString("X5")
+                                + "  fsi/LW=0x" + fsi.ToString("X4") + "  returnlink=0x" + ret.ToString("X4")
+                                + "  globallink(GF)=0x" + gl.ToString("X4") + "  pc=0x" + pc.ToString("X4"));
+                            if (ret == 0 || (ret & 1) != 0 || ret == L) break;   // NIL / non-frame link / self
+                            L = ret;   // ShortControlLink to the caller's frame (MDS-relative word)
+                        }
+                    }
                 }
             }
 

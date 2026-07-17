@@ -101,6 +101,7 @@ namespace DoveTrace
             _cp.LoopTraceFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_LOOPTRACE_FROM") ?? "0");   // XFER-entry trace window (CPi)
             _cp.MapReadLog = new List<string>();
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
+            _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
             _cp.LoopLog = new List<string>();
@@ -691,6 +692,11 @@ namespace DoveTrace
                 long ht = h1 + h2 + h3;
                 {
                 var cp = _cp;
+                Console.WriteLine("=== FRAME CHAIN at the @AB0 invocation (names the germ routine that entered the scheduler) ===");
+                Console.WriteLine("    The floppy transfer-wait POLLS (no reschedule), so @AB0 was entered by a DIFFERENT block.");
+                Console.WriteLine("    globallink(GF) + the code page name the module; returnlink chains up to the caller.");
+                if (cp.FrameChainLog != null) foreach (var l in cp.FrameChainLog) Console.WriteLine("   " + l);
+
                 Console.WriteLine("=== IOP->CP DOORBELL (wakeup) watch: did the IOP ring the CP, and was IE off? ===");
                 Console.WriteLine("    Transfer completed ~CPi 7.35M.  A ring AFTER that with IE=0 = a DROPPED wakeup (missed-wakeup wound).");
                 Console.WriteLine("    A ring never firing after the transfer = the notify is upstream (IOP never tried to wake the CP).");
