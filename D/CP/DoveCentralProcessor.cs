@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Collections.Generic;
 using D.IOP;
 
@@ -160,6 +160,8 @@ namespace D.CP
         public List<string> XWtLog;    // TEMP: microword-field decode + XWtOKDisp(fY=0xB) branch at the net-0 zSGB faulting store (CPi 1300-1400)
         public List<string> MapReadLog; // TEMP: Map<- references near the IORegion end (aGMF / FindStartOfIORegion)
         public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
+        public List<string> WrmpLog;   // TEMP: every @WRMP (zESC alpha 0x77) = THE maintenance-panel post chokepoint
+        public int RetLogFrom = 15300, RetLogTo = 15340;   // TEMP: zRET (0xEF) trace window
         private int _escCd;            // countdown of instructions to log after an F8 dispatch
         private bool _writeFrozen;
         public readonly Dictionary<string, long> FuncHits = new Dictionary<string, long>();
@@ -294,6 +296,8 @@ namespace D.CP
             {
                 EscLog.Add("  @" + addr.ToString("X3") + " c" + _cycle + " ib=" + _ibFront.ToString("X2")
                     + " mar=" + _mar.ToString("X5") + " X=" + _xBus.ToString("X4")
+                    + " L=[" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4") + "]"
+                    + " Q=" + _alu.Q.ToString("X4") + " aD=" + mi.aD + " rB=" + mi.rB
                     + " sp=" + _stackP + " TOS=" + _alu.R[0].ToString("X4")
                     + " push=" + (mi.Push ? 1 : 0) + " pop=" + (mi.Pop ? 1 : 0) + " dpop=" + (mi.DoublePop ? 1 : 0)
                     + " stkOp=" + (mi.StackOperation ? 1 : 0) + " stkTest=" + mi.StackTest + " ldSP=" + (mi.LoadStackP ? 1 : 0)
@@ -708,7 +712,32 @@ namespace D.CP
                         // off the Y bus, so a write to an already-dirty writable page (e.g. 0x80C5) took
                         // the fault branch, fell into the MapFix set-dirty retry loop, and the germ's
                         // boot-file inload page-walk never advanced past cGerm 0900.
-                        if ((_xBus & 0x40) != 0 && (_xBus & 0x20) == 0) _niaModifier |= 1;   // -> DMapOK
+                        // The OK condition drives NIA BIT 1, not bit 0.  TechRef 2.3.3.1: "A particular
+                        // condition bit is ignored when its corresponding position in INIA equals 1" -- so
+                        // BRANCH[false, true, mask]'s third operand IS the INIA low nibble, and the bits it
+                        // SETS are the cancelled ones.  Both XWtOKDisp sites use mask 0D = 1101, leaving only
+                        // bit 1 (0x2) free:
+                        //   ProcListXferDaybreak XFStartRead: BRANCH[XFMUD, XFMOK, 0D]  -- XFMUD @0x?AD, XFMOK @0x?AF
+                        //   LoadStore.mc:389    @SGB c3:      BRANCH[SGa,   SGb,   0D]
+                        // With `|= 1` the OK bit landed on a position INIA already had set (0xD = 1101), so it
+                        // was cancelled by definition and BOTH arms resolved to the same address -- the branch
+                        // could never select.  XFER therefore always took XFMUD -> WMapFix, skipping
+                        // `MAR <- L <- [rhL, Q-LF.pc] {fix L}`, so L exited XFER still holding the RAW MAP WORD
+                        // from `L <- MD, rhL <- MD` (0x89C4: high byte 0x89 = real page, low byte 0xC4 = the map
+                        // flag byte) instead of the link's offset (0x89D0).  The germ then ran ~12,000 microinstrs
+                        // on a pseudo-frame at 0x489C4 that AllocSub never allocated -- reads/writes silently
+                        // "worked" because the address lands inside frame page 0x489 -- until Start's zRET read
+                        // that non-frame's header (fsi/returnlink at L-4/L-3 = virgin zeros), XFERed through a
+                        // null link, and hit `[] <- Q, ZeroBr, BRANCH[$, ControlTrap]` -> GermWorldError[902].
+                        // TechRef Table 2.8: XWtOKDisp = 1,1,(X.08 ^ X.09 ^ X.10'),0 -> INIA[8-11].
+                        //   X.08 = ref (0x80), X.09 = dirty (0x40), X.10' = NOT writeProtect (0x20).
+                        // The constant 0xC is cancelled at every mask-0D site (INIA low nibble 0xD has bits
+                        // 0x4/0x8 set), which is exactly why all 31 XWtOKDisp use sites show only bit 0x2 live.
+                        // It is therefore inert wherever the microcode actually uses this function; included
+                        // for fidelity to the table.  (The `ref` term was missing: it agreed on map word
+                        // 0x89C4 only because ref happened to be set, and would diverge on a dirty-but-
+                        // unreferenced page.  If this ever regresses, trust the measured 31/31 over the table.)
+                        _niaModifier |= 0xC | (((_xBus & 0x80) != 0 && (_xBus & 0x40) != 0 && (_xBus & 0x20) == 0) ? 0x2 : 0);
                         if (XWtLog != null && InstructionCount >= 1250 && InstructionCount <= 1400)
                             XWtLog.Add("  ** XWtOKDisp(fY=0xB) @" + addr.ToString("X3") + " CPi=" + InstructionCount
                                 + " X=" + _xBus.ToString("X4") + " dirty(0x40)=" + ((_xBus & 0x40) != 0 ? 1 : 0) + " wp(0x20)=" + ((_xBus & 0x20) != 0 ? 1 : 0)
@@ -802,8 +831,10 @@ namespace D.CP
                                 // Normal dispatch: ibFront replaces INIA[4-7] and ORs INIA[8-11].
                                 // Log opcodes in the CPi window OR anywhere in Start's code page (RH5=4, R5 0xAE00-0xAEFF = real page 0x4AE)
                                 bool inStartPage = (_rh[5] == 4 && _alu.R[5] >= 0xAE00 && _alu.R[5] < 0xAF00);
-                                if (OpLog != null && OpLog.Count < 400 && ((InstructionCount >= OpLogFrom && InstructionCount < OpLogTo) || inStartPage))
-                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP);
+                                // NB: the old `|| inStartPage` OR-gate filled the 400-entry cap at CPi ~2900 and made
+                                // every later window silently empty.  Window only; inStartPage is just a label now.
+                                if (OpLog != null && OpLog.Count < 400 && InstructionCount >= OpLogFrom && InstructionCount < OpLogTo)
+                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP + " L=[" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4") + "]->" + ((((_rh[3] & 0xF) << 16) | _alu.R[3])).ToString("X5"));
                                     // offC = committed-R5 offset (sampled post-L487 ALU commit, unlike the top-of-Step off at L307
                                     // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
                                 _niaModifier |= _ibFront;
@@ -812,6 +843,18 @@ namespace D.CP
                                 // the BitBlt at the end of ProcessorHeadDove.Start.  Trace the setup so the bbTable
                                 // geometry the microcode reads (Width @offset+8, Height @offset+0) is visible:
                                 // the following microwords' mar = [rhSrcA, SrcA+offset] read addr, X = the value.
+                                // zRET (0xEF, opcode 357'b, ProcListXferDaybreak.mc:182 @RET: MAR <- [rhL, L-LF.word]).
+                                // Start's zRET @CPi 15325 XFERs through a NULL link read from real 0x489C0/1 -> sControlTrap.
+                                // Trigger only in that window (zRET is far too common otherwise).
+                                if (EscLog != null && EscLog.Count < 400 && _ibFront == 0xEF
+                                    && InstructionCount > RetLogFrom && InstructionCount < RetLogTo)
+                                {
+                                    EscLog.Add("=== zRET (0xEF) @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                                        + "  R0..R7=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0,8), i => _alu.R[i].ToString("X4")))
+                                        + "  RH0..RH7=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0,8), i => _rh[i].ToString("X2")))
+                                        + " sp=" + _stackP + "  (next: @RET MAR<-[rhL, L-LF.word]) ===");
+                                    _escCd = 40;
+                                }
                                 if (EscLog != null && EscLog.Count < 400 &&
                                     (_ibFront == 0x76 || (_ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x2B)))
                                 {
@@ -822,6 +865,15 @@ namespace D.CP
                                         + "] CPi=" + InstructionCount + "  (next mar/X = bbTable field reads) ===");
                                     _escCd = 60;
                                 }
+                                // @WRMP (MiscDaybreak.mc:113, at[7,10,ESC7n]) = zESC alpha 0x77 -- THE maintenance-panel
+                                // chokepoint.  ProcessorFace.SpecialSetMP is MACHINE CODE [zESC, aWRMP] and posts
+                                // STRAIGHT to hardware without touching the ProcessorFace.mp global ("Does not set
+                                // ProcessorFace.mp" -- ProcessorFace.mesa:27-34), so this dispatch is the only place
+                                // every MP post is visible, in order.  TOS (R0) = the mesa arg = the MP code.
+                                if (WrmpLog != null && _ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x77)
+                                    WrmpLog.Add("MP <- " + _alu.R[0].ToString("X4") + " (dec " + _alu.R[0]
+                                        + ")  @CPi " + InstructionCount + " @" + addr.ToString("X3")
+                                        + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " sp=" + _stackP);
                                 if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
                                     IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp dispatched " + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " -> advance front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]");
                                 _ibFront = _ib[((int)_ibPtr) & 0x1];
