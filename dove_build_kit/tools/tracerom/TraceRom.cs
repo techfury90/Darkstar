@@ -25,7 +25,7 @@ namespace DoveTrace
         static int _wTs = -1, _wLogs = 0;   // mesaProcessorTask taskState@0x7C62 watch
         static long _v23post = 0;
         static long _dbgInstr = 0;
-        static int _rd0FF = 0, _wr0FF = 0, _linkVecW = 0;
+        static int _rd0FF = 0, _wr0FF = 0, _linkVecW = 0, _fcbWatch = 0, _iorWatch = 0;
         static int _map0FFw = -1, _map0FFlogs = 0;
         static int _mpEs = -1, _mpSi = -1, _mpTcb = -1;
         static System.Collections.Generic.HashSet<int> _flowSeen = new System.Collections.Generic.HashSet<int>();
@@ -132,6 +132,24 @@ namespace DoveTrace
             int ramMask = sysRam.Length - 1;
             // CP is big-endian (Mesa); MAR is a 16-bit-word physical address.
             _cp.ReadWord = a => { int b = (a << 1) & ramMask; ushort v = (ushort)((sysRam[b] << 8) | sysRam[(b + 1) & ramMask]);
+                // FCB WATCH (operator candidate A): fcb.data.countMapPages ~= CP word 0x53E20 (2 words after the
+                // command word 0x53E1E).  numberVirtualPages = ByteSwap[countMapPages] * 256, and the available-VM
+                // interval is [0x100, numberVirtualPages).  Correct Daybreak => countMapPages ByteSwap = 0x100 (256)
+                // => numberVirtualPages = 0x10000.  Log every read of the FCB data window with its ByteSwap.
+                if (((a >= 0x53E14 && a <= 0x53E28) || (a >= 0x58004 && a <= 0x58018)) && _fcbWatch < 60)
+                { int bs = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF);
+                  bool isCount = (a == 0x53E20 || a == 0x58008 + 2);
+                  Console.WriteLine("*** FCB read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
+                    + " (ByteSwap 0x" + bs.ToString("X4") + " = " + bs + ")"
+                    + (isCount ? "  <== countMapPages? => numberVirtualPages = 0x" + (bs * 256).ToString("X5") + ", interval [0x100, that)" : "")
+                    + "  @CPi " + _cp.InstructionCount); _fcbWatch++; }
+                // IOREGION WATCH (operator candidate B): the entry bit-scan ran with mar=0x52000 and consumed a word
+                // that produced the ~0x8000 scan bound.  Log reads of the IORegion words near the @AB0 invocation
+                // (CPi ~7.34M) so we can see the actual word (is it 0xFFFF = uninitialized, or a sane value?).
+                if (a >= 0x52000 && a <= 0x52040 && _cp.InstructionCount >= 7340000 && _cp.InstructionCount <= 7360000 && _iorWatch < 40)
+                { int bs = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF);
+                  Console.WriteLine("*** IORegion read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
+                    + " (ByteSwap 0x" + bs.ToString("X4") + ")  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _iorWatch++; }
                 // Hole hypothesis: CP words 0x10000-0x3FFFF = phys 0x20000-0x80000 = the 128k-VRAM..512k-mainmem hole.
                 if (a >= 0x10000 && a < 0x40000) { _holeReads++; if (_holeReadPages.Add(a >> 8) && _holeReadPages.Count <= 40) Console.WriteLine("*** germ READS HOLE CP word " + a.ToString("X5") + " (phys 0x" + (a<<1).ToString("X5") + " = " + ((a<<1)>>10) + "k) = " + v.ToString("X4") + " @CPi " + _cp.InstructionCount); }
                 // TEMP: trace the germ's reads during the early FindStartOfIORegion + GetHandlerIORegionPtr compute
