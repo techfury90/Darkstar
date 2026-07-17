@@ -162,6 +162,14 @@ namespace D.CP
         public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
         public List<string> WrmpLog;   // TEMP: every @WRMP (zESC alpha 0x77) = THE maintenance-panel post chokepoint
         public int RetLogFrom = 15300, RetLogTo = 15340;   // TEMP: zRET (0xEF) trace window
+        public int[] AddrHist;          // TEMP: microword-address histogram -- names microcode spins
+        public List<string> LoopLog;    // TEMP: full-state dump across microcode-spin iterations
+        public int LoopAddr = -1, LoopFrom = int.MaxValue;
+        public int RingFrom = int.MaxValue;   // TEMP: arm the entry-path ring buffer
+        private readonly string[] _ring = new string[64];
+        private int _ringPos; private bool _ringDumped;
+        private int _loopCd, _loopIters;
+        public int HistFrom = int.MaxValue;
         private int _escCd;            // countdown of instructions to log after an F8 dispatch
         private bool _writeFrozen;
         public readonly Dictionary<string, long> FuncHits = new Dictionary<string, long>();
@@ -289,7 +297,53 @@ namespace D.CP
         private void Step()
         {
             int addr = _tpc[_task];
+            if (AddrHist != null && InstructionCount >= HistFrom) AddrHist[addr & 0xFFF]++;
             Microinstruction mi = Fetch(_execBank, addr);
+
+            // TEMP: entry-path ring -- records the last 64 microwords and dumps them at the FIRST
+            // hit of LoopAddr, so we can see how control ARRIVED (CALL vs fell-in-from-a-dispatch).
+            if (LoopLog != null && !_ringDumped && InstructionCount >= RingFrom)
+            {
+                _ring[_ringPos & 63] = "   @" + addr.ToString("X3") + " c" + _cycle + " X=" + _xBus.ToString("X4")
+                    + " mar=" + _mar.ToString("X5")
+                    + " Regb/R11=" + _alu.R[11].ToString("X4") + " bW/R2=" + _alu.R[2].ToString("X4")
+                    + " VD/R1=" + _alu.R[1].ToString("X4")
+                    + " L1=" + _link[1].ToString("X") + " L3=" + _link[3].ToString("X")
+                    + " Lw=" + mi.LinkAddress + " niaMod=" + _niaModifier.ToString("X3") + "  " + mi.Disassemble(-1);
+                _ringPos++;
+                if (addr == LoopAddr)
+                {
+                    _ringDumped = true;
+                    LoopLog.Add("=== PATH INTO @" + addr.ToString("X3") + " -- FIRST hit, CPi=" + InstructionCount
+                        + " (last 64 microwords; look for CALL[ComMap] vs a dispatch falling in) ===");
+                    for (int k = 0; k < 64; k++) { string e = _ring[(_ringPos + k) & 63]; if (e != null) LoopLog.Add(e); }
+                    LoopLog.Add("=== (end path) ===");
+                }
+            }
+
+            // TEMP: microcode-spin iteration dump -- full register/link state at the loop head, then
+            // every microword of the iteration.  Names the counter and the exit-branch outcome.
+            if (LoopLog != null && addr == LoopAddr && InstructionCount >= LoopFrom && _loopIters < 4)
+            {
+                _loopIters++;
+                LoopLog.Add("=== ITER " + _loopIters + " @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                    + "  R0-15=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 16), i => _alu.R[i].ToString("X4")))
+                    + "  RH0-15=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 16), i => _rh[i].ToString("X2")))
+                    + "  Q=" + _alu.Q.ToString("X4")
+                    + "  L0-7=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 8), i => _link[i].ToString("X")))
+                    + "  sp=" + _stackP + " ===");
+                _loopCd = 30;
+            }
+            if (_loopCd > 0 && LoopLog != null)
+            {
+                LoopLog.Add("   @" + addr.ToString("X3") + " c" + _cycle + " X=" + _xBus.ToString("X4") + " mar=" + _mar.ToString("X5")
+                    + " R4=" + _alu.R[4].ToString("X4") + " RH4=" + _rh[4].ToString("X2")
+                    + " R6=" + _alu.R[6].ToString("X4") + " RH6=" + _rh[6].ToString("X2")
+                    + " Q=" + _alu.Q.ToString("X4")
+                    + " L1=" + _link[1].ToString("X") + " L3=" + _link[3].ToString("X")
+                    + " niaMod=" + _niaModifier.ToString("X3") + "  " + mi.Disassemble(-1));
+                _loopCd--;
+            }
 
             // TEMP: @ESC alpha-dispatch trace (log the microaddr path after an F8 dispatch).
             if (_escCd > 0 && EscLog != null)
