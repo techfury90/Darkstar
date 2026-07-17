@@ -78,6 +78,7 @@ namespace DoveTrace
             _io.ConfigEeprom.ReadLog = new List<int>();
             _io.Fdc.Log = new List<string>();
             _io.Fdc.RecentLog = new string[80];   // ring: the LAST 80 FDC commands (Log caps at the FIRST 60)
+            _io.Fdc.ReadTrace = new List<string>();   // every Read Data cmd's C/H/R + outcome (missing-track = the 921 device error)
             _io.DmaLog = new System.Collections.Generic.List<string>();   // last FDC DMA transfers: count-programmed vs delivered
             _io.CpLoadLog = new List<string>();
 
@@ -553,6 +554,11 @@ namespace DoveTrace
             Console.WriteLine("8272 totals: commands=" + _io.Fdc.CommandCount + "  reads=" + _io.Fdc.ReadCount +
                               "  lastRead C/H/R=" + _io.Fdc.LastReadC + "/" + _io.Fdc.LastReadH + "/" + _io.Fdc.LastReadR +
                               "  lastFDCcmd@instr=" + _lastFdcInstr);
+            if (_io.Fdc.ReadTrace != null)
+            {
+                Console.WriteLine("=== 8272 READ TRACE (every Read Data cmd + outcome; a MISSING-TRACK line = the boot-device error -> 921) ===");
+                foreach (var l in _io.Fdc.ReadTrace) Console.WriteLine("   " + l);
+            }
             Console.Write("HIGH-PORT (>=0x8000) writes by bucket: ");
             foreach (var kv in _io.HighPortWrites) Console.Write("0x" + kv.Key.ToString("X4") + "=" + kv.Value + "  ");
             Console.WriteLine(_io.HighPortWrites.Count == 0 ? "(none)" : "");

@@ -203,6 +203,11 @@ namespace D.IOP
         /// </summary>
         public string[] RecentLog;
         public long RecentPos;
+        /// <summary>Every Read Data command's C/H/R/EOT + outcome (missing-track abnormal vs bytes gathered).
+        /// The germ's boot read stalls when it requests a track not in the IMD image (t==null -> ST0=0x40,
+        /// ST1=0x01) -> the boot channel sees status != goodCompletion -> cGermDeviceError (921).  This trace
+        /// names the exact failing (cylinder,head,sector) so the DMK->IMD geometry gap is visible.</summary>
+        public System.Collections.Generic.List<string> ReadTrace;
         private void Recent(string s)
         {
             if (RecentLog == null) return;
@@ -335,6 +340,9 @@ namespace D.IOP
                 // No track/media: abnormal termination, missing address mark.
                 _st0 = (byte)(0x40 | (head << 2) | unit);   // IC=AbnormalTermination
                 SetReadResult(0x01, 0x00, c, head, r, n);   // ST1 MissingAddressMark
+                if (ReadTrace != null && ReadTrace.Count < 600)
+                    ReadTrace.Add("Read#" + CommandCount + " C=" + c + " H=" + head + " R=" + r + " EOT=" + eot + " N=" + n
+                        + " -> **MISSING-TRACK ABNORMAL** ST0=" + _st0.ToString("X2") + " ST1=01  [c<77=" + (c < 77) + " getTrack=null]");
                 _int = true;
                 StartResult(7);
                 return;
@@ -351,6 +359,9 @@ namespace D.IOP
             // (opcode 0xC6) and, if under-delivered, its DMA count never drains.
             bool mt = (_cmd[0] & 0x80) != 0;
             if (mt) GatherSectors(d, c, head ^ 1, 1, eot, buf);
+            if (ReadTrace != null && ReadTrace.Count < 600)
+                ReadTrace.Add("Read#" + CommandCount + " C=" + c + " H=" + head + " R=" + r + " EOT=" + eot + " N=" + n
+                    + " MT=" + (mt ? 1 : 0) + " -> ok gathered=" + buf.Count + "B");
             _execData = buf.ToArray();
             _execIdx = 0;
             _phase = Phase.Execution;
