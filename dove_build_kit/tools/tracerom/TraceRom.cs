@@ -100,6 +100,7 @@ namespace DoveTrace
             _cp.LoopTrace = new List<string>();
             _cp.LoopTraceFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_LOOPTRACE_FROM") ?? "0");   // XFER-entry trace window (CPi)
             _cp.MapReadLog = new List<string>();
+            _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
             _cp.LoopLog = new List<string>();
@@ -690,6 +691,12 @@ namespace DoveTrace
                 long ht = h1 + h2 + h3;
                 {
                 var cp = _cp;
+                Console.WriteLine("=== IOP->CP DOORBELL (wakeup) watch: did the IOP ring the CP, and was IE off? ===");
+                Console.WriteLine("    Transfer completed ~CPi 7.35M.  A ring AFTER that with IE=0 = a DROPPED wakeup (missed-wakeup wound).");
+                Console.WriteLine("    A ring never firing after the transfer = the notify is upstream (IOP never tried to wake the CP).");
+                Console.WriteLine("    total IOP->CP doorbell asserts=" + cp._mIntAsserts);
+                if (cp.MIntLog != null) foreach (var l in cp.MIntLog) Console.WriteLine("   " + l);
+
                 Console.WriteLine("=== @AB0 CARRY PROBE (does the scan pointer advance past 64K?) ===");
                 Console.WriteLine("    R5 walks by 8; if RH5 never carries, the scan cycles vpages 0x100-0x1FF forever.");
                 Console.WriteLine("    RH5 first=0x" + (cp._ab0Rh5First < 0 ? -1 : cp._ab0Rh5First).ToString("X2")

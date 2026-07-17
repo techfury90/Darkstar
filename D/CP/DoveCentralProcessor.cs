@@ -222,6 +222,9 @@ namespace D.CP
         public int _ab0Rh5First = -1, _ab0Rh5Distinct, _ab0R5Min = 0x10000, _ab0R5Max = -1;
         public long _ab0Wraps;   // count of R5 0xFF..->00.. wraps observed
         private int _ab0R5Prev = -1;
+        // IOP->CP doorbell (wakeup) watch: did the IOP ring the CP after the transfer, and was IE off?
+        public long _mIntAsserts;
+        public List<string> MIntLog;
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -276,7 +279,17 @@ namespace D.CP
         {
             _csReg = value;
             _run = (value & 0x0200) != 0;              // b9 Halt' = run bit
-            if ((value & 0x0100) != 0) _mInt = true;   // b8 IOP->CP doorbell sets the int reg
+            if ((value & 0x0100) != 0)
+            {
+                // b8 IOP->CP doorbell = the IOP trying to WAKE the CP (e.g. an I/O completion).
+                // Log these: if the IOP rings after the boot transfer but IE=false drops it, that is the
+                // missed wakeup.  If the IOP NEVER rings after the transfer, the notify is upstream (IOP side).
+                _mIntAsserts++;
+                if (MIntLog != null && MIntLog.Count < 60)
+                    MIntLog.Add("IOP->CP doorbell (CSReg b8) asserted @CPi " + InstructionCount
+                        + "  IE=" + (_ie ? 1 : 0) + " (taken? needs IE)  csReg=0x" + value.ToString("X4"));
+                _mInt = true;   // b8 IOP->CP doorbell sets the int reg
+            }
         }
         private ushort _csReg;
         public ushort CSReg { get { return _csReg; } }
