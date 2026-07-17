@@ -630,6 +630,25 @@ namespace DoveTrace
             foreach (var l in _cp.StkTrapLog) Console.WriteLine(l);
             Console.WriteLine("=== MICROWORD PATH / LOOP STATE (" + _cp.LoopLog.Count + " lines) ===");
             foreach (var l in _cp.LoopLog) Console.WriteLine(l);
+            // STATIC DECODE: TechRef, below Fig 2.44 -- "The mem field should not be set in c1 along with
+            // a Map<-, unless the side effects of MAR<- are explicitly desired."  Dump mem/LoadMap for the
+            // map-fix-up sites so we can see whether the .db actually sets mem on a Map<- c1 word.
+            // (In DoveCentralProcessor the pageCross test lives INSIDE the else of if(LoadMap), so a Map<-
+            //  word never reaches it -- unlike D/CP/CentralProcessor.cs (DLion), where it sits outside.)
+            {
+                Console.WriteLine("=== Map<- c1 WORDS: does the .db set `mem` on them? (TechRef Fig 2.44 caveat) ===");
+                int[] sites = { 0x49C, 0x140, 0x062, 0x011, 0x7CD, 0x7D4, 0x3A8, 0x0D3, 0x160, 0x232, 0xAC0, 0xB69 };
+                foreach (int a in sites)
+                {
+                    ulong w = _io.ControlStore.GetWord(_cp.Bank, a);
+                    var mi2 = new D.CP.Microinstruction(w);
+                    Console.WriteLine("   @" + a.ToString("X3") + "  word=" + w.ToString("X12")
+                        + "  LoadMap=" + (mi2.LoadMap ? 1 : 0) + "  mem=" + (mi2.mem ? 1 : 0)
+                        + "  aF=" + mi2.aF + " aD=" + mi2.aD + " rB=" + mi2.rB
+                        + (mi2.LoadMap && mi2.mem ? "   <<< Map<- WITH mem SET" : "")
+                        + "   " + mi2.Disassemble(-1));
+                }
+            }
             { long tot = 0; for (int i = 0; i < 4096; i++) tot += _cp.AddrHist[i];
               Console.WriteLine("=== MICROWORD HISTOGRAM (from CPi " + _cp.HistFrom + ", total " + tot + ") -- top 14 ===");
               foreach (int i in Enumerable.Range(0, 4096).OrderByDescending(i => _cp.AddrHist[i]).Take(14))
