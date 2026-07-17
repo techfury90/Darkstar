@@ -215,6 +215,13 @@ namespace D.CP
         public bool _ab0InvokeLatched;
         public string _ab0Invoke;           // the captured invoking-opcode snapshot
         public int Ab0RunThreshold = 3000;  // > any legit bulk-read scan, < the runaway's ~4000/burst
+        // CARRY PROBE (operator candidate B): does @AB0's scan pointer ever carry R5 into RH5?
+        // The scan walks R5 by 8; if it wraps 0xFFFF->0 without advancing RH5, it cycles vpages 0x100-0x1FF
+        // forever instead of covering the [0x100, numberVirtualPages) interval.  Track the distinct RH5
+        // values and the R5 span seen at @AB0, after the invocation latch fires.
+        public int _ab0Rh5First = -1, _ab0Rh5Distinct, _ab0R5Min = 0x10000, _ab0R5Max = -1;
+        public long _ab0Wraps;   // count of R5 0xFF..->00.. wraps observed
+        private int _ab0R5Prev = -1;
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -660,6 +667,17 @@ namespace D.CP
             if (addr == 0xAB0)
             {
                 _ab0Run++;
+                // CARRY PROBE: once the runaway is latched, watch RH5 and R5.
+                if (_ab0InvokeLatched)
+                {
+                    int rh5 = _rh[5], r5 = _alu.R[5];
+                    if (_ab0Rh5First < 0) { _ab0Rh5First = rh5; _ab0Rh5Distinct = 1; }
+                    else if (rh5 != _ab0Rh5First && _ab0Rh5Distinct < 2) _ab0Rh5Distinct = 2;  // saw a 2nd RH5
+                    if (r5 < _ab0R5Min) _ab0R5Min = r5;
+                    if (r5 > _ab0R5Max) _ab0R5Max = r5;
+                    if (_ab0R5Prev >= 0 && _ab0R5Prev > 0xF000 && r5 < 0x1000) _ab0Wraps++;   // 0xFF..->00.. wrap
+                    _ab0R5Prev = r5;
+                }
                 if (_ab0Run == Ab0RunThreshold && !_ab0InvokeLatched)
                 {
                     _ab0InvokeLatched = true;

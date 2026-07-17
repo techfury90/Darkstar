@@ -664,6 +664,15 @@ namespace DoveTrace
                 long ht = h1 + h2 + h3;
                 {
                 var cp = _cp;
+                Console.WriteLine("=== @AB0 CARRY PROBE (does the scan pointer advance past 64K?) ===");
+                Console.WriteLine("    R5 walks by 8; if RH5 never carries, the scan cycles vpages 0x100-0x1FF forever.");
+                Console.WriteLine("    RH5 first=0x" + (cp._ab0Rh5First < 0 ? -1 : cp._ab0Rh5First).ToString("X2")
+                    + "  distinct RH5 values seen=" + cp._ab0Rh5Distinct
+                    + "  R5 span=[0x" + (cp._ab0R5Min == 0x10000 ? 0 : cp._ab0R5Min).ToString("X4") + "..0x" + (cp._ab0R5Max < 0 ? 0 : cp._ab0R5Max).ToString("X4") + "]"
+                    + "  R5-wraps(0xFF..->00..)=" + cp._ab0Wraps);
+                Console.WriteLine("    => " + (cp._ab0Rh5Distinct >= 2 ? "RH5 DOES carry (scan advances past 64K)"
+                    : "RH5 NEVER carries -- scan CYCLES vpages 0x100-0x1FF forever (candidate B CONFIRMED)"));
+
                 Console.WriteLine("=== INVOKING-OPCODE latch: the opcode dispatched just before @AB0's FIRST long burst ===");
                 Console.WriteLine("    (@AB0 is a bulk scan primitive; zLL6/zJZB are its interrupt SERVICE. THIS is the real caller.)");
                 Console.WriteLine("    " + (cp._ab0Invoke ?? "(never latched -- @AB0 never ran " + cp.Ab0RunThreshold + "+ iters without a dispatch)"));
