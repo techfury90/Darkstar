@@ -199,6 +199,11 @@ namespace D.CP
         // address during the data phase.  That is why the DLion reference throws on it.
         public readonly long[] MdrByCycle = new long[4];    // MDR<- (mem, c2) -- c1/c3 => BUG
         public readonly long[] IbDispByCycle = new long[4]; // IBDisp (c2)     -- outside c1/c2 => BUG
+        // ENTERING-OPCODE PROBE (see the IBDisp site): the last mesa opcode dispatched, with its inputs.
+        // When the run ends frozen in the @AB0 spin, this IS the opcode that entered the stuck primitive.
+        public int _lastDispOp = -1, _lastDispR5, _lastDispRH5, _lastDispR2, _lastDispRH2;
+        public int _lastDispR3, _lastDispRH3, _lastDispTOS, _lastDispSp, _lastDispAddr;
+        public long _lastDispCPi;
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -1035,6 +1040,19 @@ namespace D.CP
                                     OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP + " L=[" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4") + "]->" + ((((_rh[3] & 0xF) << 16) | _alu.R[3])).ToString("X5"));
                                     // offC = committed-R5 offset (sampled post-L487 ALU commit, unlike the top-of-Step off at L307
                                     // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
+                                // ENTERING-OPCODE PROBE: record every dispatched mesa opcode with the
+                                // register inputs it was handed.  @AB0's IBDisp is flat (it's a microcode
+                                // primitive that loops), so the LAST opcode dispatched before the run freezes
+                                // in the @AB0 spin IS the opcode that entered the stuck primitive -- it names
+                                // the primitive via the dispatch table, no symbol listing needed.  Capturing
+                                // R5/RH5/R2/RH2/TOS at dispatch shows the INPUT the primitive walked from.
+                                _lastDispOp = _ibFront;
+                                _lastDispCPi = InstructionCount;
+                                _lastDispAddr = addr;
+                                _lastDispR5 = _alu.R[5]; _lastDispRH5 = _rh[5];
+                                _lastDispR2 = _alu.R[2]; _lastDispRH2 = _rh[2];
+                                _lastDispR3 = _alu.R[3]; _lastDispRH3 = _rh[3];
+                                _lastDispTOS = _alu.R[0]; _lastDispSp = _stackP;
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
                                 // TEMP: BitBlt probe -- catch aBITBLT, the blt at the end of ProcessorHeadDove.Start.

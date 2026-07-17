@@ -662,7 +662,21 @@ namespace DoveTrace
             {
                 long h1 = _cp.CycleHist[1], h2 = _cp.CycleHist[2], h3 = _cp.CycleHist[3];
                 long ht = h1 + h2 + h3;
-                Console.WriteLine("=== ROTATION CENSUS -- THE LANE-PICKER: overall microwords per cycle ===");
+                {
+                var cp = _cp;
+                Console.WriteLine("=== ENTERING-OPCODE PROBE: the LAST mesa opcode dispatched before the run froze ===");
+                Console.WriteLine("    @AB0's IBDisp is flat, so this opcode ENTERED the stuck primitive -> names it via the dispatch table.");
+                Console.WriteLine("    CP ended @addr=" + cp.CurrentAddress.ToString("X3") + " (in the @AB0 loop if spinning).");
+                Console.WriteLine("    lastDispatched OP=0x" + cp._lastDispOp.ToString("X2") + " @" + cp._lastDispAddr.ToString("X3")
+                    + " CPi=" + cp._lastDispCPi);
+                Console.WriteLine("    inputs handed to the primitive:  R5=" + cp._lastDispR5.ToString("X4") + " RH5=" + cp._lastDispRH5.ToString("X2")
+                    + "  (vaddr=(RH5<<16)|R5=" + (((cp._lastDispRH5 & 0xF) << 16) | cp._lastDispR5).ToString("X5") + ", vpage=0x" + ((((cp._lastDispRH5 & 0xF) << 16) | cp._lastDispR5) >> 8).ToString("X3") + ")");
+                Console.WriteLine("    R2=" + cp._lastDispR2.ToString("X4") + " RH2=" + cp._lastDispRH2.ToString("X2")
+                    + "  R3=" + cp._lastDispR3.ToString("X4") + " RH3=" + cp._lastDispRH3.ToString("X2")
+                    + "  TOS=" + cp._lastDispTOS.ToString("X4") + " sp=" + cp._lastDispSp);
+            }
+
+            Console.WriteLine("=== ROTATION CENSUS -- THE LANE-PICKER: overall microwords per cycle ===");
                 Console.WriteLine("    Clicks rotate uniformly, so ~1/3 each is the null hypothesis.");
                 Console.WriteLine("      EVEN   => rotation SOUND, pure PHASE OFFSET  -> hunt the one event (~CPi 15,340).");
                 Console.WriteLine("      SKEWED => the ROTATION itself is broken      -> the click model needs real work.");
