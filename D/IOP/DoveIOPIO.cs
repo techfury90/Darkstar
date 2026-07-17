@@ -83,6 +83,17 @@ namespace D.IOP
                 // polls (IN FF58) as one of its completion conditions.  (Timer 1's
                 // interrupt-enable bit is clear, so no TC interrupt is raised.)
                 _pcb.PulseTimer1(n);
+                // DIAGNOSTIC: ring of the last DMA transfers -- count-programmed vs bytes-delivered.
+                // The driver polls FFC8==0 for completion (no TC interrupt), so an UNDER-DELIVERED read
+                // (bytes < count, e.g. an unhandled multi-track read) leaves FFC8 non-zero and the driver
+                // polls forever.  Capture count-before, delivered, count-after so an under-run is visible.
+                if (DmaLog != null)
+                {
+                    if (DmaLog.Count >= 40) DmaLog.RemoveAt(0);
+                    DmaLog.Add("DMA #" + _fdc.ReadCount + " countBefore=" + count + " delivered=" + n
+                        + " countAfter=" + (count > n ? count - n : 0) + " dest=0x" + dest.ToString("X5")
+                        + (count > n ? "   *** UNDER-RUN: FFC8 stuck at " + (count - n) + " (driver polls forever) ***" : ""));
+                }
                 _lastDmaDest = dest; _lastDmaLen = n;
                 if (MinDmaDest < 0 || dest < MinDmaDest) MinDmaDest = dest;
                 if (dest + n > MaxDmaDest) MaxDmaDest = dest + n;
@@ -669,6 +680,7 @@ namespace D.IOP
         private readonly I8272 _fdc;
         private readonly DoveControlStore _controlStore;
         public int _lastDmaDest, _lastDmaLen;   // diagnostics for the last FDC DMA transfer
+        public System.Collections.Generic.List<string> DmaLog;  // ring of last FDC DMA transfers (count vs delivered)
         public int MinDmaDest = -1, MaxDmaDest = 0;  // span of IOP linear addrs the floppy load DMA'd into
         public long DmaByteTotal;                    // total bytes DMA'd from the floppy
         private readonly DoveDisplayController _display;

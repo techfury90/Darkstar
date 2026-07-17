@@ -78,6 +78,7 @@ namespace DoveTrace
             _io.ConfigEeprom.ReadLog = new List<int>();
             _io.Fdc.Log = new List<string>();
             _io.Fdc.RecentLog = new string[80];   // ring: the LAST 80 FDC commands (Log caps at the FIRST 60)
+            _io.DmaLog = new System.Collections.Generic.List<string>();   // last FDC DMA transfers: count-programmed vs delivered
             _io.CpLoadLog = new List<string>();
 
             // ---- Dove Central Processor: executes the microcode the IOP loads ----
@@ -510,6 +511,9 @@ namespace DoveTrace
             Console.WriteLine();
             Console.WriteLine("Floppy DMA span (IOP linear): [" + (_io.MinDmaDest < 0 ? "none" : "0x" + _io.MinDmaDest.ToString("X5")) +
                               " .. 0x" + _io.MaxDmaDest.ToString("X5") + "]  totalBytes=" + _io.DmaByteTotal);
+            Console.WriteLine("=== FDC DMA transfers (count-programmed vs bytes-delivered) -- last " + (_io.DmaLog != null ? _io.DmaLog.Count : 0) + " ===");
+            Console.WriteLine("    Driver polls FFC8==0 for completion (no TC interrupt). Bytes < count => FFC8 stuck => poll forever.");
+            if (_io.DmaLog != null) foreach (var l in _io.DmaLog) Console.WriteLine("   " + l);
             {
                 var recent = _io.Fdc.RecentInOrder();
                 Console.WriteLine("=== 8272: the LAST " + recent.Count + " FDC commands (what the stall loop actually IS) ===");
