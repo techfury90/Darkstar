@@ -922,10 +922,19 @@ namespace D.CP
                                     (_ibFront == 0x76 || (_ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x2B)))
                                 {
                                     byte alpha = _ib[((int)_ibPtr) & 0x1];
+                                    // THE DUMP: the eval-stack state at the aBITBLT dispatch.  Under the
+                                    // CURRENT model (mesaPush==false) push is pointer-only, so _u[] is written
+                                    // ONLY by SUWrite microwords and R0 is NOT a TOS cache.  Print the SU array
+                                    // and the pointer together so "how many words did the germ actually push,
+                                    // and where did they land" is answered by data rather than by arithmetic.
                                     EscLog.Add("=== BITBLT ENTRY OP=0x" + _ibFront.ToString("X2")
                                         + (_ibFront == 0xF8 ? " alpha=0x" + alpha.ToString("X2") : "")
                                         + " @" + addr.ToString("X3") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2")
-                                        + "] CPi=" + InstructionCount + "  (next mar/X = bbTable field reads) ===");
+                                        + "] CPi=" + InstructionCount
+                                        + "  sp=" + _stackP + " TOS(R0)=" + _alu.R[0].ToString("X4")
+                                        + "  U[0-7]=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 8), i => _u[i].ToString("X4")))
+                                        + "  RH0=" + _rh[0].ToString("X2")
+                                        + "  (next mar/X = bbTable field reads) ===");
                                     _escCd = 60;
                                 }
                                 // @WRMP (MiscDaybreak.mc:113, at[7,10,ESC7n]) = zESC alpha 0x77 -- THE maintenance-panel
