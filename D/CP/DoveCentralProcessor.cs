@@ -228,9 +228,6 @@ namespace D.CP
         public List<string> FrameChainLog;   // Mesa frame/return-link chain at the @AB0 invocation
         public List<string> IntStatSpinLog;   // <-IntStat reads in the spin -- does the germ beat at the timer period?
         private long _lastIntStatCPi;
-        // TEST flag: gate the IBDisp Mint-trap's _mInt divert by _ie (see the IBDisp case).  Default OFF.
-        public static readonly bool _gateMintByIe =
-            System.Environment.GetEnvironmentVariable("DOVE_GATE_MINT") == "1";
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -1121,15 +1118,18 @@ namespace D.CP
                             }
                             // AlwaysIBDisp = IBDisp + IBPtr<-1 (fZ=1): a non-trapping dispatch.
                             bool alwaysIBDisp = (mi.fSfZ == FunctionSelectFZ.fzNorm && mi.fZ == 0x1);
-                            // TEST (DOVE_GATE_MINT=1, default OFF): gate the _mInt divert of the IBDisp trap by
-                            // _ie, mirroring MesaIntBr (line ~951 `&& _ie`).  MesaIntBr is IE-gated but this
-                            // Mint-trap is NOT, and _mInt is set unconditionally (line ~279) -- so an IE-off germ
-                            // with _mInt perpetually latched traps to the interrupt vector on every dispatch and
-                            // is dragged into the scheduler `Scan` it never links (no Process/Monitor imported).
-                            // TechRef: ClrIE disables the interrupt register, so a pending int should NOT divert
-                            // with IE off.  The IB-refill term (_ibPtr != Full) stays UNgated.  Held behind a flag
-                            // until the spec confirms Daybreak IE semantics for the refill/IBDisp trap.
-                            bool mIntDivert = _gateMintByIe ? (_mInt && _ie) : _mInt;
+                            // IE-GATE THE INTERRUPT DIVERT (Daybreak spec wlrqnvtff, invariants T-8/T-16/T-17,
+                            // TechRef tr2:1534-1544,4329-4331): IE is ONE gate with TWO consumers -- MesaIntBr
+                            // (line ~951) AND this IBDisp IB-Refill interrupt trap.  Both must divert on the SAME
+                            // condition: a pending interrupt (IOP `_mInt`=IntStat.1 OR timer `_timerInt`=IntStat.2)
+                            // AND `_ie`.  The bug was this trap firing on raw `_mInt` (ungated) while `_mInt` is set
+                            // unconditionally (line ~279) and the 8254 free-runs from BootTrap step 3 (before ClrIE
+                            // at step 5): an interrupts-off germ (imports no Process/Monitor) with a pending int was
+                            // trapped to the interrupt vector on every dispatch -> dragged into the scheduler `Scan`
+                            // forever.  IE off (ClrIE) => NO interrupt-triggered divert.  The IB-refill term
+                            // (`_ibPtr != Full`) is NOT an interrupt and stays ungated (IntStat read is also ungated;
+                            // only the DIVERT is IE-gated).
+                            bool mIntDivert = (_mInt || _timerInt) && _ie;
                             if ((_ibPtr != IBState.Full || mIntDivert) && !alwaysIBDisp)
                             {
                                 // IB not full (or Mesa int pending): trap to the refill/interrupt
