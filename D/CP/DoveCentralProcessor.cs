@@ -199,6 +199,15 @@ namespace D.CP
         // address during the data phase.  That is why the DLion reference throws on it.
         public readonly long[] MdrByCycle = new long[4];    // MDR<- (mem, c2) -- c1/c3 => BUG
         public readonly long[] IbDispByCycle = new long[4]; // IBDisp (c2)     -- outside c1/c2 => BUG
+        // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
+        // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
+        // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
+        // but neither cancel, so a cancel that should fire silently doesn't -- and the path length changes.
+        private bool _marPageCrossBr;            // set by a page-crossing MAR<-, consumed next instruction
+        private bool _pageCrossCancelPending;    // = _marPageCrossBr latched at the top of THIS instruction
+        public long _pageCrossCount;             // how many MAR<- actually crossed a page
+        public long _ibDispCancels;        // IBDisps cancelled by a preceding pageCross (DLion CentralProcessor.cs:759)
+        public List<string> CancelLog;           // the first 40, with call-site state
         // A/B switch for the <-ErrnIBnStkp StkP field.  DOVE_STK_DEPTH=1 -> report true depth
         // (_stackP+1, the c2c301c model); default -> report ~_stackP, which is what
         // ProcListXferDaybreak DSKf assumes: `TT <- ~ErrnIBnStkp; TT <- TT and 0F` recovers the RAW
@@ -625,6 +634,11 @@ namespace D.CP
                 ShiftLog.Add("@" + addr.ToString("X3") + " shift fX=" + mi.fX.ToString("X") + " R[" + mi.rA + "]=" + _shiftIn.ToString("X4")
                     + " Cin=" + (mi.Cin ? 1 : 0) + " cIn=" + (cIn ? 1 : 0) + " aD=" + mi.aD + " AluDst=" + mi.AluDestination + " -> Y=" + _yBus.ToString("X4") + " R[" + mi.rB + "]=" + _alu.R[mi.rB].ToString("X4"));
 
+            // Latch the previous instruction's pageCross for THIS instruction's cancel test, then clear it
+            // (DLion CentralProcessor.cs:279-280 does exactly this at the top of each instruction).
+            _pageCrossCancelPending = _marPageCrossBr;
+            _marPageCrossBr = false;
+
             // Overall rotation census -- the lane-picker (see CycleHist).  Counted for EVERY microword.
             CycleHist[_cycle & 3]++;
             // The other two pinned macros, as free invariants: MDR<- is cy:c2, IBDisp is cy:c2.
@@ -731,6 +745,18 @@ namespace D.CP
                             if (mi.mem && (_alu.PgCarry ^ (((int)mi.aF & 0x1) == 1)))
                             {
                                 _niaModifier |= 0x2;                     // pageCross branch
+                                // DETECTOR ONLY (does not yet cancel).  The DLion reference ALSO latches
+                                // `_marPageCrossBr = true` here (CentralProcessor.cs:650) and uses it on the
+                                // NEXT instruction as `pageCrossCancel` to CANCEL a pending IBDisp
+                                // (":759  // This is canceled if the last memory operation resulted in a page
+                                // cross.  if (!pageCrossCancel)") and a pending MDR<- (":664").  The Dove port
+                                // has the pageCross BRANCH but neither the latch nor either cancel.
+                                // TechRef: pageCross (MAR<-'s 2901) or IB-Empty cancels a pending
+                                // IBDisp/IB-Refill -- ibPtr unaffected, INIA unmodified => control lands on
+                                // dispatch-table entry 0.  A cancel that should fire and doesn't changes the
+                                // path length => a permanent phase shift.  Measure first, wire it after.
+                                _marPageCrossBr = true;
+                                _pageCrossCount++;
                             }
                             // Address-capture (aD=0/3 ONLY): the register/Q receives the map-translated real
                             // address (the splice) -- the germ's translation-extraction write.  aD=2 (RAMA, the
@@ -959,6 +985,31 @@ namespace D.CP
                         break;
                     case 0x3:   // IBDisp: dispatch on the mesa opcode in ibFront (mesa-core, DLion-identical).
                         {
+                            // ---- pageCross CANCEL (DLion CentralProcessor.cs:759) ----
+                            // "This is canceled if the last memory operation resulted in a page cross."
+                            // TechRef: pageCross (MAR<-'s 2901) or IB-Empty cancels a pending IBDisp/IB-Refill;
+                            // ibPtr is unaffected and INIA is unmodified, so control lands on dispatch-table
+                            // entry 0 instead of on the opcode's entry.  Dove had the pageCross BRANCH
+                            // (_niaModifier |= 0x2) but not this cancel, so a dispatch the hardware suppresses
+                            // was taken anyway -- once per boot, at CPi 15337, on the AlwaysIBDisp right after
+                            // `MAR<- R5+1` with R5=0xB1FF (the last word of page 0xB1).  From that instant the
+                            // germ ran a path the microcode never intended: Map<- (pinned cy:c1 by the
+                            // assembler) started landing in c2, where the map reference is silently dropped
+                            // -- 992,007 of them, c3=0, i.e. one clean divergence rather than drift -- and each
+                            // became a wild store to a stale MAR.  Downstream: ControlTrap -> GermWorldError ->
+                            // the 247,891-iteration map set-ref spin.
+                            if (_pageCrossCancelPending)
+                            {
+                                _ibDispCancels++;
+                                if (CancelLog != null && CancelLog.Count < 40)
+                                    CancelLog.Add("*** IBDisp CANCELLED by pageCross @" + addr.ToString("X3")
+                                        + " c" + _cycle + " CPi=" + InstructionCount
+                                        + "  ibPtr=" + _ibPtr + " ibFront=" + _ibFront.ToString("X2")
+                                        + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X")
+                                        + "  (INIA unmodified, ibPtr unaffected -> dispatch-table entry 0)");
+                                Note("IBDisp-cancelled");
+                                break;
+                            }
                             // AlwaysIBDisp = IBDisp + IBPtr<-1 (fZ=1): a non-trapping dispatch.
                             bool alwaysIBDisp = (mi.fSfZ == FunctionSelectFZ.fzNorm && mi.fZ == 0x1);
                             if ((_ibPtr != IBState.Full || _mInt) && !alwaysIBDisp)

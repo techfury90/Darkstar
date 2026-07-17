@@ -109,6 +109,7 @@ namespace DoveTrace
             _cp.StkTrapLog = new List<string>();   // TechRef Table 2.11 stack over/underflow detector
             _cp.SpinMapLog = new List<string>();   // THE map set-ref spin probe (MAPA base + resolved entry)
             _cp.MapPhaseLog = new List<string>();  // FIRST Map<- outside c1 -- the invariant the DLion reference throws on
+            _cp.CancelLog = new List<string>();    // IBDisps DLion would cancel after a pageCross and Dove does not
             _cp.SpinMapFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_SPINMAP_FROM") ?? "9223372036854775807");
             _cp.OpLog = new List<string>();
             _cp.LinkLog = new List<string>();
@@ -631,6 +632,14 @@ namespace DoveTrace
             // everything after it is silent-wrap noise (once one underflow wraps, every sp reading is fiction).
             Console.WriteLine("=== TABLE 2.11 STACK TRAPS (first " + _cp.StkTrapLog.Count + " shown) ===");
             foreach (var l in _cp.StkTrapLog) Console.WriteLine(l);
+
+            Console.WriteLine("=== pageCross CANCEL: IBDisps the DLion reference would have CANCELLED ===");
+            Console.WriteLine("    DLion CentralProcessor.cs:650 latches _marPageCrossBr on a page-crossing MAR<-;");
+            Console.WriteLine("    :759 `// This is canceled if the last memory operation resulted in a page cross.`");
+            Console.WriteLine("    :664 cancels the pending MDR<- too.  Dove has the pageCross BRANCH but NEITHER cancel.");
+            Console.WriteLine("    A cancel that should fire and doesn't changes the path length => permanent phase shift.");
+            Console.WriteLine("    pageCrosses=" + _cp._pageCrossCount + "  IBDisps-cancelled=" + _cp._ibDispCancels);
+            foreach (var l in _cp.CancelLog) Console.WriteLine(l);
 
             Console.WriteLine("=== FIRST Map<- OUTSIDE c1 -- the invariant the DLion reference THROWS on ===");
             Console.WriteLine("    D/CP/CentralProcessor.cs case 2/3: throw new InvalidOperationException(\"Map<- in c2\"/\"c3\").");
