@@ -25,7 +25,7 @@ namespace DoveTrace
         static int _wTs = -1, _wLogs = 0;   // mesaProcessorTask taskState@0x7C62 watch
         static long _v23post = 0;
         static long _dbgInstr = 0;
-        static int _rd0FF = 0, _wr0FF = 0, _linkVecW = 0, _fcbWatch = 0, _iorWatch = 0;
+        static int _rd0FF = 0, _wr0FF = 0, _linkVecW = 0, _fcbWatch = 0, _iorWatch = 0, _cmdW = 0;
         static int _map0FFw = -1, _map0FFlogs = 0;
         static int _mpEs = -1, _mpSi = -1, _mpTcb = -1;
         static System.Collections.Generic.HashSet<int> _flowSeen = new System.Collections.Generic.HashSet<int>();
@@ -136,19 +136,24 @@ namespace DoveTrace
                 // command word 0x53E1E).  numberVirtualPages = ByteSwap[countMapPages] * 256, and the available-VM
                 // interval is [0x100, numberVirtualPages).  Correct Daybreak => countMapPages ByteSwap = 0x100 (256)
                 // => numberVirtualPages = 0x10000.  Log every read of the FCB data window with its ByteSwap.
-                if (((a >= 0x53E14 && a <= 0x53E28) || (a >= 0x58004 && a <= 0x58018)) && _fcbWatch < 60)
+                // Watch the FCB DATA words (exclude the polled command word 0x53E1E, else the cap fills with the
+                // DoCommand `UNTIL fcb.command=noCommand` spin).  countMapPages is 1-2 words past the command word.
+                if (((a >= 0x53E1F && a <= 0x53E2A) || (a >= 0x58008 && a <= 0x58014)) && a != 0x53E1E && _fcbWatch < 60)
                 { int bs = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF);
-                  bool isCount = (a == 0x53E20 || a == 0x58008 + 2);
-                  Console.WriteLine("*** FCB read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
+                  Console.WriteLine("*** FCB DATA read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
                     + " (ByteSwap 0x" + bs.ToString("X4") + " = " + bs + ")"
-                    + (isCount ? "  <== countMapPages? => numberVirtualPages = 0x" + (bs * 256).ToString("X5") + ", interval [0x100, that)" : "")
+                    + "  => if countMapPages: numberVirtualPages = 0x" + (bs * 256).ToString("X5") + ", interval [0x100, that)"
                     + "  @CPi " + _cp.InstructionCount); _fcbWatch++; }
                 // IOREGION WATCH (operator candidate B): the entry bit-scan ran with mar=0x52000 and consumed a word
                 // that produced the ~0x8000 scan bound.  Log reads of the IORegion words near the @AB0 invocation
                 // (CPi ~7.34M) so we can see the actual word (is it 0xFFFF = uninitialized, or a sane value?).
-                if (a >= 0x52000 && a <= 0x52040 && _cp.InstructionCount >= 7340000 && _cp.InstructionCount <= 7360000 && _iorWatch < 40)
+                // Watch ALL memory reads in the @AB0 invocation window (CPi 7.34-7.35M) that returned a value the
+                // bit-scan could have used for the ~0x8000 bound: log any read of 0x8000/0xFFFF, plus all IORegion
+                // and FCB-region reads, so the source of the ~0x8000 scan bound is visible.
+                if (_cp.InstructionCount >= 7345000 && _cp.InstructionCount <= 7348000 && _iorWatch < 80
+                    && (v == 0x8000 || v == 0xFFFF || v == 0x00FF || (a >= 0x52000 && a <= 0x52040) || (a >= 0x53E00 && a <= 0x53E40) || (a >= 0x58000 && a <= 0x58040)))
                 { int bs = ((v & 0xFF) << 8) | ((v >> 8) & 0xFF);
-                  Console.WriteLine("*** IORegion read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
+                  Console.WriteLine("*** INVOKE-WIN read CP word 0x" + a.ToString("X5") + " = 0x" + v.ToString("X4")
                     + " (ByteSwap 0x" + bs.ToString("X4") + ")  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _iorWatch++; }
                 // Hole hypothesis: CP words 0x10000-0x3FFFF = phys 0x20000-0x80000 = the 128k-VRAM..512k-mainmem hole.
                 if (a >= 0x10000 && a < 0x40000) { _holeReads++; if (_holeReadPages.Add(a >> 8) && _holeReadPages.Count <= 40) Console.WriteLine("*** germ READS HOLE CP word " + a.ToString("X5") + " (phys 0x" + (a<<1).ToString("X5") + " = " + ((a<<1)>>10) + "k) = " + v.ToString("X4") + " @CPi " + _cp.InstructionCount); }
@@ -160,6 +165,9 @@ namespace DoveTrace
                 return v; };
             _cp.WriteWord = (a, v) => { int b = (a << 1) & ramMask; sysRam[b] = (byte)(v >> 8); sysRam[(b + 1) & ramMask] = (byte)v;
                 if (a >= 0x48204 && a <= 0x48220 && _linkVecW < 60) { Console.WriteLine("*** [CP] LINKVEC WRITE CP word 0x" + a.ToString("X5") + " = " + v.ToString("X4") + " @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _linkVecW++; }
+                // COMMAND-WRITE watch: every write of fcb.command (0x53E1E) -- names the DoCommand sequence so the
+                // countMapPages read (right after readVMMapDesc completes) can be picked out of the FCB-union noise.
+                if (a == 0x53E1E && v != 0 && _cmdW < 40) { Console.WriteLine("*** fcb.command <- 0x" + v.ToString("X4") + " (DoCommand posted) @CPi " + _cp.InstructionCount); _cmdW++; }
                 if (a >= 0x10000 && a < 0x40000) { _holeWrites++; if (_holeWritePages.Add(a >> 8) && _holeWritePages.Count <= 40) Console.WriteLine("*** germ WRITES HOLE CP word " + a.ToString("X5") + " (phys 0x" + (a<<1).ToString("X5") + " = " + ((a<<1)>>10) + "k) = " + v.ToString("X4") + " @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); }
                 if (a == 0x400FF && _wr0FF < 30) { Console.WriteLine("*** WRITE map[vp 0x0FF] (CP word 0x400FF) = " + v.ToString("X4") + " -> real 0x" + ((((v&0x1F)<<8)|(v>>8))).ToString("X3") + "  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _wr0FF++; }
                 // MP-code hunt: track locations written with small MP-code-like values (hex 0x0100-0x0FFF
