@@ -120,12 +120,16 @@ namespace D.IOP
                     if (sys > MapStampMaxSys) MapStampMaxSys = sys;
                     if (sys >= 0x90000) MapStampSeg2++;
                 }
-                // The ACTIVE FCB the germ reads is at CP word 0x53E1E = phys 0xA7C3C (NOT the 0xB0000
-                // germ-view, which the IOP only zeroed once).  Watch IOP writes to the active FCB
-                // (phys 0xA7C20..0xA7C60) so we can see whether, at the boot-transfer completion (IOP ~16.2M),
-                // the IOP wrote a POLLABLE completion status -- or only rang the doorbell (CSReg b8).  An
-                // interrupts-off germ can ONLY observe completion via a polled status.
-                if (CmdByteLog != null && sys >= 0xA7C20 && sys <= 0xA7C60 && CmdByteLog.Count < 200)
+                // TRANSFER-COMPLETION WRITE WATCH: window by IOP time to the boot-transfer completion
+                // (reads=115 at IOP ~16.2M) and log EVERY non-DMA-data write to the CP-visible DRAM, so we
+                // catch whatever pollable status the IOP wrote at completion -- wherever it lives (config FCB
+                // at 0xA7C3C, a separate FLOPPY FCB, or a BootChannel status).  If the only completion signal
+                // is the doorbell (CSReg b8, rung at CPi 7347564) and NOTHING is written to DRAM here, an
+                // interrupts-off germ can never observe completion.  Exclude the bulk DMA data dests
+                // (phys 0xA0EF0 single-page buffer + the 0x131A00 high page) so status writes stand out.
+                if (CmdByteLog != null && HostClock >= 15900000 && HostClock <= 16500000
+                    && !(sys >= 0xA0EE0 && sys <= 0xA0F10) && !(sys >= 0x1319E0 && sys <= 0x131C10)
+                    && CmdByteLog.Count < 200)
                     CmdByteLog.Add("W  phys=" + sys.ToString("X5") + " (CPword 0x" + (sys >> 1).ToString("X5") + ") <- " + value.ToString("X2") + " @IOP " + HostClock);
                 _system[sys] = value;
             }
