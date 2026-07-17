@@ -630,10 +630,14 @@ namespace D.CP
                 }
                 // OQ59: SD trap-table reads (real 0x48200+, SD[n].gf@+2n, SD[n].pc@+2n+1). Watch the trap dispatch
                 // read SD[7](sCodeTrap 0x4820E/F) then escalate to SD[6](sControlTrap 0x4820C/D)=[0B5D,06F4]=GermWorldError.
-                if (SdReadLog != null && _mar >= 0x48200 && _mar <= 0x48220 && SdReadLog.Count < 200)
+                if (SdReadLog != null && _mar >= 0x48200 && _mar <= 0x48220 && SdReadLog.Count < 6000)
                 {
                     int slot = (_mar - 0x48200) / 2; string field = ((_mar & 1) == 0) ? "gf" : "pc";
-                    SdReadLog.Add("<-MD SD[" + slot.ToString("X2") + "]." + field + " (real " + _mar.ToString("X5") + ") = " + _xBus.ToString("X4") + " @" + addr.ToString("X3") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " CPi=" + InstructionCount);
+                    // The trap microroutine reads SD[n] with no IBDisp in between, so _lastDispOp is the
+                    // FAULTING opcode (the mesa bytecode whose real-microcode IBDisp entry routed to the trap
+                    // routine that is now reading this SD link).  Emit it + its PC so the fault names itself.
+                    SdReadLog.Add("<-MD SD[" + slot.ToString("X2") + "]." + field + " (real " + _mar.ToString("X5") + ") = " + _xBus.ToString("X4") + " @" + addr.ToString("X3") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " CPi=" + InstructionCount
+                        + "  [faultOp=0x" + _lastDispOp.ToString("X2") + " @disp" + _lastDispAddr.ToString("X3") + " dispPC={" + _lastDispRH5.ToString("X2") + ":" + _lastDispR5.ToString("X4") + "} dispCPi=" + _lastDispCPi + " gap=" + (InstructionCount - _lastDispCPi) + "]");
                 }
                 if (SemaLog != null && _mar == SemaWord && SemaLog.Count < 70)
                     SemaLog.Add("@" + addr.ToString("X3") + " <-MD word " + _mar.ToString("X5") + " -> Xbus " + _xBus.ToString("X4")
