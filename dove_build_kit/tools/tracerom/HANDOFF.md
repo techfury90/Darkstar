@@ -181,10 +181,40 @@ LoadMap microwords by executed cycle:   c1=324   c2=992007   c3=0
   `GermWorldError` ⟹ the 247,891-iteration map set-ref spin (`@49C`/`@062`/`@140`) that eats 99.9%
   of the run. **One chain, not two wounds.**
 
+**★THE BREAK IS LOCALIZED TO TWO MICROINSTRUCTIONS (CPi 15,338–15,339).**
+
+The cycle is **not** encoded in the 48-bit word — it is an assembler constraint. `TmMacroTablesDaybreak`
+declares it per macro: `Map<-` carries **`cy: c1`**, `MAR<-` `cy: c1`, `MDR<-` `cy: c2`, **`IBDisp`
+`cy: c2`**. The MBC state machine rotates c1→c2→c3 and the assembler guarantees every microword is
+placed at the rotation it declares — so the microcode is provably innocent and any mismatch is ours.
+That gives two independent fixed points in this window:
+
+| CPi | µaddr | cycle | macro requires | verdict |
+|---|---|---|---|---|
+| 15,312 | `@C34` | c1 | `Map<-` = c1 | **correct** (MAR=40008, mapword=88C4) |
+| 15,337 | `@AF3` | c2 | `IBDisp` = c2 | **correct** |
+| 15,338 | `@22A` | c3 | `XRefBr U28Q<- R7` `[140]` | — |
+| 15,339 | `@1CF` | c1 | — | — |
+| 15,340 | `@A4E` | c2 | `Map<-` = c1 | **WRONG — first offence** |
+
+EVERY `IBDisp` in the window is on c2 (`@352`@15319, `@145`@15325, `@16E`@15334, `@AF3`@15322/15328/15337)
+⟹ **the phase is right at 15,337 and wrong at 15,340.** The germ walks
+`@AF3(c2) → @22A(c3) → @1CF(c1) → @A4E(c2)`; two steps would have put `Map<-` on c1. So either one of
+those cycles should not exist, or `@22A`'s `XRefBr` goes to the wrong target (`[140]` → trueINIA
+`0x14F`; the branch modifier ORs `0x80` → `@1CF`).
+
 **NEXT (in order):**
-1. Why is the click phase +1 at CPi 15340? The detector only sees `Map<-` words, so the phase may
-   break slightly earlier — walk back from `@A4E` (the `pCall/Ret2` return-cycle bookkeeping around
-   `zRET`/XFER is the prime suspect).
+1. Resolve the 2-instruction window `@22A`(c3) → `@1CF`(c1) → `@A4E`(c2). Prime suspect is the
+   **missing IB-Empty trap** (Table 2.10 slot 3): `DoveCentralProcessor.cs:69` documents
+   `_trapCode` as "3=IB-empty" but **`_trapCode = 3` is assigned NOWHERE**. DLion signals it at four
+   `<-ib` sites and computes `_emulatorErrorTrapClickCount = _cycle == 1 ? 1 : 2` (TechRef: IB-Empty
+   in c1 ⟹ trap at the next c1; in c2/c3 ⟹ one ADDITIONAL click first). Dove has no
+   `SignalErrorTrap`, no click count, and forces c1 only in `Reset()` and the boot trap — i.e. every
+   phase-forcing mechanism the hardware has was dropped. A trap that should force c1 and doesn't is a
+   permanent one-cycle shift, which is exactly the shape here (324 right, then all wrong, `c3=0`,
+   never recovers). Also check `@22A`'s XRefBr target.
+   NB **REFUTED already**: "`pCall/RetN` return-cycle bookkeeping" — `pCall/Ret2` lands on c2 19x and
+   c3 11x, so the suffix is not a fixed cycle. Don't chase it.
 2. Independently: `case 2:` must not write memory when `mem=0`. That is wrong regardless of phase
    and is what converts a phase error into a million wild stores. (Fix it *after* 1, so the
    first-offence signal stays loud.)
