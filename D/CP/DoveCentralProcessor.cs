@@ -204,6 +204,17 @@ namespace D.CP
         public int _lastDispOp = -1, _lastDispR5, _lastDispRH5, _lastDispR2, _lastDispRH2;
         public int _lastDispR3, _lastDispRH3, _lastDispTOS, _lastDispSp, _lastDispAddr;
         public long _lastDispCPi;
+        // INVOKING-OPCODE latch: the operator's reframe -- @AB0 is a bulk microcode SCAN primitive
+        // (carries MesaIntBr, 49K CPi long => it is the FOREGROUND being interrupted), and zLL6/zJZB are
+        // its interval-timer interrupt SERVICE, not its caller.  So the steady-state "last dispatched
+        // opcode" is a red herring.  The invoking opcode is the LAST dispatch before @AB0's FIRST long
+        // burst -- a normal Read primitive scans a small structure and returns within a few iterations;
+        // the runaway scans thousands before the timer interrupts it.  Latch when @AB0 has run > threshold
+        // iterations since the last IBDisp, capturing the opcode that invoked it.  ONE-SHOT.
+        public int _ab0Run;                 // @AB0 executions since the last IBDisp (reset on dispatch)
+        public bool _ab0InvokeLatched;
+        public string _ab0Invoke;           // the captured invoking-opcode snapshot
+        public int Ab0RunThreshold = 3000;  // > any legit bulk-read scan, < the runaway's ~4000/burst
         // pageCross-cancel DETECTOR (not yet wired to actually cancel -- measure first).
         // DLion latches _marPageCrossBr on a page-crossing MAR<- (CentralProcessor.cs:650) and uses it on the
         // NEXT instruction to cancel a pending IBDisp (:759) and a pending MDR<- (:664).  Dove has the branch
@@ -644,6 +655,27 @@ namespace D.CP
             _pageCrossCancelPending = _marPageCrossBr;
             _marPageCrossBr = false;
 
+            // INVOKING-OPCODE latch: count @AB0 executions since the last dispatch; when the first burst
+            // runs long enough to be the runaway (not a legit small scan), capture the invoking opcode.
+            if (addr == 0xAB0)
+            {
+                _ab0Run++;
+                if (_ab0Run == Ab0RunThreshold && !_ab0InvokeLatched)
+                {
+                    _ab0InvokeLatched = true;
+                    int va = ((_lastDispRH5 & 0xF) << 16) | _lastDispR5;
+                    _ab0Invoke = "INVOKING OP=0x" + _lastDispOp.ToString("X2") + " @" + _lastDispAddr.ToString("X3")
+                        + " dispatchedCPi=" + _lastDispCPi + "  ab0FirstBurstCPi=" + InstructionCount
+                        + "   inputs: R5=" + _lastDispR5.ToString("X4") + " RH5=" + _lastDispRH5.ToString("X2")
+                        + " (PC vaddr=" + va.ToString("X5") + ", vpage=0x" + (va >> 8).ToString("X3") + ")"
+                        + "  R2=" + _lastDispR2.ToString("X4") + " RH2=" + _lastDispRH2.ToString("X2")
+                        + "  R3=" + _lastDispR3.ToString("X4") + " RH3=" + _lastDispRH3.ToString("X2")
+                        + "  TOS=" + _lastDispTOS.ToString("X4") + " sp=" + _lastDispSp
+                        + "  |  @AB0 scan-state now: R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X2")
+                        + " R2=" + _alu.R[2].ToString("X4") + " RH2=" + _rh[2].ToString("X2") + " mar=" + _mar.ToString("X5");
+                }
+            }
+
             // Overall rotation census -- the lane-picker (see CycleHist).  Counted for EVERY microword.
             CycleHist[_cycle & 3]++;
             // The other two pinned macros, as free invariants: MDR<- is cy:c2, IBDisp is cy:c2.
@@ -1053,6 +1085,7 @@ namespace D.CP
                                 _lastDispR2 = _alu.R[2]; _lastDispRH2 = _rh[2];
                                 _lastDispR3 = _alu.R[3]; _lastDispRH3 = _rh[3];
                                 _lastDispTOS = _alu.R[0]; _lastDispSp = _stackP;
+                                _ab0Run = 0;   // a dispatch happened -> reset the @AB0-burst counter
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
                                 // TEMP: BitBlt probe -- catch aBITBLT, the blt at the end of ProcessorHeadDove.Start.

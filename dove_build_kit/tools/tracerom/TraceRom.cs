@@ -664,7 +664,11 @@ namespace DoveTrace
                 long ht = h1 + h2 + h3;
                 {
                 var cp = _cp;
-                Console.WriteLine("=== ENTERING-OPCODE PROBE: the LAST mesa opcode dispatched before the run froze ===");
+                Console.WriteLine("=== INVOKING-OPCODE latch: the opcode dispatched just before @AB0's FIRST long burst ===");
+                Console.WriteLine("    (@AB0 is a bulk scan primitive; zLL6/zJZB are its interrupt SERVICE. THIS is the real caller.)");
+                Console.WriteLine("    " + (cp._ab0Invoke ?? "(never latched -- @AB0 never ran " + cp.Ab0RunThreshold + "+ iters without a dispatch)"));
+
+                Console.WriteLine("=== ENTERING-OPCODE PROBE: the LAST mesa opcode dispatched before the run froze (steady-state = interrupt service, RED HERRING) ===");
                 Console.WriteLine("    @AB0's IBDisp is flat, so this opcode ENTERED the stuck primitive -> names it via the dispatch table.");
                 Console.WriteLine("    CP ended @addr=" + cp.CurrentAddress.ToString("X3") + " (in the @AB0 loop if spinning).");
                 Console.WriteLine("    lastDispatched OP=0x" + cp._lastDispOp.ToString("X2") + " @" + cp._lastDispAddr.ToString("X3")
