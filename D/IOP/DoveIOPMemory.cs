@@ -123,6 +123,16 @@ namespace D.IOP
                                                  : (sys < 0xA7C32 ? "notifiersLockMask" : "upNotifyBits");
                     NotifyWriteLog.Add("IOP W phys 0x" + sys.ToString("X5") + " (" + what + ") <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
                 }
+                // MP-940: WHICH handler is the dispatched one, and where does it dead-end?  Watch IOP
+                // writes to the floppy(0xA79B0)/disk(0xA45C0)/ethernet(0xA46F0) FCBs, but ONLY in the
+                // Pilot stall window so germ-era traffic doesn't consume the cap.
+                if (HandlerFcbLog != null && HandlerFcbLog.Count < 400 && HostClock > 26000000
+                    && ((sys >= 0xA79B0 && sys < 0xA7A30) || (sys >= 0xA45C0 && sys < 0xA4640) || (sys >= 0xA46F0 && sys < 0xA4770)))
+                {
+                    string h = sys >= 0xA79B0 ? "floppy" : sys >= 0xA46F0 ? "ethernet" : "disk";
+                    int bas = sys >= 0xA79B0 ? 0xA79B0 : sys >= 0xA46F0 ? 0xA46F0 : 0xA45C0;
+                    HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " (phys 0x" + sys.ToString("X5") + ") <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
+                }
                 // Diagnostic: track the vacant-stamp writes (high byte 0x60) into the map storage
                 // [0x80000,0xA0000) -- to see whether the fill crosses the 64KB boundary at 0x90000.
                 if (value == 0x60 && sys >= 0x80000 && sys < 0xA0000)
@@ -179,6 +189,8 @@ namespace D.IOP
 
         /// <summary>MP-940: IOP writes to the mesaProcessor FCB notify words + the Dekker lock pair.</summary>
         public System.Collections.Generic.List<string> NotifyWriteLog;
+        /// <summary>MP-940: IOP writes to the floppy/disk/ethernet handler FCBs during the Pilot stall.</summary>
+        public System.Collections.Generic.List<string> HandlerFcbLog;
         public long MapStampCount, MapStampSeg2;
         public int MapStampMinSys = int.MaxValue, MapStampMaxSys = -1;
 

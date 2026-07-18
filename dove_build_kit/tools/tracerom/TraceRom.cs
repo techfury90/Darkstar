@@ -133,6 +133,7 @@ namespace DoveTrace
             _cp.MapReadLog = new List<string>();
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
             _mem.NotifyWriteLog = new List<string>();  // MP-940: IOP writes to upNotifyBits / Dekker locks
+            _mem.HandlerFcbLog = new List<string>();   // MP-940: which handler FCB the IOP touches during the stall
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
             _cp.EscLog = new List<string>();
@@ -870,6 +871,30 @@ namespace DoveTrace
                 foreach (var l in _cpFcbW) Console.WriteLine("      " + l);
                 Console.WriteLine("    down-notify ISR snapshots at IN 0xB0 (last " + _isrSnap.Count + "):");
                 foreach (var l in _isrSnap) Console.WriteLine("      " + l);
+                // WHO OWNS downNotify bit 0x0080?  NotifyMask = {byteMask(hi), byteOffset(lo)};
+                // byteMask 0x80 into byteOffset 1 => downNotifyBits word0 low byte => reads 0x0080.
+                // So the owning handler's workMask word == 0x8001.  segEntry = 0xA4000 + 4 + 4*handlerID.
+                { byte[] r = _mem.SystemRaw;
+                  string[] hn = new string[]{"","beep","disk","display","ethernet","floppy","keyboardAndMouse","maintPanel"};
+                  Console.WriteLine("    === HANDLER FCBs (segEntry=0xA4000+4+4*ID; FCB=0xA0000+16*seg) -- find workMask 0x8001 (=bit 0x0080) ===");
+                  int[] ids = new int[]{1,2,3,4,5,6,7,16,17,18};
+                  foreach (int id in ids) {
+                      int off = 4 + 4*id; int se = 0xA4000 + off;
+                      int seg = r[se] | (r[se+1] << 8); if (seg == 0) continue;
+                      int fb = 0xA0000 + 16*seg;
+                      string nm = id < hn.Length ? hn[id] : (id==16?"mesaProcessor":id==17?"tty":id==18?"rs232C":"?");
+                      // scan the FCB for the candidate mask words 0x8001 / 0x4001
+                      System.Text.StringBuilder hits = new System.Text.StringBuilder();
+                      for (int w = 0; w < 0x60; w += 2) { int v = (r[fb+w] << 8) | r[fb+w+1];
+                          if (v == 0x8001 || v == 0x4001 || v == 0x0180 || v == 0x0140) hits.Append(" +0x"+w.ToString("X2")+"=0x"+v.ToString("X4")); }
+                      Console.Write("      ID " + id + " " + nm.PadRight(17) + " segEntry 0x" + se.ToString("X5") + " seg=0x" + seg.ToString("X4") + " FCB 0x" + fb.ToString("X5")
+                          + (hits.Length > 0 ? "   MASK-HIT:" + hits.ToString() : ""));
+                      Console.Write("\n          FCB+00..20: ");
+                      for (int i = 0; i < 0x20; i++) Console.Write(r[fb+i].ToString("X2") + (((i&1)==1)?" ":""));
+                      Console.WriteLine();
+                  } }
+                Console.WriteLine("    [STALL-WINDOW] IOP writes to floppy/disk/ethernet FCBs: " + (_mem.HandlerFcbLog==null?0:_mem.HandlerFcbLog.Count) + "  <== names the dispatched handler + where it dead-ends");
+                if (_mem.HandlerFcbLog != null) foreach (var l in _mem.HandlerFcbLog) Console.WriteLine("      " + l);
                 Console.WriteLine("    IOP writes to notify words / Dekker locks: " + (_mem.NotifyWriteLog == null ? 0 : _mem.NotifyWriteLog.Count));
                 if (_mem.NotifyWriteLog != null) foreach (var l in _mem.NotifyWriteLog) Console.WriteLine("      " + l);
                 if (cp.MIntLog != null) foreach (var l in cp.MIntLog) Console.WriteLine("   " + l);
