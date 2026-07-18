@@ -70,6 +70,10 @@ namespace DoveTrace
         // through the 940 stall: is Store's command serviced (cleared to noCommand) and the CP
         // proceeds, or does it spin re-issuing / never get answered?
         static byte _mbxB0 = 0xEE, _mbxB1 = 0xEE, _mbxCmdHi = 0xEE, _mbxCmdLo = 0xEE; static int _mbxLogs = 0;
+        // MP-940 fork (MesaUpDn.asm:215/:227): CP writes to the mesaProc FCB header, and the
+        // down-notify ISR's view of downNotifyBits at each IN 0xB0.
+        static System.Collections.Generic.List<string> _cpFcbW = new System.Collections.Generic.List<string>();
+        static System.Collections.Generic.List<string> _isrSnap = new System.Collections.Generic.List<string>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
@@ -197,6 +201,17 @@ namespace DoveTrace
                   Console.WriteLine("*** germ reads " + a.ToString("X5") + " = " + v.ToString("X4") + " (real0x"+rp.ToString("X3")+" bswap0x"+bs.ToString("X4")+" mod256=0x"+((rp)&0xFF).ToString("X2")+")  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _rd0FF++; }
                 return v; };
             _cp.WriteWord = (a, v) => { int b = (a << 1) & ramMask; sysRam[b] = (byte)(v >> 8); sysRam[(b + 1) & ramMask] = (byte)v;
+                // MP-940 FORK (MesaUpDn.asm:215/:227): does Pilot's NotifyIOP ever LAND the bits?
+                // CP writes to the mesaProcessor FCB header phys 0xA7C30..0xA7C3F -- especially
+                // downNotifyBits = words 2-3 = phys 0xA7C34/0xA7C36.  If the CP never writes these,
+                // the ISR reads zero, BP stays Null, :227 never dispatches -> silent sleep.
+                if (b >= 0xA7C30 && b <= 0xA7C3F && _cpFcbW.Count < 400) {
+                    int off = b - 0xA7C30;
+                    string fld = off < 2 ? "notifiersLockMask" : off < 4 ? "upNotifyBits" : off < 8 ? "downNotifyBits[" + ((off-4)/2) + "]"
+                               : off < 10 ? "mesaClientCondition" : off < 12 ? "mesaClientMask" : off < 14 ? "timeOfDayIsValid|command" : "data+";
+                    _cpFcbW.Add("[CP] W phys 0x" + b.ToString("X5") + " (+0x" + off.ToString("X2") + " " + fld + ") <- 0x" + v.ToString("X4")
+                        + " @CPi " + _cp.InstructionCount + " R5=" + _cp._lastDispR5.ToString("X4") + " IOP" + _dbgInstr);
+                }
                 if (a >= 0x48204 && a <= 0x48220 && _linkVecW < 60) { Console.WriteLine("*** [CP] LINKVEC WRITE CP word 0x" + a.ToString("X5") + " = " + v.ToString("X4") + " @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _linkVecW++; }
                 // COMMAND-WRITE watch: every write of fcb.command (0x53E1E) -- names the DoCommand sequence so the
                 // countMapPages read (right after readVMMapDesc completes) can be picked out of the FCB-union noise.
@@ -239,6 +254,17 @@ namespace DoveTrace
                         + " | mesaHasLock A4000=" + ((r[0xA4001 & M] << 8) | r[0xA4000 & M]).ToString("X4") + " iopReqLock A4002=" + ((r[0xA4003 & M] << 8) | r[0xA4002 & M]).ToString("X4"));
                 }
                 _lastAckInstr = _dbgInstr; if (_dbgInstr > PILOT_WINDOW) _acksLate++;
+                // MP-940 FORK: snapshot what the down-notify ISR is about to read at MesaUpDn.asm:215.
+                // downNotifyBits==0 here => BP stays Null => :227 never dispatches => silent sleep.
+                { byte[] rr = _mem.SystemRaw;
+                  int dn0 = (rr[0xA7C34] << 8) | rr[0xA7C35], dn1 = (rr[0xA7C36] << 8) | rr[0xA7C37];
+                  _isrSnap.Add("ISR read @IOP" + _dbgInstr + " CPi " + _cp.InstructionCount
+                      + "  downNotifyBits[0]=0x" + dn0.ToString("X4") + " [1]=0x" + dn1.ToString("X4")
+                      + "  cmd(+0D)=0x" + rr[0xA7C3D].ToString("X2")
+                      + "  upNotifyBits=0x" + (((rr[0xA7C32] << 8) | rr[0xA7C33])).ToString("X4")
+                      + "  mesaClientMask=0x" + (((rr[0xA7C3A] << 8) | rr[0xA7C3B])).ToString("X4")
+                      + (dn0 == 0 && dn1 == 0 ? "   <== ZERO -> :227 never dispatches (silent sleep)" : "   <== BITS PRESENT -> dispatched"));
+                  if (_isrSnap.Count > 40) _isrSnap.RemoveAt(0); }
                 if (_cpAcks++ < 20) {
                     int cur = _mem.ReadByte(0x4354) | (_mem.ReadByte(0x4355) << 8);
                     int tic = _mem.ReadByte(0x7C5A) | (_mem.ReadByte(0x7C5B) << 8);
@@ -839,6 +865,11 @@ namespace DoveTrace
                       + "  downNotify(0xA7C34/36)=0x" + ((r[0xA7C34]<<8)|r[0xA7C35]).ToString("X4") + "/0x" + ((r[0xA7C36]<<8)|r[0xA7C37]).ToString("X4")
                       + "  mesaClientCondition(0xA7C38)=0x" + ((r[0xA7C38]<<8)|r[0xA7C39]).ToString("X4")
                       + "  mesaClientMask(0xA7C3A)=0x" + ((r[0xA7C3A]<<8)|r[0xA7C3B]).ToString("X4")); }
+                Console.WriteLine("    === MP-940 FORK (MesaUpDn.asm:215/:227) ===");
+                Console.WriteLine("    [CP] writes to mesaProc FCB header 0xA7C30..3F: " + _cpFcbW.Count + " (does Pilot's NotifyIOP LAND the downNotifyBits?)");
+                foreach (var l in _cpFcbW) Console.WriteLine("      " + l);
+                Console.WriteLine("    down-notify ISR snapshots at IN 0xB0 (last " + _isrSnap.Count + "):");
+                foreach (var l in _isrSnap) Console.WriteLine("      " + l);
                 Console.WriteLine("    IOP writes to notify words / Dekker locks: " + (_mem.NotifyWriteLog == null ? 0 : _mem.NotifyWriteLog.Count));
                 if (_mem.NotifyWriteLog != null) foreach (var l in _mem.NotifyWriteLog) Console.WriteLine("      " + l);
                 if (cp.MIntLog != null) foreach (var l in cp.MIntLog) Console.WriteLine("   " + l);
