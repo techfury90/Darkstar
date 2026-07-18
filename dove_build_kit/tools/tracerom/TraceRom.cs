@@ -151,6 +151,8 @@ namespace DoveTrace
             _mem.HandlerFcbLog = new List<string>();   // MP-940: which handler FCB the IOP touches during the stall
             _mem.WnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
             _mem.OpieReadLog = new List<string>();
+            _mem.WmcTrack = new System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<byte>>();
+            _mem.OpieInitLog = new List<string>();
             _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
@@ -888,6 +890,16 @@ namespace DoveTrace
                 Console.WriteLine("    === MP-940 HOP-3 (WorkNtfr.asm): ISR SRAM writes after the LAST doorbell ===");
                 Console.WriteLine("    (writes to the 7 end-of-run 0x0080 candidates; the one OR'd 0x80 at the doorbell is workNotifierBits)");
                 foreach (var l in _sramLog) Console.WriteLine("      " + l);
+                Console.WriteLine("      === GetWorkMask ALLOCATOR HUNT ===");
+                Console.WriteLine("      addrs with strictly-INCREASING small byte writes (workMaskCount signature):");
+                if (_mem.WmcTrack != null) { int nc=0; foreach (var kv in _mem.WmcTrack) { var l = kv.Value;
+                    if (l.Count < 4) continue; bool nondec = true;
+                    for (int i = 1; i < l.Count; i++) if (l[i] < l[i-1]) { nondec = false; break; }
+                    if (nondec && l[l.Count-1] > l[0]) { Console.Write("        phys 0x" + kv.Key.ToString("X5") + " (lin 0x" + (kv.Key-0xA0000).ToString("X4") + "): ");
+                        foreach (var v in l) Console.Write(v + " "); Console.WriteLine("  <== counter-like (final=" + l[l.Count-1] + ")"); if (++nc > 25) break; } }
+                    if (nc == 0) Console.WriteLine("        (no counter-like address found in 0xA4000-0xA8000)"); }
+                Console.WriteLine("      Opie-init region write log entries: " + (_mem.OpieInitLog==null?0:_mem.OpieInitLog.Count) + " (ADDR VAL TIME)");
+                if (_mem.OpieInitLog != null) { int shown=0; foreach (var l in _mem.OpieInitLog) { Console.WriteLine("        " + l); if (++shown >= 900) { Console.WriteLine("        ...truncated"); break; } } }
                 Console.WriteLine("      OPIE-DATA READS in the post-doorbell window (workMaskCount / workMaskConditionPtrs hunt):");
                 if (_mem.OpieReadLog != null) foreach (var l in _mem.OpieReadLog) Console.WriteLine("        " + l);
                 { byte[] r = _mem.SystemRaw;

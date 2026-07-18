@@ -147,6 +147,20 @@ namespace D.IOP
                     if (HandlerFcbLog != null && (FloppyFcbWrites % 20000 == 1 || HandlerFcbLog.Count < 12))
                         HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock + " (#" + FloppyFcbWrites + ")");
                 }
+                // MP-940 hop-3 / GetWorkMask (IOPKernl.asm:549-580): every handler registration
+                // writes workMaskConditionPtrs[slot] (word) then bumps workMaskCount (byte) with
+                // strictly-increasing small values, init-only.  Capture (a) per-address small-value
+                // sequences to FIND workMaskCount by that signature, and (b) an ordered write log of
+                // the Opie data region so each increment can be paired with its preceding word write
+                // (which carries handlerID<<1 in its HIGH byte).
+                if (WmcTrack != null && sys >= 0xA4000 && sys < 0xA8000 && value < 64)
+                {
+                    System.Collections.Generic.List<byte> lv;
+                    if (!WmcTrack.TryGetValue(sys, out lv)) { lv = new System.Collections.Generic.List<byte>(); WmcTrack[sys] = lv; }
+                    if (lv.Count < 32) lv.Add(value);
+                }
+                if (OpieInitLog != null && OpieInitLog.Count < 3000 && sys >= 0xA4300 && sys < 0xA4400)
+                    OpieInitLog.Add(sys.ToString("X5") + " " + value.ToString("X2") + " " + HostClock);
                 // MP-940 hop-3: workNotifierBits lives in the DOWNLOADED RAM-Opie data (phys
                 // 0xB0000+), not the 16KB SRAM.  Track address -> last 0x80/0x40/0x00 write after
                 // IOP 25.5M; an address left LATCHED at 0x80 is workNotifierBits with the bits
@@ -219,6 +233,8 @@ namespace D.IOP
         public System.Collections.Generic.Dictionary<int,int[]> WnbTrack;
         /// <summary>MP-940 hop-3: Opie-data reads in the post-doorbell window (finds workMaskCount + workMaskConditionPtrs).</summary>
         public System.Collections.Generic.List<string> OpieReadLog;
+        public System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<byte>> WmcTrack;
+        public System.Collections.Generic.List<string> OpieInitLog;
         /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
         public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
         public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;
