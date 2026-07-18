@@ -92,6 +92,12 @@ namespace D.IOP
             // MP-940 hop-3: the WorkNotifier task reads workMaskCount (MOV DL,workMaskCount) and
             // walks workMaskConditionPtrs BEFORE the CMP DI,DX/JGE bail.  Log Opie-data READS in a
             // tight window just after doorbell #614 (IOP 25,621K) to expose both addresses.
+            // MP-940 DISCRIMINATOR: the workNotifier task must READ workNotifierBits (MOV SI,ptr /
+            // XCHG [SI],AX).  The down-notify ISR also reads it -- but there are NO doorbells after
+            // #614, so ANY read of phys 0xA430E after that ISR completes can only be the workNotifier
+            // task.  Zero such reads => the task never ran => break is upstream of WorkNtfr.
+            if (WnbReadLog != null && WnbReadLog.Count < 200 && HostClock > 25621100 && (sys == 0xA430E || sys == 0xA430F))
+                WnbReadLog.Add("R phys 0x" + sys.ToString("X5") + " -> 0x" + rv.ToString("X2") + " @IOP" + HostClock);
             if (OpieReadLog != null && OpieReadLog.Count < 300
                 && HostClock >= 25620950 && HostClock <= 25623000
                 && sys >= 0xA4000 && sys < 0xA4800)
@@ -146,6 +152,17 @@ namespace D.IOP
                     // sampled log so we see the whole span, not just the first 315 instructions
                     if (HandlerFcbLog != null && (FloppyFcbWrites % 20000 == 1 || HandlerFcbLog.Count < 12))
                         HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock + " (#" + FloppyFcbWrites + ")");
+                }
+                // MP-940 hop-2.5: does the workNotifier TASK ever get SCHEDULED?  currentTaskTCBPtr
+                // (lin 0x4354 = phys 0xA4354, confirmed: SystemIdle writes 0xFFFF there) records every
+                // task dispatch.  Track distinct TCB pointers + first/last time; a task that is never
+                // woken never appears.  If no NEW TCB shows up after doorbell #614 (IOP 25,621K), the
+                // workNotifier task is never scheduled -> the break is upstream of WorkNtfr entirely.
+                if (TcbTrack != null && sys == 0xA4355)
+                {
+                    int ptr = _system[0xA4354] | (value << 8);   // HIGH byte written last -> full word valid
+                    long[] rec; if (!TcbTrack.TryGetValue(ptr, out rec)) { rec = new long[3]; rec[1] = HostClock; TcbTrack[ptr] = rec; }
+                    rec[0]++; rec[2] = HostClock;
                 }
                 // MP-940 hop-3 / GetWorkMask (IOPKernl.asm:549-580): every handler registration
                 // writes workMaskConditionPtrs[slot] (word) then bumps workMaskCount (byte) with
@@ -235,6 +252,10 @@ namespace D.IOP
         public System.Collections.Generic.List<string> OpieReadLog;
         public System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<byte>> WmcTrack;
         public System.Collections.Generic.List<string> OpieInitLog;
+        /// <summary>MP-940: currentTaskTCBPtr value -> {count, firstIOP, lastIOP} = which tasks ever get scheduled.</summary>
+        public System.Collections.Generic.Dictionary<int,long[]> TcbTrack;
+        /// <summary>MP-940 discriminator: reads of workNotifierBits (phys 0xA430E).</summary>
+        public System.Collections.Generic.List<string> WnbReadLog;
         /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
         public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
         public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;

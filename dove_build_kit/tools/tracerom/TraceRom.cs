@@ -153,6 +153,8 @@ namespace DoveTrace
             _mem.OpieReadLog = new List<string>();
             _mem.WmcTrack = new System.Collections.Generic.Dictionary<int,System.Collections.Generic.List<byte>>();
             _mem.OpieInitLog = new List<string>();
+            _mem.TcbTrack = new System.Collections.Generic.Dictionary<int,long[]>();
+            _mem.WnbReadLog = new List<string>();
             _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
@@ -890,6 +892,16 @@ namespace DoveTrace
                 Console.WriteLine("    === MP-940 HOP-3 (WorkNtfr.asm): ISR SRAM writes after the LAST doorbell ===");
                 Console.WriteLine("    (writes to the 7 end-of-run 0x0080 candidates; the one OR'd 0x80 at the doorbell is workNotifierBits)");
                 foreach (var l in _sramLog) Console.WriteLine("      " + l);
+                Console.WriteLine("      === workNotifierBits READ watch (phys 0xA430E) -- doorbell #614 ISR ran ~IOP25,620,950-25,621,100 ===");
+                Console.WriteLine("      ANY read after ~IOP25,621,100 can only be the workNotifier task (no further doorbells):");
+                if (_mem.WnbReadLog != null) { foreach (var l in _mem.WnbReadLog) Console.WriteLine("        " + l);
+                    if (_mem.WnbReadLog.Count == 0) Console.WriteLine("        (no reads at all)"); }
+                Console.WriteLine("      === TASK-DISPATCH WATCH (currentTaskTCBPtr @lin 0x4354) ===");
+                Console.WriteLine("      doorbell #614 was @IOP 25,621K -- any TCB FIRST seen after that = newly scheduled task");
+                if (_mem.TcbTrack != null) { var ks = new System.Collections.Generic.List<int>(_mem.TcbTrack.Keys); ks.Sort();
+                    foreach (var k in ks) { var r = _mem.TcbTrack[k];
+                        Console.WriteLine("        TCB 0x" + k.ToString("X4") + "  dispatches=" + r[0] + "  first@IOP" + r[1] + "  last@IOP" + r[2]
+                            + (r[1] > 25621000 ? "   <== FIRST SEEN AFTER THE DOORBELL" : "")); } }
                 Console.WriteLine("      === GetWorkMask ALLOCATOR HUNT ===");
                 Console.WriteLine("      addrs with strictly-INCREASING small byte writes (workMaskCount signature):");
                 if (_mem.WmcTrack != null) { int nc=0; foreach (var kv in _mem.WmcTrack) { var l = kv.Value;
