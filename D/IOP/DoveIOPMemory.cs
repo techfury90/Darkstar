@@ -140,6 +140,16 @@ namespace D.IOP
                     if (HandlerFcbLog != null && (FloppyFcbWrites % 20000 == 1 || HandlerFcbLog.Count < 12))
                         HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock + " (#" + FloppyFcbWrites + ")");
                 }
+                // MP-940 hop-3: workNotifierBits lives in the DOWNLOADED RAM-Opie data (phys
+                // 0xB0000+), not the 16KB SRAM.  Track address -> last 0x80/0x40/0x00 write after
+                // IOP 25.5M; an address left LATCHED at 0x80 is workNotifierBits with the bits
+                // never consumed (the WorkNtfr XCHG sits after the CMP DI,DX / JGE bail).
+                if (WnbTrack != null && HostClock >= 25500000 && sys >= 0xA0000 && sys < 0xC0000
+                    && (value == 0x80 || value == 0x40 || value == 0x00))
+                {
+                    int[] rec; if (!WnbTrack.TryGetValue(sys, out rec)) { rec = new int[3]; WnbTrack[sys] = rec; }
+                    rec[0] = value; rec[1] = (int)(HostClock / 1000); rec[2]++;
+                }
                 // Diagnostic: track the vacant-stamp writes (high byte 0x60) into the map storage
                 // [0x80000,0xA0000) -- to see whether the fill crosses the 64KB boundary at 0x90000.
                 if (value == 0x60 && sys >= 0x80000 && sys < 0xA0000)
@@ -198,6 +208,8 @@ namespace D.IOP
         public System.Collections.Generic.List<string> NotifyWriteLog;
         /// <summary>MP-940: IOP writes to the floppy/disk/ethernet handler FCBs during the Pilot stall.</summary>
         public System.Collections.Generic.List<string> HandlerFcbLog;
+        /// <summary>MP-940 hop-3: DRAM addr -> {lastVal,lastTimeK,count} for 0x80/0x40/0x00 writes after IOP25.5M.</summary>
+        public System.Collections.Generic.Dictionary<int,int[]> WnbTrack;
         /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
         public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
         public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;

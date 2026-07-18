@@ -74,6 +74,11 @@ namespace DoveTrace
         // down-notify ISR's view of downNotifyBits at each IN 0xB0.
         static System.Collections.Generic.List<string> _cpFcbW = new System.Collections.Generic.List<string>();
         static System.Collections.Generic.List<string> _isrSnap = new System.Collections.Generic.List<string>();
+        // MP-940 hop-3 (WorkNtfr.asm): find workNotifierBits behaviourally -- the down-notify ISR
+        // ORs into it, so it is written in SRAM right after IN 0xB0.  Arm on the LAST doorbell.
+        static int _sramArm = 0;
+        static System.Collections.Generic.List<string> _sramLog = new System.Collections.Generic.List<string>();
+        static System.Collections.Generic.Dictionary<int,int[]> _wnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
@@ -133,7 +138,18 @@ namespace DoveTrace
             _cp.MapReadLog = new List<string>();
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
             _mem.NotifyWriteLog = new List<string>();  // MP-940: IOP writes to upNotifyBits / Dekker locks
+            // MP-940 hop-3: workNotifierBits must receive a write of exactly 0x80 (the OR'd bit)
+            // and, if the WorkNtfr bail fires, never be cleared again.  Track address -> (lastVal,
+            // lastTime, count) for byte writes of 0x80/0x40/0x00 across the doorbell + stall window.
+            // Stack pushes are transient and get overwritten; a latched 0x80 survives.
+            _mem.OnSramWrite = (a, v) => {
+                if (_dbgInstr >= 25500000 && (v == 0x80 || v == 0x40 || v == 0x00)) {
+                    int[] rec; if (!_wnbTrack.TryGetValue(a, out rec)) { rec = new int[3]; _wnbTrack[a] = rec; }
+                    rec[0] = v; rec[1] = (int)(_dbgInstr / 1000); rec[2]++;
+                }
+            };
             _mem.HandlerFcbLog = new List<string>();   // MP-940: which handler FCB the IOP touches during the stall
+            _mem.WnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
             _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
@@ -256,6 +272,7 @@ namespace DoveTrace
                         + " | mesaHasLock A4000=" + ((r[0xA4001 & M] << 8) | r[0xA4000 & M]).ToString("X4") + " iopReqLock A4002=" + ((r[0xA4003 & M] << 8) | r[0xA4002 & M]).ToString("X4"));
                 }
                 _lastAckInstr = _dbgInstr; if (_dbgInstr > PILOT_WINDOW) _acksLate++;
+
                 // MP-940 FORK: snapshot what the down-notify ISR is about to read at MesaUpDn.asm:215.
                 // downNotifyBits==0 here => BP stays Null => :227 never dispatches => silent sleep.
                 { byte[] rr = _mem.SystemRaw;
@@ -867,6 +884,26 @@ namespace DoveTrace
                       + "  downNotify(0xA7C34/36)=0x" + ((r[0xA7C34]<<8)|r[0xA7C35]).ToString("X4") + "/0x" + ((r[0xA7C36]<<8)|r[0xA7C37]).ToString("X4")
                       + "  mesaClientCondition(0xA7C38)=0x" + ((r[0xA7C38]<<8)|r[0xA7C39]).ToString("X4")
                       + "  mesaClientMask(0xA7C3A)=0x" + ((r[0xA7C3A]<<8)|r[0xA7C3B]).ToString("X4")); }
+                Console.WriteLine("    === MP-940 HOP-3 (WorkNtfr.asm): ISR SRAM writes after the LAST doorbell ===");
+                Console.WriteLine("    (writes to the 7 end-of-run 0x0080 candidates; the one OR'd 0x80 at the doorbell is workNotifierBits)");
+                foreach (var l in _sramLog) Console.WriteLine("      " + l);
+                Console.WriteLine("      DRAM(0xA0000-0xC0000) addrs LATCHED at 0x80 after IOP25.5M (workNotifierBits candidates):");
+                if (_mem.WnbTrack != null) { int nn=0; foreach (var kv in _mem.WnbTrack) if (kv.Value[0] == 0x80) {
+                    Console.WriteLine("        phys 0x" + kv.Key.ToString("X5") + " lastVal=0x80 lastW@IOP" + kv.Value[1] + "K writes=" + kv.Value[2]); if (++nn > 30) break; }
+                    if (nn == 0) Console.WriteLine("        (none latched at 0x80)"); }
+                Console.WriteLine("      SRAM addrs whose LAST 0x80/0x40/0x00 write left 0x80 (latched) after IOP25.5M:");
+                foreach (var kv in _wnbTrack) if (kv.Value[0] == 0x80)
+                    Console.WriteLine("        0x" + kv.Key.ToString("X4") + " lastVal=0x80 lastW@IOP" + kv.Value[1] + "K writes=" + kv.Value[2]);
+                { // scan SRAM for un-consumed 0x0080 candidates (XCHG happens AFTER the bail, so
+                  // if the workNotifier task bailed the bits are still there)
+                  Console.Write("    SRAM words == 0x0080 at end-of-run (workNotifierBits candidates): ");
+                  int n = 0;
+                  for (int a = 0; a < 0x4000 - 1; a += 2) { int w = _mem.ReadByte(a) | (_mem.ReadByte(a + 1) << 8);
+                      if (w == 0x0080) { Console.Write("0x" + a.ToString("X4") + " "); if (++n > 40) break; } }
+                  Console.WriteLine(n == 0 ? "(none)" : ("  [" + n + " found]"));
+                  Console.Write("    SRAM bytes == 0x80: ");
+                  n = 0; for (int a = 0; a < 0x4000; a++) { if (_mem.ReadByte(a) == 0x80) { Console.Write("0x" + a.ToString("X4") + " "); if (++n > 40) break; } }
+                  Console.WriteLine(n == 0 ? "(none)" : ("  [" + n + "+ found]")); }
                 Console.WriteLine("    === MP-940 FORK (MesaUpDn.asm:215/:227) ===");
                 Console.WriteLine("    [CP] writes to mesaProc FCB header 0xA7C30..3F: " + _cpFcbW.Count + " (does Pilot's NotifyIOP LAND the downNotifyBits?)");
                 foreach (var l in _cpFcbW) Console.WriteLine("      " + l);
