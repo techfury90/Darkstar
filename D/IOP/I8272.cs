@@ -111,6 +111,7 @@ namespace D.IOP
             {
                 if (_resIdx == 0) _int = false;   // reading the result clears INT
                 byte b = _result[_resIdx++];
+                _resRead++;                        // count harvested result bytes (per result phase)
                 if (_resIdx >= _resLen) GoIdle();
                 return b;
             }
@@ -240,6 +241,7 @@ namespace D.IOP
         private void Execute()
         {
             int op = _cmd[0] & 0x1F;
+            int prevHarvest = _resRead;   // result bytes the host harvested from the PREVIOUS command's result phase
             CommandCount++;
             if (op == 0x06) { ReadCount++; LastReadC = _cmd[2]; LastReadH = _cmd[3]; LastReadR = _cmd[4]; }
             if (Log != null && Log.Count < 60)
@@ -340,7 +342,8 @@ namespace D.IOP
                     + ") cmdC=" + cc + " H=" + head + " R=" + rr + " EOT=" + eot
                     + " | PCN=" + _presentCyl + " ST0=" + _st0.ToString("X2")
                     + " res[0/1/2]=" + _result[0].ToString("X2") + "/" + _result[1].ToString("X2") + "/" + _result[2].ToString("X2")
-                    + " resC=" + _result[3] + " resR=" + _result[5]);
+                    + " resC=" + _result[3] + " resR=" + _result[5]
+                    + "  [prevResHarvest=" + prevHarvest + "]");
             }
         }
 
@@ -452,9 +455,10 @@ namespace D.IOP
 
         private void StartResult(int len)
         {
-            _resLen = len; _resIdx = 0;
+            _resLen = len; _resIdx = 0; _resRead = 0;   // new result phase: reset harvest counter
             _phase = Phase.Result;
         }
+        private int _resRead;   // result bytes the host has read in the current/last result phase
 
         private void GoIdle()
         {
