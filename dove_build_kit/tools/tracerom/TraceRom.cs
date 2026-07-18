@@ -74,6 +74,12 @@ namespace DoveTrace
         // down-notify ISR's view of downNotifyBits at each IN 0xB0.
         static System.Collections.Generic.List<string> _cpFcbW = new System.Collections.Generic.List<string>();
         static System.Collections.Generic.List<string> _isrSnap = new System.Collections.Generic.List<string>();
+        // 8259 in-service sampling at PER-INSTRUCTION granularity (the 1M-instruction epoch sampling
+        // was far too coarse to observe a transient in-service bit -- it could only ever have shown a
+        // PERMANENTLY stuck one).  Track: how often ISR is non-zero, the max value, the longest
+        // consecutive non-zero run (a stuck bit -> run grows without bound), and last-nonzero time.
+        static long _mIsrNz, _sIsrNz, _mIsrRun, _sIsrRun, _mIsrMaxRun, _sIsrMaxRun, _mIsrLast, _sIsrLast;
+        static int _mIsrMax, _sIsrMax;
         // MP-940 hop-3 (WorkNtfr.asm): find workNotifierBits behaviourally -- the down-notify ISR
         // ORs into it, so it is written in SRAM right after IN 0xB0.  Arm on the LAST doorbell.
         static int _sramArm = 0;
@@ -531,6 +537,10 @@ namespace DoveTrace
                     break;
                 }
 
+                { byte mi = _io.PicMaster.InService, si = _io.PicSlave.InService;
+                  if (mi != 0) { _mIsrNz++; _mIsrRun++; if (_mIsrRun > _mIsrMaxRun) _mIsrMaxRun = _mIsrRun; if (mi > _mIsrMax) _mIsrMax = mi; _mIsrLast = instr; } else _mIsrRun = 0;
+                  if (si != 0) { _sIsrNz++; _sIsrRun++; if (_sIsrRun > _sIsrMaxRun) _sIsrMaxRun = _sIsrRun; if (si > _sIsrMax) _sIsrMax = si; _sIsrLast = instr; } else _sIsrRun = 0; }
+
                 epochSet.Add(addr);
 
                 try
@@ -766,6 +776,11 @@ namespace DoveTrace
                 dumpw("low 0xCE   ", 0x000CE, 16);
                 dumpw("word 58000 ", 0x58000, 16);
             }
+            Console.WriteLine("=== 8259 IN-SERVICE, sampled EVERY IOP instruction (epochs were 1M-coarse) ===");
+            Console.WriteLine("    autoEoi: master=" + _io.PicMaster.AutoEoi + " slave=" + _io.PicSlave.AutoEoi + "   (if true, ISR is never latched => any ISR reading is meaningless)");
+            Console.WriteLine("    MASTER ISR non-zero for " + _mIsrNz + " instrs, max=0x" + _mIsrMax.ToString("X2") + ", longest consecutive run=" + _mIsrMaxRun + ", last non-zero @IOP" + _mIsrLast);
+            Console.WriteLine("    SLAVE  ISR non-zero for " + _sIsrNz + " instrs, max=0x" + _sIsrMax.ToString("X2") + ", longest consecutive run=" + _sIsrMaxRun + ", last non-zero @IOP" + _sIsrLast);
+            Console.WriteLine("    (a STUCK bit => longest run grows to ~end-of-run and last-non-zero == final instr)");
             Console.WriteLine("=== MAP vacant-STAMP writes: count=" + _mem.MapStampCount + " Seg2(>=0x90000)=" + _mem.MapStampSeg2
                 + " sysRange=[" + (_mem.MapStampMinSys<0?0:_mem.MapStampMinSys).ToString("X5") + "," + _mem.MapStampMaxSys.ToString("X5") + "]"
                 + "  (if Seg2=0 and max<0x90000 → fill stopped at 64KB boundary = confirmed crossover bug)");

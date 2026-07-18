@@ -143,6 +143,8 @@ namespace D.IOP
 
         /// <summary>Diagnostic accessors for the in-service and request registers.</summary>
         public byte InService { get { return _isr; } }
+        /// <summary>Diagnostic: is auto-EOI active (ICW4 bit1)?  If true the in-service bit is never latched.</summary>
+        public bool AutoEoi { get { return _autoEoi; } }
         public byte Request { get { return _irr; } }
 
         // ---- Interrupt line handling ----
