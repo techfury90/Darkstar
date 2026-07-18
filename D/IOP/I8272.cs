@@ -386,7 +386,7 @@ namespace D.IOP
             _phase = Phase.Execution;
 
             _pendC = (byte)c; _pendH = (byte)head; _pendN = (byte)n; _pendUnit = unit;
-            _readR = r; _readEot = eot;
+            _readR = r; _readEot = eot; _pendMt = mt;
 
             // DMA mode: push the transfer to main memory now (bounded by the DMA
             // count), then terminate with a result that reflects how much was read.
@@ -417,7 +417,7 @@ namespace D.IOP
                              case 1024: return 3; case 2048: return 4; default: return 2; }
         }
 
-        private byte _pendR, _pendC, _pendH, _pendN; private int _pendUnit;
+        private byte _pendR, _pendC, _pendH, _pendN; private int _pendUnit; private bool _pendMt;
         private int _readR, _readEot, _dmaSent;
 
         private void FinishExecution()
@@ -427,8 +427,18 @@ namespace D.IOP
             // Result C/H/R = the sector AFTER the last one transferred (8272 spec).
             int rr = _readR + secsRead;
             int cc = _pendC, hh = _pendH;
-            if (rr > _readEot) { rr = 1; cc = _pendC + 1; }   // rolled past end-of-track
-            _st0 = (byte)((hh << 2) | _pendUnit);             // normal termination
+            if (rr > _readEot)
+            {
+                // Past end-of-track.  Multi-Track wraps head0->head1 on the SAME cylinder, then
+                // head1->head0 on the NEXT cylinder (8272 MT result rules).  Non-MT just advances
+                // the cylinder with the head unchanged.  UpdateOperation feeds ResultBytes[C/H/R]
+                // straight into the germ's next disk address, so a non-MT rollover on an MT read
+                // (old bug: R9 -> C+1 instead of C5/H1/R1) misdirects the boot read.
+                rr = 1;
+                if (_pendMt) { if (_pendH == 0) hh = 1; else { hh = 0; cc = _pendC + 1; } }
+                else cc = _pendC + 1;
+            }
+            _st0 = (byte)((_pendH << 2) | _pendUnit);         // termination head = the head actually read
             SetReadResult(0x00, 0x00, cc, hh, rr, _pendN);
             _execData = null; _execIdx = 0; _dmaSent = 0;
             _int = true;

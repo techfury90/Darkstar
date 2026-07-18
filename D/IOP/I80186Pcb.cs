@@ -298,6 +298,15 @@ namespace D.IOP
             WriteRegisterWord(OffsetT1Count, (ushort)count);
         }
 
+        /// <summary>Drive timer 1's byte-count to its terminal count (0).  Called when the FDC
+        /// DMA transfer terminates on the DMA transfer count (FFC8 drained to 0) BEFORE the DACK
+        /// count reached timer-1 max-count A -- the real 80186 DMA TC ends the burst, so the
+        /// timer-1 count the FloppyHeadDove driver reads as firstTrack.TotalBytesActuallyTransfered
+        /// must be 0 (the residual, exactly like FinalDMACount).  Without this a short burst
+        /// (e.g. 512B against a 1536B max-A) leaves timer 1 = 512 -> UpdateOperation:1567
+        /// (FinalDMACount + firstTrack.TotalBytesActuallyTransfered # 0) fails the op forever.</summary>
+        public void ClearTimer1Count() { WriteRegisterWord(OffsetT1Count, 0); }
+
         private void TickTimer(int countOff, int maxAOff, int modeOff, int requestBit, int clocks)
         {
             int mode = ReadRegisterWord(modeOff);

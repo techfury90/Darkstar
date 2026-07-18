@@ -83,6 +83,14 @@ namespace D.IOP
                 // polls (IN FF58) as one of its completion conditions.  (Timer 1's
                 // interrupt-enable bit is clear, so no TC interrupt is raised.)
                 _pcb.PulseTimer1(n);
+                // The transfer terminated on the DMA count (FFC8 fully drained: count<=n).  The real
+                // 80186 DMA TC ends the burst here regardless of timer-1's max-count A, so force
+                // timer 1 to its terminal count (0).  This makes the head read
+                // firstTrack.TotalBytesActuallyTransfered = 0 (residual, like FinalDMACount);
+                // otherwise a burst that stops before reaching max-A leaves timer 1 = bytes-
+                // transferred (e.g. 512) and UpdateOperation:1567 fails the read forever (the C5/H0/R6
+                // 921 boot hang).  Only on a genuine short/under-run (count>n) do we leave the residual.
+                if (count > 0 && count <= n) _pcb.ClearTimer1Count();
                 // DIAGNOSTIC: ring of the last DMA transfers -- count-programmed vs bytes-delivered.
                 // The driver polls FFC8==0 for completion (no TC interrupt), so an UNDER-DELIVERED read
                 // (bytes < count, e.g. an unhandled multi-track read) leaves FFC8 non-zero and the driver
@@ -102,7 +110,9 @@ namespace D.IOP
                     bool allSame = data.Length > 0; for (int i = 1; i < n && i < data.Length; i++) if (data[i] != data[0]) { allSame = false; break; }
                     DmaFirst.Add("C" + _fdc.LastReadC + "/H" + _fdc.LastReadH + "/R" + _fdc.LastReadR + " cntBefore=" + count
                         + " gathered=" + data.Length + " deliv=" + n + " cntAfter=" + (count > n ? count - n : 0)
-                        + " firstSecAllSame=" + allSame + "(0x" + (data.Length > 0 ? data[0] : (byte)0).ToString("X2") + ") dest=0x" + dest.ToString("X5"));
+                        + " firstSecAllSame=" + allSame + "(0x" + (data.Length > 0 ? data[0] : (byte)0).ToString("X2") + ") dest=0x" + dest.ToString("X5")
+                        + " | POST-regs ch0cnt(FFC8)=" + _pcb.GetRegisterWord(0xC8) + " ch1cnt(FFD8)=" + _pcb.GetRegisterWord(0xD8)
+                        + " t1cnt(FF58)=" + _pcb.GetRegisterWord(0x58) + " t1maxA(FF5A)=" + _pcb.GetRegisterWord(0x5A));
                 }
                 _lastDmaDest = dest; _lastDmaLen = n;
                 if (MinDmaDest < 0 || dest < MinDmaDest) MinDmaDest = dest;
