@@ -405,6 +405,7 @@ namespace DoveTrace
                 int addr = _cpu.InstructionAddress;
                 _dbgInstr = instr;
                 _mem.HostClock = instr;
+                _mem.CurrentPC = addr;
                 _io.RdcHostClock = instr;
                 // TEMP: watch the vp 0x0FF IORegion map entry (CP word 0x400FF) — does it start 0x3D05 (real 0x53D)
                 // and only later become 0x5F05 (real 0x55F)?  That's the FindStartOfIORegion ordering race.

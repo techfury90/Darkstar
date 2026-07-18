@@ -104,7 +104,7 @@ namespace D.IOP
             // #614, so ANY read of phys 0xA430E after that ISR completes can only be the workNotifier
             // task.  Zero such reads => the task never ran => break is upstream of WorkNtfr.
             if (WnbReadLog != null && WnbReadLog.Count < 200 && HostClock > 25621100 && (sys == 0xA430E || sys == 0xA430F))
-                WnbReadLog.Add("R phys 0x" + sys.ToString("X5") + " -> 0x" + rv.ToString("X2") + " @IOP" + HostClock);
+                WnbReadLog.Add("R phys 0x" + sys.ToString("X5") + " -> 0x" + rv.ToString("X2") + " @IOP" + HostClock + " PC=" + CurrentPC.ToString("X5"));
             if (OpieReadLog != null && OpieReadLog.Count < 300
                 && HostClock >= 25620950 && HostClock <= 25623000
                 && sys >= 0xA4000 && sys < 0xA4800)
@@ -192,7 +192,7 @@ namespace D.IOP
                 // the bit" vs "the task is not the reader at all".
                 if (WnbReadLog != null && WnbReadLog.Count < 200 && HostClock > 25621100
                     && (sys == 0xA430E || sys == 0xA430F))
-                    WnbReadLog.Add("  W phys 0x" + sys.ToString("X5") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
+                    WnbReadLog.Add("  W phys 0x" + sys.ToString("X5") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock + " PC=" + CurrentPC.ToString("X5"));
                 // MP-940 hop-3: workNotifierBits lives in the DOWNLOADED RAM-Opie data (phys
                 // 0xB0000+), not the 16KB SRAM.  Track address -> last 0x80/0x40/0x00 write after
                 // IOP 25.5M; an address left LATCHED at 0x80 is workNotifierBits with the bits
@@ -256,6 +256,8 @@ namespace D.IOP
         public System.Collections.Generic.List<string> IocbLog;
         /// <summary>TEMP: current IOP instruction count, set by the harness for CmdByteLog timestamps.</summary>
         public long HostClock;
+        /// <summary>Current IOP instruction address, set by the harness -- identifies WHO touches a watched cell.</summary>
+        public int CurrentPC;
 
         /// <summary>MP-940: IOP writes to the mesaProcessor FCB notify words + the Dekker lock pair.</summary>
         public System.Collections.Generic.List<string> NotifyWriteLog;
