@@ -111,6 +111,18 @@ namespace D.IOP
             int sys = TranslateMap(address);
             if (sys >= 0)
             {
+                // MP-940 UP-NOTIFY WATCH: does the IOP ever write the mesaProcessor FCB's async
+                // notify words -- word[0] notifiersLockMask @0xA7C30/31, word[1] upNotifyBits
+                // @0xA7C32/33 -- or the Dekker pair mesaHasLock@0xA4000 / iopReqLock@0xA4002?
+                // The CP busy-spins reading upNotifyBits==0x0000; if the IOP NEVER writes it, the
+                // IOP->CP notify chain is the gate (germ polled, Pilot waits on conditions).
+                if (NotifyWriteLog != null && NotifyWriteLog.Count < 300
+                    && ((sys >= 0xA7C30 && sys <= 0xA7C33) || (sys >= 0xA4000 && sys <= 0xA4003)))
+                {
+                    string what = sys <= 0xA4003 ? (sys < 0xA4002 ? "mesaHasLock" : "iopReqLock")
+                                                 : (sys < 0xA7C32 ? "notifiersLockMask" : "upNotifyBits");
+                    NotifyWriteLog.Add("IOP W phys 0x" + sys.ToString("X5") + " (" + what + ") <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
+                }
                 // Diagnostic: track the vacant-stamp writes (high byte 0x60) into the map storage
                 // [0x80000,0xA0000) -- to see whether the fill crosses the 64KB boundary at 0x90000.
                 if (value == 0x60 && sys >= 0x80000 && sys < 0xA0000)
@@ -165,6 +177,8 @@ namespace D.IOP
         /// <summary>TEMP: current IOP instruction count, set by the harness for CmdByteLog timestamps.</summary>
         public long HostClock;
 
+        /// <summary>MP-940: IOP writes to the mesaProcessor FCB notify words + the Dekker lock pair.</summary>
+        public System.Collections.Generic.List<string> NotifyWriteLog;
         public long MapStampCount, MapStampSeg2;
         public int MapStampMinSys = int.MaxValue, MapStampMaxSys = -1;
 

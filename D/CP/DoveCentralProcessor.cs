@@ -229,6 +229,10 @@ namespace D.CP
         private int _ab0R5Prev = -1;
         // IOP->CP doorbell (wakeup) watch: did the IOP ring the CP after the transfer, and was IE off?
         public long _mIntAsserts;
+        // MP-940: split the IOP->CP doorbell (up-notify wake) by germ vs Pilot.  The germ POLLED, so
+        // this path may never have run; Pilot WAITS on conditions.  If zero asserts after the germ
+        // finishes (CPi>44.7M), the IOP->CP notify chain is the gate -- full stop.
+        public long MIntAssertsPilot, LastMIntAssertCP;
         public List<string> MIntLog;
         public List<string> FrameChainLog;   // Mesa frame/return-link chain at the @AB0 invocation
         public List<string> IntStatSpinLog;   // <-IntStat reads in the spin -- does the germ beat at the timer period?
@@ -293,6 +297,8 @@ namespace D.CP
                 // Log these: if the IOP rings after the boot transfer but IE=false drops it, that is the
                 // missed wakeup.  If the IOP NEVER rings after the transfer, the notify is upstream (IOP side).
                 _mIntAsserts++;
+                LastMIntAssertCP = InstructionCount;
+                if (InstructionCount > 44700000) MIntAssertsPilot++;
                 if (MIntLog != null && MIntLog.Count < 60)
                     MIntLog.Add("IOP->CP doorbell (CSReg b8) asserted @CPi " + InstructionCount
                         + "  IE=" + (_ie ? 1 : 0) + " (taken? needs IE)  csReg=0x" + value.ToString("X4"));

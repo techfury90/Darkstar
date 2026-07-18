@@ -128,6 +128,7 @@ namespace DoveTrace
             _cp.LoopTraceFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_LOOPTRACE_FROM") ?? "0");   // XFER-entry trace window (CPi)
             _cp.MapReadLog = new List<string>();
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
+            _mem.NotifyWriteLog = new List<string>();  // MP-940: IOP writes to upNotifyBits / Dekker locks
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
             _cp.EscLog = new List<string>();
@@ -826,7 +827,20 @@ namespace DoveTrace
                 Console.WriteLine("=== IOP->CP DOORBELL (wakeup) watch: did the IOP ring the CP, and was IE off? ===");
                 Console.WriteLine("    Transfer completed ~CPi 7.35M.  A ring AFTER that with IE=0 = a DROPPED wakeup (missed-wakeup wound).");
                 Console.WriteLine("    A ring never firing after the transfer = the notify is upstream (IOP never tried to wake the CP).");
-                Console.WriteLine("    total IOP->CP doorbell asserts=" + cp._mIntAsserts);
+                Console.WriteLine("    total IOP->CP doorbell asserts=" + cp._mIntAsserts
+                    + "  | AFTER germ-finish (CPi>44.7M) = " + cp.MIntAssertsPilot
+                    + "  lastAssert@CPi " + cp.LastMIntAssertCP
+                    + "   <== if 0 after germ-finish, the IOP->CP up-notify chain is the MP-940 gate");
+                { byte[] r = _mem.SystemRaw;
+                  Console.WriteLine("    Dekker pair: mesaHasLock(0xA4000)=0x" + ((r[0xA4000]<<8)|r[0xA4001]).ToString("X4")
+                      + "  iopReqLock(0xA4002)=0x" + ((r[0xA4002]<<8)|r[0xA4003]).ToString("X4"));
+                  Console.WriteLine("    mesaProc FCB: notifiersLockMask(0xA7C30)=0x" + ((r[0xA7C30]<<8)|r[0xA7C31]).ToString("X4")
+                      + "  upNotifyBits(0xA7C32)=0x" + ((r[0xA7C32]<<8)|r[0xA7C33]).ToString("X4")
+                      + "  downNotify(0xA7C34/36)=0x" + ((r[0xA7C34]<<8)|r[0xA7C35]).ToString("X4") + "/0x" + ((r[0xA7C36]<<8)|r[0xA7C37]).ToString("X4")
+                      + "  mesaClientCondition(0xA7C38)=0x" + ((r[0xA7C38]<<8)|r[0xA7C39]).ToString("X4")
+                      + "  mesaClientMask(0xA7C3A)=0x" + ((r[0xA7C3A]<<8)|r[0xA7C3B]).ToString("X4")); }
+                Console.WriteLine("    IOP writes to notify words / Dekker locks: " + (_mem.NotifyWriteLog == null ? 0 : _mem.NotifyWriteLog.Count));
+                if (_mem.NotifyWriteLog != null) foreach (var l in _mem.NotifyWriteLog) Console.WriteLine("      " + l);
                 if (cp.MIntLog != null) foreach (var l in cp.MIntLog) Console.WriteLine("   " + l);
 
                 Console.WriteLine("=== @AB0 CARRY PROBE (does the scan pointer advance past 64K?) ===");
