@@ -89,6 +89,13 @@ namespace D.IOP
             // Whether the mesa task ever READS fcb.command (0xB0010/11) and dispatches decides the wedge.
             if (CmdByteLog != null && sys >= 0xB0000 && sys < 0xB0020 && CmdByteLog.Count < 140)
                 CmdByteLog.Add("R  phys=" + sys.ToString("X5") + " -> " + rv.ToString("X2") + " @IOP " + HostClock);
+            // MP-940 hop-3: the WorkNotifier task reads workMaskCount (MOV DL,workMaskCount) and
+            // walks workMaskConditionPtrs BEFORE the CMP DI,DX/JGE bail.  Log Opie-data READS in a
+            // tight window just after doorbell #614 (IOP 25,621K) to expose both addresses.
+            if (OpieReadLog != null && OpieReadLog.Count < 300
+                && HostClock >= 25620950 && HostClock <= 25623000
+                && sys >= 0xA4000 && sys < 0xA4800)
+                OpieReadLog.Add("R phys 0x" + sys.ToString("X5") + " (lin 0x" + (sys-0xA0000).ToString("X4") + ") -> 0x" + rv.ToString("X2") + " @IOP" + HostClock);
             return rv;
         }
 
@@ -210,6 +217,8 @@ namespace D.IOP
         public System.Collections.Generic.List<string> HandlerFcbLog;
         /// <summary>MP-940 hop-3: DRAM addr -> {lastVal,lastTimeK,count} for 0x80/0x40/0x00 writes after IOP25.5M.</summary>
         public System.Collections.Generic.Dictionary<int,int[]> WnbTrack;
+        /// <summary>MP-940 hop-3: Opie-data reads in the post-doorbell window (finds workMaskCount + workMaskConditionPtrs).</summary>
+        public System.Collections.Generic.List<string> OpieReadLog;
         /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
         public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
         public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;

@@ -150,6 +150,7 @@ namespace DoveTrace
             };
             _mem.HandlerFcbLog = new List<string>();   // MP-940: which handler FCB the IOP touches during the stall
             _mem.WnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
+            _mem.OpieReadLog = new List<string>();
             _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
@@ -887,6 +888,12 @@ namespace DoveTrace
                 Console.WriteLine("    === MP-940 HOP-3 (WorkNtfr.asm): ISR SRAM writes after the LAST doorbell ===");
                 Console.WriteLine("    (writes to the 7 end-of-run 0x0080 candidates; the one OR'd 0x80 at the doorbell is workNotifierBits)");
                 foreach (var l in _sramLog) Console.WriteLine("      " + l);
+                Console.WriteLine("      OPIE-DATA READS in the post-doorbell window (workMaskCount / workMaskConditionPtrs hunt):");
+                if (_mem.OpieReadLog != null) foreach (var l in _mem.OpieReadLog) Console.WriteLine("        " + l);
+                { byte[] r = _mem.SystemRaw;
+                  Console.WriteLine("      region dump around the workNotifierBits candidates (phys 0xA42C0..0xA4400):");
+                  for (int b = 0xA42C0; b < 0xA4400; b += 16) { Console.Write("        0x" + b.ToString("X5") + " (lin 0x" + (b-0xA0000).ToString("X4") + "): ");
+                      for (int i = 0; i < 16; i++) Console.Write(r[b+i].ToString("X2") + (((i&1)==1)?" ":"")); Console.WriteLine(); } }
                 Console.WriteLine("      DRAM(0xA0000-0xC0000) addrs LATCHED at 0x80 after IOP25.5M (workNotifierBits candidates):");
                 if (_mem.WnbTrack != null) { int nn=0; foreach (var kv in _mem.WnbTrack) if (kv.Value[0] == 0x80) {
                     Console.WriteLine("        phys 0x" + kv.Key.ToString("X5") + " lastVal=0x80 lastW@IOP" + kv.Value[1] + "K writes=" + kv.Value[2]); if (++nn > 30) break; }
