@@ -11,6 +11,11 @@ namespace DoveTrace
         static DoveIOPIO _io;
         static I80186Pcb _pcb;
         static i80186 _cpu;
+        // Histogram of the IOP instruction addresses that read 0xF4 (ArbAllowRDC).
+        // If they cluster in a SystemIdle poll => block is upstream (no disk task
+        // enqueued); if they sit in a disk-handler arbiter-acquire loop => the
+        // arbiter grant value is the block.
+        static System.Collections.Generic.Dictionary<int, long> _arbPC = new System.Collections.Generic.Dictionary<int, long>();
         static long _intCount = 0;
         static int _lastVector = -1;
         static bool _forceRetrace = System.Environment.GetEnvironmentVariable("DOVE_FORCE_RETRACE") == "1";
@@ -50,6 +55,17 @@ namespace DoveTrace
         static D.CP.DoveCentralProcessor _cp;
         static long _cpStartedAt = -1;
         static int _cpDoorbells = 0, _cpAcks = 0, _cpCsLogs = 0, _clrLog = 0;
+        // Doorbell/ACK timing: does the CP (Store) ring NotifyIOP during the Pilot
+        // 940 stall (IOP>42M), or only during the germ boot?  If zero rings after
+        // 42M, Store is blocked BEFORE posting; if rings but no disk task dispatches,
+        // the mesa-int ISR isn't enqueuing the disk task.
+        static long _lastDoorbellInstr = 0, _lastAckInstr = 0;
+        static long _doorbellsLate = 0, _acksLate = 0;
+        const long PILOT_WINDOW = 42_000_000;
+        // Germ-vs-Pilot split by CP instruction count (germ finishes MP930 @ CPi 44.6M).
+        static long _lastDoorbellCP = 0, _doorbellsPilotCP = 0;
+        static System.Collections.Generic.List<string> _doorbellTail = new System.Collections.Generic.List<string>();
+        const long GERM_FINISH_CP = 44_700_000;
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
         static int _copyCount = 0, _copyMin = 0x7FFFFFFF, _copyMax = -1; static System.Collections.Generic.List<string> _copySample = new System.Collections.Generic.List<string>();
         class Mpc { public ushort first, last; public int count; public long firstInstr, lastInstr; }
@@ -213,6 +229,7 @@ namespace DoveTrace
                     Console.WriteLine("  cmd byte B+0xD=" + r[(B + 0xD) & M].ToString("X2") + " CP-word B+0xC(BE)=" + ((r[(B + 0xC) & M] << 8) | r[(B + 0xD) & M]).ToString("X4")
                         + " | mesaHasLock A4000=" + ((r[0xA4001 & M] << 8) | r[0xA4000 & M]).ToString("X4") + " iopReqLock A4002=" + ((r[0xA4003 & M] << 8) | r[0xA4002 & M]).ToString("X4"));
                 }
+                _lastAckInstr = _dbgInstr; if (_dbgInstr > PILOT_WINDOW) _acksLate++;
                 if (_cpAcks++ < 20) {
                     int cur = _mem.ReadByte(0x4354) | (_mem.ReadByte(0x4355) << 8);
                     int tic = _mem.ReadByte(0x7C5A) | (_mem.ReadByte(0x7C5B) << 8);
@@ -224,6 +241,11 @@ namespace DoveTrace
             _cp.OnMesaInterrupt = () => {
                 byte sIrrBefore = _io.PicSlave.Request;
                 _io.RaiseMesaInterrupt();
+                _lastDoorbellInstr = _dbgInstr; if (_dbgInstr > PILOT_WINDOW) _doorbellsLate++;
+                { long cpi = _cp.InstructionCount; _lastDoorbellCP = cpi;
+                  if (cpi > GERM_FINISH_CP) _doorbellsPilotCP++;
+                  string rec = "doorbell #" + _cpDoorbells + " @CPi " + cpi + " IOP" + _dbgInstr + " CPaddr " + _cp.CurrentAddress.ToString("X3");
+                  _doorbellTail.Add(rec); if (_doorbellTail.Count > 16) _doorbellTail.RemoveAt(0); }
                 if (_cpDoorbells++ < 12) {
                     var s = _io.PicSlave; var m = _io.PicMaster;
                     Console.WriteLine("*** CP SetMPIntIOP (doorbell, IR5) @IOPinstr " + _dbgInstr + " CPinstr " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")
@@ -416,7 +438,9 @@ namespace DoveTrace
 
                 try
                 {
+                    long arbBefore = _io.ArbAllowRdcCount;
                     int cyc = _cpu.Execute();
+                    if (_io.ArbAllowRdcCount > arbBefore) { long c; _arbPC.TryGetValue(addr, out c); _arbPC[addr] = c + 1; }
                     _io.Tick(cyc);
                     if (_forceRetrace && instr > 4_000_000) _io.PicSlave.ForceUnmask(0);   // EXPERIMENT: unmask slave IR0 only after POST/init (in the idle loop)
                 }
@@ -1292,6 +1316,15 @@ namespace DoveTrace
             Console.WriteLine();
             Console.WriteLine("=== RDC / arbiter: does the IOP firmware drive the rigid disk? (ArbAllowRDC 0xF4 issued " + _io.ArbAllowRdcCount + "x) ===");
             if (_io.RdcLog != null) { Console.WriteLine("   RDC port accesses logged: " + _io.RdcLog.Count); foreach (var l in _io.RdcLog) Console.WriteLine("   " + l); }
+            Console.WriteLine("   CP->IOP doorbell (NotifyIOP/SetMPIntIOP): total=" + _cpDoorbells + " last@IOP" + _lastDoorbellInstr
+                + " | AFTER IOP" + PILOT_WINDOW + " (Pilot 940 stall): doorbells=" + _doorbellsLate + " IOP-mesa-acks(IN 0xB0)=" + _acksLate + " (lastAck@IOP" + _lastAckInstr + ")");
+            Console.WriteLine("   Germ/Pilot split by CPi (germ finishes MP930 @ CPi~44.6M): last doorbell @CPi " + _lastDoorbellCP
+                + " | doorbells with CPi>" + GERM_FINISH_CP + " (PILOT) = " + _doorbellsPilotCP);
+            Console.WriteLine("   last " + _doorbellTail.Count + " doorbells:");
+            foreach (var d in _doorbellTail) Console.WriteLine("      " + d);
+            Console.WriteLine("   0xF4 (ArbAllowRDC) poller PCs (which IOP instruction reads the arbiter):");
+            foreach (var kv in _arbPC.OrderByDescending(k => k.Value).Take(12))
+                Console.WriteLine("      PC " + Hex5(kv.Key) + " : " + kv.Value + "x   [" + Bytes(kv.Key, 5) + "]");
             Console.WriteLine("Top I/O ports by access count:");
             foreach (var kv in _io.PortCounts.OrderByDescending(k => k.Value).Take(25))
             {
