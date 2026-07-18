@@ -66,6 +66,12 @@ namespace DoveTrace
         static long _lastDoorbellCP = 0, _doorbellsPilotCP = 0;
         static System.Collections.Generic.List<string> _doorbellTail = new System.Collections.Generic.List<string>();
         const long GERM_FINISH_CP = 44_700_000;
+        // Mailbox command lifecycle (mesaProcessor FCB command word @ phys 0xB0010 hi / 0xB0011 lo)
+        // through the 940 stall: is Store's command serviced (cleared to noCommand) and the CP
+        // proceeds, or does it spin re-issuing / never get answered?
+        static byte _mbxB0 = 0xEE, _mbxB1 = 0xEE; static int _mbxLogs = 0;
+        // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
+        static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
         static int _copyCount = 0, _copyMin = 0x7FFFFFFF, _copyMax = -1; static System.Collections.Generic.List<string> _copySample = new System.Collections.Generic.List<string>();
         class Mpc { public ushort first, last; public int count; public long firstInstr, lastInstr; }
@@ -246,6 +252,12 @@ namespace DoveTrace
                   if (cpi > GERM_FINISH_CP) _doorbellsPilotCP++;
                   string rec = "doorbell #" + _cpDoorbells + " @CPi " + cpi + " IOP" + _dbgInstr + " CPaddr " + _cp.CurrentAddress.ToString("X3");
                   _doorbellTail.Add(rec); if (_doorbellTail.Count > 16) _doorbellTail.RemoveAt(0); }
+                if (_cpDoorbells >= 610) {   // dump the handoff mailbox commands, incl. the last (#614)
+                    byte[] r = _mem.SystemRaw; int M = r.Length - 1;
+                    Console.Write("=== DOORBELL #" + _cpDoorbells + " mailbox FCB phys 0xB0000..20 @CPi " + _cp.InstructionCount + " IOP" + _dbgInstr + ": ");
+                    for (int i = 0; i < 0x20; i++) Console.Write(r[(0xB0000 + i) & M].ToString("X2") + (((i & 1) == 1) ? " " : ""));
+                    Console.WriteLine("\n        cmd @B0010=" + r[0xB0010 & M].ToString("X2") + "(" + DecMbx(r[0xB0010 & M]) + ") @B0011=" + r[0xB0011 & M].ToString("X2") + "(" + DecMbx(r[0xB0011 & M]) + ")");
+                }
                 if (_cpDoorbells++ < 12) {
                     var s = _io.PicSlave; var m = _io.PicMaster;
                     Console.WriteLine("*** CP SetMPIntIOP (doorbell, IR5) @IOPinstr " + _dbgInstr + " CPinstr " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")
@@ -355,6 +367,27 @@ namespace DoveTrace
                             + " curTCB[4354]=" + cur.ToString("X4") + " ICB[430E]=" + icb.ToString("X4"));
                         _wTs = ts; _wLogs++;
                     }
+                }
+
+                // MAILBOX command lifecycle through the 940 stall (mesaProcessor FCB command word
+                // @ phys 0xB0010 hi / 0xB0011 lo).  Log every change: command posted -> IOP writes
+                // response -> cleared to noCommand (0), or re-issued (spin).  R5/CPaddr pin the CP.
+                if (_cp.InstructionCount > 44_000_000 && _mbxLogs < 600)
+                {
+                    byte b0 = _mem.SystemRaw[0xB0010], b1 = _mem.SystemRaw[0xB0011];
+                    if (b0 != _mbxB0 || b1 != _mbxB1)
+                    {
+                        Console.WriteLine("*** MBX cmd @B0010/11 = " + b0.ToString("X2") + " " + b1.ToString("X2")
+                            + "  [B0010=" + DecMbx(b0) + " | B0011=" + DecMbx(b1) + "]  @CPi " + _cp.InstructionCount
+                            + " IOP" + instr + " R5=" + _cp._lastDispR5.ToString("X4") + " RH5=" + _cp._lastDispRH5.ToString("X2") + " CPaddr=" + _cp.CurrentAddress.ToString("X3"));
+                        _mbxB0 = b0; _mbxB1 = b1; _mbxLogs++;
+                    }
+                }
+                // R5 (Mesa PC) histogram deep in the stall -- concentrated => busy-spin at one Mesa
+                // PC; varied => scheduler running many processes (a genuine Monitor.Wait block).
+                if (_cp.InstructionCount > 50_000_000)
+                {
+                    int r5 = _cp._lastDispR5; long c; _r5Hist.TryGetValue(r5, out c); _r5Hist[r5] = c + 1;
                 }
 
                 if (watch.Contains(addr) && watchHit.Add(addr))
@@ -1322,6 +1355,15 @@ namespace DoveTrace
                 + " | doorbells with CPi>" + GERM_FINISH_CP + " (PILOT) = " + _doorbellsPilotCP);
             Console.WriteLine("   last " + _doorbellTail.Count + " doorbells:");
             foreach (var d in _doorbellTail) Console.WriteLine("      " + d);
+            Console.WriteLine("   MAILBOX cmd changes during Pilot stall (CPi>44M): " + _mbxLogs + " logged (see *** MBX lines)");
+            Console.WriteLine("   R5 (Mesa PC) histogram, CPi>50M, top 14 (concentrated=busy-spin / varied=blocked):");
+            foreach (var kv in _r5Hist.OrderByDescending(k => k.Value).Take(14))
+                Console.WriteLine("      R5=" + kv.Key.ToString("X4") + " : " + kv.Value);
+            { byte[] r = _mem.SystemRaw; int M = r.Length - 1;
+              Console.WriteLine("   IORegion segment table @0xA4000 (handler-slot off -> FCB base) [floppy=off 0x44]:");
+              for (int off = 0x00; off < 0x80; off += 2) {
+                  int seg = r[(0xA4000 + off) & M] | (r[(0xA4000 + off + 1) & M] << 8);
+                  if (seg != 0 && seg != 0xFFFF) Console.WriteLine("      A4" + (0x000 + off).ToString("X3") + " seg=" + seg.ToString("X4") + " -> FCB " + ((0xA0000 + 16 * seg) & M).ToString("X5")); } }
             Console.WriteLine("   0xF4 (ArbAllowRDC) poller PCs (which IOP instruction reads the arbiter):");
             foreach (var kv in _arbPC.OrderByDescending(k => k.Value).Take(12))
                 Console.WriteLine("      PC " + Hex5(kv.Key) + " : " + kv.Value + "x   [" + Bytes(kv.Key, 5) + "]");
@@ -1333,6 +1375,21 @@ namespace DoveTrace
         }
 
         static string Hex5(int a) { return a.ToString("X5"); }
+
+        // ProcessorHead / mesaProcessor mailbox Command enum (per operator: DiskHeadDove uses
+        // these at 940 before touching the disk -- readRealMemDesc/readVMMapDesc for the backing
+        // store, readGMT for the clock).  readHostID=3 confirmed from the germ's 0x0301 post.
+        static string DecMbx(int v) {
+            switch (v & 0xFF) {
+                case 0x00: return "noCommand";
+                case 0x01: return "readGMT";
+                case 0x03: return "readHostID";
+                case 0x04: return "readVMMapDesc";
+                case 0x05: return "readRealMemDesc";
+                case 0x0B: return "readMachineType";
+                default:   return "cmd0x" + v.ToString("X2");
+            }
+        }
 
         static string Bytes(int phys, int n)
         {
