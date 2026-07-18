@@ -716,6 +716,27 @@ namespace DoveTrace
             Console.WriteLine("=== MAP vacant-STAMP writes: count=" + _mem.MapStampCount + " Seg2(>=0x90000)=" + _mem.MapStampSeg2
                 + " sysRange=[" + (_mem.MapStampMinSys<0?0:_mem.MapStampMinSys).ToString("X5") + "," + _mem.MapStampMaxSys.ToString("X5") + "]"
                 + "  (if Seg2=0 and max<0x90000 → fill stopped at 64KB boundary = confirmed crossover bug)");
+            { // MAP pattern: map[vp] at phys 0x80000+2*vp (CP reads big-endian, same array).  Find where
+              // the vacant-stamp (0x60) actually landed vs where the CP reads 0x0000 (never-written).
+              byte[] R = _mem.SystemRaw; int firstZero = -1, live = 0, vac = 0, zero = 0, lastLive = -1;
+              for (int vp = 0; vp <= 0x7FFF; vp++) { int p = 0x80000 + 2 * vp; int mw = (R[p] << 8) | R[p + 1];
+                  if (mw == 0) { zero++; if (firstZero < 0) firstZero = vp; }
+                  else if ((mw & 0x60) == 0x60) vac++;
+                  else { live++; lastLive = vp; } }
+              Console.WriteLine("=== MAP[vp] pattern (phys 0x80000+2vp): live=" + live + " vacant(0x60)=" + vac + " zero/never-written=" + zero
+                  + " firstZero=vp 0x" + firstZero.ToString("X4") + " lastLive=vp 0x" + lastLive.ToString("X4"));
+              Console.Write("   boundary vp 0x0F8..0x110: ");
+              for (int vp = 0xF8; vp <= 0x110; vp++) { int p = 0x80000 + 2 * vp; Console.Write("["+vp.ToString("X3")+"]"+((R[p]<<8)|R[p+1]).ToString("X4")+" "); }
+              Console.WriteLine();
+              // sample deeper to see if zeros are a clean cut or scattered
+              Console.Write("   samples vp 0x200/0x400/0x800/0x1000/0x2000/0x7FFF: ");
+              foreach (int vp in new int[]{0x200,0x400,0x800,0x1000,0x2000,0x7FFF}) { int p=0x80000+2*vp; Console.Write("["+vp.ToString("X4")+"]"+((R[p]<<8)|R[p+1]).ToString("X4")+" "); }
+              Console.WriteLine();
+              // where did the overshoot stamps land? sample 0x90000..0x96428
+              Console.Write("   overshoot 0x90000..0x96430 (past map end): ");
+              for (int p=0x90000; p<=0x96430; p+=0x1000) Console.Write("0x"+p.ToString("X5")+"="+((R[p]<<8)|R[p+1]).ToString("X4")+" ");
+              Console.WriteLine();
+            }
             Console.WriteLine("=== vector 0x35 (mesa IR5) total fires=" + _v35count + " lastFire@IOPinstr=" + _v35lastInstr + " ===");
             Console.WriteLine("=== IB _ib[0]/refill trace (find the stale _ib[0]=0x37 even-lane read; DLion traps/refills on Empty) ===");
             foreach (var l in _cp.IbLog) Console.WriteLine("   " + l);
