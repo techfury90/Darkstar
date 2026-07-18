@@ -185,6 +185,14 @@ namespace D.IOP
                 }
                 if (OpieInitLog != null && OpieInitLog.Count < 3000 && sys >= 0xA4300 && sys < 0xA4400)
                     OpieInitLog.Add(sys.ToString("X5") + " " + value.ToString("X2") + " " + HostClock);
+                // MP-940 RMW DISCRIMINATOR: append WRITES of workNotifierBits to the same log as the
+                // READS, so ordering is preserved.  XCHG [SI],AX is a read-modify-write => each read is
+                // followed within a few instrs by a write (of 0).  A plain read (some other code) shows
+                // reads with no paired write.  This decides "the task is looping and something re-arms
+                // the bit" vs "the task is not the reader at all".
+                if (WnbReadLog != null && WnbReadLog.Count < 200 && HostClock > 25621100
+                    && (sys == 0xA430E || sys == 0xA430F))
+                    WnbReadLog.Add("  W phys 0x" + sys.ToString("X5") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
                 // MP-940 hop-3: workNotifierBits lives in the DOWNLOADED RAM-Opie data (phys
                 // 0xB0000+), not the 16KB SRAM.  Track address -> last 0x80/0x40/0x00 write after
                 // IOP 25.5M; an address left LATCHED at 0x80 is workNotifierBits with the bits
