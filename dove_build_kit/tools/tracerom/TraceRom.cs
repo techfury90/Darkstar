@@ -68,6 +68,7 @@ namespace DoveTrace
 
             _mem = new DoveIOPMemory(romPath);
             _mem.CmdByteLog = new System.Collections.Generic.List<string>();
+            _mem.IocbLog = new System.Collections.Generic.List<string>();
             _io = new DoveIOPIO(_mem);
             _io.Display.TraceRegisters = true;
             _io.RetracePeriod = int.Parse(System.Environment.GetEnvironmentVariable("DOVE_RETRACE") ?? "20000");
@@ -569,11 +570,13 @@ namespace DoveTrace
             // via MapReg8=5) so the germ's STUCK floppy request block (FloppyDiskFace operation: linear page vs
             // C/H/R, buffer addr, deviceOrdinal, count, status) can be read out of shared memory at the wedge.
             try {
-                byte[] ior = new byte[0x10000];
-                System.Array.Copy(_mem.SystemRaw, 0xA0000, ior, 0, 0x10000);
-                System.IO.File.WriteAllBytes("dove_ioregion.bin", ior);
-                Console.WriteLine("IORegion phys 0xA0000-0xB0000 (CP word 0x50000+) -> dove_ioregion.bin (64KB)");
-            } catch (System.Exception ex) { Console.WriteLine("IORegion dump failed: " + ex.Message); }
+                // Dump the CP first64K MDS (phys 0x80000-0x9FFFF = the floppy IOCB region per
+                // BootChannelFloppy:104) + the IORegion (0xA0000-0xB0000).  192KB.
+                byte[] ior = new byte[0x30000];
+                System.Array.Copy(_mem.SystemRaw, 0x80000, ior, 0, 0x30000);
+                System.IO.File.WriteAllBytes("dove_mem.bin", ior);
+                Console.WriteLine("phys 0x80000-0xB0000 (CP first64K MDS + IORegion) -> dove_mem.bin (192KB)");
+            } catch (System.Exception ex) { Console.WriteLine("mem dump failed: " + ex.Message); }
             Console.Write("HIGH-PORT (>=0x8000) writes by bucket: ");
             foreach (var kv in _io.HighPortWrites) Console.Write("0x" + kv.Key.ToString("X4") + "=" + kv.Value + "  ");
             Console.WriteLine(_io.HighPortWrites.Count == 0 ? "(none)" : "");
@@ -984,6 +987,11 @@ namespace DoveTrace
             Console.WriteLine("=== IOP-side FCB command-word access (phys 0xB0010 even=CP-hi/IOP-lo, 0xB0011 odd=CP-lo/IOP-hi); germ set 58008=0301 => 0xB0010=03,0xB0011=01, polls for noCommand ===");
             Console.WriteLine("   total IOP cmd-byte accesses logged (ring, last 120): " + _mem.CmdByteLog.Count);
             foreach (var l in _mem.CmdByteLog) Console.WriteLine("   " + l);
+            if (_mem.IocbLog != null)
+            {
+                Console.WriteLine("=== FLOPPY IOCB OperationState writes (DIFF Completed forward reads vs the FAILED C5/H0/R6 read) ===");
+                foreach (var l in _mem.IocbLog) Console.WriteLine("   " + l);
+            }
             Console.Write("=== CODE WINDOW real-words 0x499A8..0x499D0 (big-endian words, CP view): ");
             for (int w = 0x499A8; w <= 0x499D0; w++) Console.Write(_cp.ReadWord(w).ToString("X4") + " ");
             Console.WriteLine();

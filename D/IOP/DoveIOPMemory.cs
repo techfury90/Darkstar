@@ -131,12 +131,37 @@ namespace D.IOP
                     && !(sys >= 0xA0EE0 && sys <= 0xA0F10) && !(sys >= 0x1319E0 && sys <= 0x131C10)
                     && CmdByteLog.Count < 200)
                     CmdByteLog.Add("W  phys=" + sys.ToString("X5") + " (CPword 0x" + (sys >> 1).ToString("X5") + ") <- " + value.ToString("X2") + " @IOP " + HostClock);
+                // FLOPPY IOCB OperationState-write watch: catch every write of Completed(6)/Failed(7) into
+                // the first64K where (addr-23) carries the operation signature (word1 function==0x0001 BE) ->
+                // it's the OperationState byte (word 11 low = byte 23).  Snapshot the head's decision fields so
+                // a Completed forward read can be DIFFED against the Failed C5/H0/R6 read.
+                if (IocbLog != null && (value == 6 || value == 7) && sys >= 0x80000 && sys < 0xA0000 && IocbLog.Count < 400)
+                {
+                    int b = sys - 23;
+                    if (b >= 0x80000 && _system[b + 2] == 0 && _system[b + 3] == 1)
+                    {
+                        byte[] r = _system;
+                        int cyl = (r[b + 4] << 8) | r[b + 5];
+                        int sec = (r[b + 6] << 8) | r[b + 7];
+                        int curCmd = (r[b + 72] << 8) | r[b + 73];
+                        int numCmd = (r[b + 70] << 8) | r[b + 71];
+                        int totXfer = (r[b + 48] << 8) | r[b + 49];
+                        int finalDma = (r[b + 66] << 8) | r[b + 67];
+                        IocbLog.Add("OpState<-" + value + (value == 6 ? "(Completed)" : "(FAILED)")
+                            + " C=" + cyl + " sec=" + sec + " curCmd=" + curCmd.ToString("X4") + " numCmd=" + numCmd.ToString("X4")
+                            + " totXfer=" + totXfer + " finalDma=" + finalDma + " NRBRead=" + r[b + 143]
+                            + " res=" + r[b + 144].ToString("X2") + r[b + 145].ToString("X2") + r[b + 146].ToString("X2") + r[b + 147].ToString("X2") + r[b + 148].ToString("X2") + r[b + 149].ToString("X2") + r[b + 150].ToString("X2")
+                            + " iocb=" + b.ToString("X5") + " @IOP" + HostClock);
+                    }
+                }
                 _system[sys] = value;
             }
         }
 
         /// <summary>TEMP: IOP-side reads/writes of the ProcessorHead FCB header (0xB0000..0xB001F).</summary>
         public System.Collections.Generic.List<string> CmdByteLog;
+        /// <summary>TEMP: snapshot of the floppy IOCB head-decision fields at each OperationState write.</summary>
+        public System.Collections.Generic.List<string> IocbLog;
         /// <summary>TEMP: current IOP instruction count, set by the harness for CmdByteLog timestamps.</summary>
         public long HostClock;
 
