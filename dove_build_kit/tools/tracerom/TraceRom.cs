@@ -139,6 +139,7 @@ namespace DoveTrace
             _cp.LoopFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_LOOP_FROM") ?? "2147483647");
             _cp.RingFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_RING_FROM") ?? "2147483647");
             _cp.PollAddrHist = new System.Collections.Generic.Dictionary<int, long>();  // MP-940: cell the 0x898F spin polls
+            _cp.PollValByAddr = new System.Collections.Generic.Dictionary<int, int>();  // actual last VALUE read at each poll addr
             _cp.StkTrapLog = new List<string>();   // TechRef Table 2.11 stack over/underflow detector
             _cp.SpinMapLog = new List<string>();   // THE map set-ref spin probe (MAPA base + resolved entry)
             _cp.MapPhaseLog = new List<string>();  // FIRST Map<- outside c1 -- the invariant the DLion reference throws on
@@ -735,6 +736,9 @@ namespace DoveTrace
               // where did the overshoot stamps land? sample 0x90000..0x96428
               Console.Write("   overshoot 0x90000..0x96430 (past map end): ");
               for (int p=0x90000; p<=0x96430; p+=0x1000) Console.Write("0x"+p.ToString("X5")+"="+((R[p]<<8)|R[p+1]).ToString("X4")+" ");
+              Console.WriteLine();
+              Console.Write("   vp0x100 target phys 0xB0000..30 (what the spin reads via vp0x100): ");
+              for (int i=0;i<0x30;i++) Console.Write(R[0xB0000+i].ToString("X2")+(((i&1)==1)?" ":""));
               Console.WriteLine();
             }
             Console.WriteLine("=== vector 0x35 (mesa IR5) total fires=" + _v35count + " lastFire@IOPinstr=" + _v35lastInstr + " ===");
@@ -1391,9 +1395,15 @@ namespace DoveTrace
             Console.WriteLine("   R5 (Mesa PC) histogram, CPi>50M, top 14 (concentrated=busy-spin / varied=blocked):");
             foreach (var kv in _r5Hist.OrderByDescending(k => k.Value).Take(14))
                 Console.WriteLine("      R5=" + kv.Key.ToString("X4") + " : " + kv.Value);
-            Console.WriteLine("   POLL-ADDRESS histogram -- what the 0x898F/0x99D7 spin READS (CPi>50M), top 12:");
+            Console.WriteLine("   POLL-ADDRESS histogram -- what the 0x898F/0x99D7 spin READS (CPi>50M), top 12 [value = actual _xBus at read time]:");
             foreach (var kv in _cp.PollAddrHist.OrderByDescending(k => k.Value).Take(12))
-                Console.WriteLine("      read real 0x" + kv.Key.ToString("X5") + " (CP word 0x" + (kv.Key >> 1).ToString("X5") + ") : " + kv.Value + "x  = last 0x" + (_mem.SystemRaw[kv.Key & (_mem.SystemRaw.Length-1)] | (_mem.SystemRaw[(kv.Key+1) & (_mem.SystemRaw.Length-1)]<<8)).ToString("X4"));
+            {
+                int mar = kv.Key; int val; _cp.PollValByAddr.TryGetValue(mar, out val);
+                // _mar 0x40000+vp = map array (entry stored at phys 0x80000+2vp); else word-addr, phys=_mar*2.
+                string where = (mar >= 0x40000 && mar < 0x40200) ? ("map[vp 0x" + (mar - 0x40000).ToString("X3") + "] (stored phys 0x" + (0x80000 + 2*(mar-0x40000)).ToString("X5") + ")")
+                                                                  : ("phys 0x" + (mar << 1).ToString("X5"));
+                Console.WriteLine("      _mar 0x" + mar.ToString("X5") + " = " + where + " : " + kv.Value + "x  lastVal=0x" + val.ToString("X4"));
+            }
             { byte[] r = _mem.SystemRaw; int M = r.Length - 1;
               Console.WriteLine("   IORegion segment table @0xA4000 (handler-slot off -> FCB base) [floppy=off 0x44]:");
               for (int off = 0x00; off < 0x80; off += 2) {

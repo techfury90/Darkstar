@@ -153,6 +153,7 @@ namespace D.CP
         // MP-940 stall: which real address the dominant busy-spin (Mesa PC 0x898F/0x99D7) READS,
         // and the last value seen -- pins the cell Pilot's Store is polling forever.
         public System.Collections.Generic.Dictionary<int, long> PollAddrHist;
+        public System.Collections.Generic.Dictionary<int, int> PollValByAddr;  // last _xBus VALUE read at each poll addr (the actual data, not a SystemRaw mis-index)
         public int PollLastVal, PollLastAddr;
         public List<string> StackLog; // if set, logs stack push/pop with stackP + value (to trace @BLTL arg build)
         public List<string> R0Log;    // if set, logs every R0(TOS) change (to trace TOS<-value / TOS<-STK writes)
@@ -621,6 +622,7 @@ namespace D.CP
                 if (PollAddrHist != null && InstructionCount > 50000000 && (_lastDispR5 == 0x898F || _lastDispR5 == 0x99D7))
                 {
                     long pc; PollAddrHist.TryGetValue(_mar, out pc); PollAddrHist[_mar] = pc + 1;
+                    if (PollValByAddr != null) PollValByAddr[_mar] = _xBus;
                     PollLastVal = _xBus; PollLastAddr = _mar;
                 }
                 // TEMP: GetHandlerIORegionPtr:126 reads IORegion.segments[16] at IORegion+0x22 words.
