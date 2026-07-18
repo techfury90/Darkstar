@@ -94,6 +94,16 @@ namespace D.IOP
                         + " countAfter=" + (count > n ? count - n : 0) + " dest=0x" + dest.ToString("X5")
                         + (count > n ? "   *** UNDER-RUN: FFC8 stuck at " + (count - n) + " (driver polls forever) ***" : ""));
                 }
+                // First-60 DMA log WITH the sector, to compare R5(normal,completes) vs R6(compressed,fails)
+                // vs R9(normal,fails): does the germ program a different DMA count-before for the failing reads?
+                if (DmaFirst != null && DmaFirst.Count < 60 && _fdc.LastReadC == 5 && _fdc.LastReadH == 0
+                    && (_fdc.LastReadR == 5 || _fdc.LastReadR == 6 || _fdc.LastReadR == 9))
+                {
+                    bool allSame = data.Length > 0; for (int i = 1; i < n && i < data.Length; i++) if (data[i] != data[0]) { allSame = false; break; }
+                    DmaFirst.Add("C" + _fdc.LastReadC + "/H" + _fdc.LastReadH + "/R" + _fdc.LastReadR + " cntBefore=" + count
+                        + " gathered=" + data.Length + " deliv=" + n + " cntAfter=" + (count > n ? count - n : 0)
+                        + " firstSecAllSame=" + allSame + "(0x" + (data.Length > 0 ? data[0] : (byte)0).ToString("X2") + ") dest=0x" + dest.ToString("X5"));
+                }
                 _lastDmaDest = dest; _lastDmaLen = n;
                 if (MinDmaDest < 0 || dest < MinDmaDest) MinDmaDest = dest;
                 if (dest + n > MaxDmaDest) MaxDmaDest = dest + n;
@@ -681,6 +691,7 @@ namespace D.IOP
         private readonly DoveControlStore _controlStore;
         public int _lastDmaDest, _lastDmaLen;   // diagnostics for the last FDC DMA transfer
         public System.Collections.Generic.List<string> DmaLog;  // ring of last FDC DMA transfers (count vs delivered)
+        public System.Collections.Generic.List<string> DmaFirst; // first 60 FDC DMA transfers WITH the sector (R5 vs R6 vs R9)
         public int MinDmaDest = -1, MaxDmaDest = 0;  // span of IOP linear addrs the floppy load DMA'd into
         public long DmaByteTotal;                    // total bytes DMA'd from the floppy
         private readonly DoveDisplayController _display;

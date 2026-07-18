@@ -82,6 +82,7 @@ namespace DoveTrace
             _io.Fdc.ReadTrace = new List<string>();   // every Read Data cmd's C/H/R + outcome (missing-track = the 921 device error)
             _io.Fdc.CmdTrace = new List<string>();     // every FDC cmd + PCN + result bytes (opening ~950 cmds; catches the C36->C5 backward seek)
             _io.DmaLog = new System.Collections.Generic.List<string>();   // last FDC DMA transfers: count-programmed vs delivered
+            _io.DmaFirst = new System.Collections.Generic.List<string>(); // first 60 FDC DMA transfers with sector (R5 vs R6 vs R9)
             _io.CpLoadLog = new List<string>();
 
             // ---- Dove Central Processor: executes the microcode the IOP loads ----
@@ -546,6 +547,7 @@ namespace DoveTrace
             Console.WriteLine("=== FDC DMA transfers (count-programmed vs bytes-delivered) -- last " + (_io.DmaLog != null ? _io.DmaLog.Count : 0) + " ===");
             Console.WriteLine("    Driver polls FFC8==0 for completion (no TC interrupt). Bytes < count => FFC8 stuck => poll forever.");
             if (_io.DmaLog != null) foreach (var l in _io.DmaLog) Console.WriteLine("   " + l);
+            if (_io.DmaFirst != null) { Console.WriteLine("=== FIRST 60 FDC DMA transfers WITH sector (compare R5 normal vs R6 compressed vs R9) ==="); foreach (var l in _io.DmaFirst) Console.WriteLine("   " + l); }
             {
                 var recent = _io.Fdc.RecentInOrder();
                 Console.WriteLine("=== 8272: the LAST " + recent.Count + " FDC commands (what the stall loop actually IS) ===");
