@@ -134,6 +134,7 @@ namespace DoveTrace
             _cp.MIntLog = new List<string>();   // IOP->CP doorbell (wakeup) assertions
             _mem.NotifyWriteLog = new List<string>();  // MP-940: IOP writes to upNotifyBits / Dekker locks
             _mem.HandlerFcbLog = new List<string>();   // MP-940: which handler FCB the IOP touches during the stall
+            _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
             _cp.EscLog = new List<string>();
@@ -893,7 +894,10 @@ namespace DoveTrace
                       for (int i = 0; i < 0x20; i++) Console.Write(r[fb+i].ToString("X2") + (((i&1)==1)?" ":""));
                       Console.WriteLine();
                   } }
-                Console.WriteLine("    [STALL-WINDOW] IOP writes to floppy/disk/ethernet FCBs: " + (_mem.HandlerFcbLog==null?0:_mem.HandlerFcbLog.Count) + "  <== names the dispatched handler + where it dead-ends");
+                Console.WriteLine("    [STALL-WINDOW] handler-FCB writes (uncapped): floppy=" + _mem.FloppyFcbWrites + " disk=" + _mem.DiskFcbWrites + " ethernet=" + _mem.EtherFcbWrites
+                    + "  | floppy span IOP[" + _mem.FloppyFcbFirst + ".." + _mem.FloppyFcbLast + "]  <== does the cycle run to end-of-run or give up?");
+                if (_mem.FloppyStateHist != null) { Console.Write("      floppyFCB+0x0E state histogram: ");
+                    foreach (var kv in _mem.FloppyStateHist.OrderByDescending(k => k.Value)) Console.Write("0x" + kv.Key.ToString("X2") + "=" + kv.Value + "  "); Console.WriteLine(); }
                 if (_mem.HandlerFcbLog != null) foreach (var l in _mem.HandlerFcbLog) Console.WriteLine("      " + l);
                 Console.WriteLine("    IOP writes to notify words / Dekker locks: " + (_mem.NotifyWriteLog == null ? 0 : _mem.NotifyWriteLog.Count));
                 if (_mem.NotifyWriteLog != null) foreach (var l in _mem.NotifyWriteLog) Console.WriteLine("      " + l);

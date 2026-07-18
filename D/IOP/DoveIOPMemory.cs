@@ -126,12 +126,19 @@ namespace D.IOP
                 // MP-940: WHICH handler is the dispatched one, and where does it dead-end?  Watch IOP
                 // writes to the floppy(0xA79B0)/disk(0xA45C0)/ethernet(0xA46F0) FCBs, but ONLY in the
                 // Pilot stall window so germ-era traffic doesn't consume the cap.
-                if (HandlerFcbLog != null && HandlerFcbLog.Count < 400 && HostClock > 26000000
+                if (HostClock > 26000000
                     && ((sys >= 0xA79B0 && sys < 0xA7A30) || (sys >= 0xA45C0 && sys < 0xA4640) || (sys >= 0xA46F0 && sys < 0xA4770)))
                 {
                     string h = sys >= 0xA79B0 ? "floppy" : sys >= 0xA46F0 ? "ethernet" : "disk";
                     int bas = sys >= 0xA79B0 ? 0xA79B0 : sys >= 0xA46F0 ? 0xA46F0 : 0xA45C0;
-                    HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " (phys 0x" + sys.ToString("X5") + ") <- 0x" + value.ToString("X2") + " @IOP" + HostClock);
+                    // LIFECYCLE (uncapped): when does the cycle start/stop, how many iterations?
+                    if (h == "floppy") { FloppyFcbWrites++; if (FloppyFcbFirst == 0) FloppyFcbFirst = HostClock; FloppyFcbLast = HostClock;
+                        // state histogram on the +0x0E state byte -- names the cycle
+                        if (sys == 0xA79BE && FloppyStateHist != null) { long c; FloppyStateHist.TryGetValue(value, out c); FloppyStateHist[value] = c + 1; } }
+                    else if (h == "disk") DiskFcbWrites++; else EtherFcbWrites++;
+                    // sampled log so we see the whole span, not just the first 315 instructions
+                    if (HandlerFcbLog != null && (FloppyFcbWrites % 20000 == 1 || HandlerFcbLog.Count < 12))
+                        HandlerFcbLog.Add("IOP W " + h + "FCB+0x" + (sys - bas).ToString("X2") + " <- 0x" + value.ToString("X2") + " @IOP" + HostClock + " (#" + FloppyFcbWrites + ")");
                 }
                 // Diagnostic: track the vacant-stamp writes (high byte 0x60) into the map storage
                 // [0x80000,0xA0000) -- to see whether the fill crosses the 64KB boundary at 0x90000.
@@ -191,6 +198,9 @@ namespace D.IOP
         public System.Collections.Generic.List<string> NotifyWriteLog;
         /// <summary>MP-940: IOP writes to the floppy/disk/ethernet handler FCBs during the Pilot stall.</summary>
         public System.Collections.Generic.List<string> HandlerFcbLog;
+        /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
+        public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
+        public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;
         public long MapStampCount, MapStampSeg2;
         public int MapStampMinSys = int.MaxValue, MapStampMaxSys = -1;
 
