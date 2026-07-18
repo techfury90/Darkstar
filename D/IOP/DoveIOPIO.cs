@@ -245,6 +245,7 @@ namespace D.IOP
         {
             SyncInternalIrq();
             SyncFdcIrq();
+            SyncRdcIrq();
             SyncSlaveIrq();
 
             int line;
@@ -306,6 +307,60 @@ namespace D.IOP
         }
         private bool _prevFdcInt;
 
+        // ---- Rigid Disk Controller ports (0x0200-0x021F) ----
+        private bool RdcPort(ushort port) { return port >= 0x0200 && port <= 0x021F; }
+
+        private byte RdcRead(ushort port)
+        {
+            byte v;
+            switch (port)
+            {
+                case 0x0214:                    // 8x305 status: read clears the RDiskCtlrIntr (like the FDC)
+                    v = _rdcStatus; _rdcCtlrInt = false; break;
+                case 0x0210: v = 0x00; break;   // AM2942 DMA status (RunSM/error) -- idle
+                case 0x0204: v = (byte)_rdcDmaCount; break;
+                case 0x0206: v = (byte)(_rdcDmaAddr >> 1); break;
+                default:     v = 0x00; break;
+            }
+            if (RdcLog != null && RdcLog.Count < 800)
+                RdcLog.Add("R  0x" + port.ToString("X4") + " -> 0x" + v.ToString("X2") + " @IOP" + RdcHostClock);
+            return v;
+        }
+
+        private void RdcWrite(ushort port, ushort value)
+        {
+            if (RdcLog != null && RdcLog.Count < 800)
+                RdcLog.Add("W  0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4") + " @IOP" + RdcHostClock
+                    + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : ""));
+            switch (port)
+            {
+                case 0x0214:                    // 8x305 command: s d x x x x c c
+                    _rdcCommand = (byte)value;
+                    int cc = value & 0x3;        // 00 idle / 01 Fetch DOB / 10 Execute / 11 Store DOB
+                    _rdcStatus = (byte)cc;       // rr := cc, done=0 (received, running)
+                    if (cc != 0) { _rdcStatus |= 0x40; _rdcCtlrInt = true; }   // done + RDiskCtlrIntr (no DMA/DOB yet)
+                    break;
+                case 0x0208: _rdcDmaAddr = (value & 0x7FFF) << 9; break;       // load addr[23:9] (auto-reinit)
+                case 0x020A: _rdcDmaAddr = (_rdcDmaAddr & ~0x1FE) | ((value & 0xFF) << 1); break;  // addr[8:1]
+                case 0x020C: _rdcDmaCount = value; break;                       // word count (2's-comp <<1)
+                case 0x0210: _rdcDmaCmd = value; break;                         // DMA command (bit0=direction)
+                case 0x0216: _rdcDmaInt = true; break;                          // StartDMA -> (stub) RDiskDmaIntr'
+                default: break;
+            }
+        }
+
+        /// <summary>Edge-raise the two RDC interrupts onto the slave 8259: RDiskCtlrIntr=IR3, RDiskDmaIntr'=IR2
+        /// (both cascade to master IR5, alongside FDC=IR4).  Slave bit numbers are INFERRED (spec open Q1).</summary>
+        private void SyncRdcIrq()
+        {
+            if (_rdcCtlrInt && !_prevRdcCtlrInt) _picSlave.RaiseIrq(3);
+            if (!_rdcCtlrInt) _picSlave.LowerIrq(3);
+            _prevRdcCtlrInt = _rdcCtlrInt;
+            if (_rdcDmaInt && !_prevRdcDmaInt) _picSlave.RaiseIrq(2);
+            if (!_rdcDmaInt) _picSlave.LowerIrq(2);
+            _prevRdcDmaInt = _rdcDmaInt;
+        }
+
         /// <summary>Master IR3 tracks the keyboard UART's RxRDY (KbrdInputReq).</summary>
         private void UpdateKeyboardIrq()
         {
@@ -351,6 +406,8 @@ namespace D.IOP
             {
                 return _display.ReadByte(port);
             }
+
+            if (RdcPort(port)) return RdcRead(port);
 
             switch (port)
             {
@@ -420,9 +477,12 @@ namespace D.IOP
                 case EnetIntrLatch:
                     return 0x00;
 
-                // Arbiter command read-strobes: the read *is* the command; no data.
-                case ArbHoldIOP:
+                // Arbiter command read-strobes: the read *is* the command; no data (never tested by the
+                // firmware).  AllowRDC (0xF4, bit 0x04) latches the RDC-DMA bus grant.
                 case ArbAllowRDC:
+                    _allowRDC = true; ArbAllowRdcCount++;
+                    return 0x00;
+                case ArbHoldIOP:
                 case ArbAllowPC:
                     return 0x00;
 
@@ -445,6 +505,8 @@ namespace D.IOP
         public void WriteByte(ushort port, byte value)
         {
             Log(false, port, value);
+
+            if (RdcPort(port)) { RdcWrite(port, value); return; }
 
             if (port >= 0x8000)
             {
@@ -586,6 +648,13 @@ namespace D.IOP
                 return (ushort)(_display.ReadByte(port) | (_display.ReadByte(port + 1) << 8));
             }
 
+            if (RdcPort(port)) return RdcRead(port);
+            if (port >= 0xF0 && port <= 0xFF)   // arbiter command-strobe (word IN); returned value never tested
+            {
+                if ((port & 0x04) != 0) { _allowRDC = true; ArbAllowRdcCount++; }
+                return 0;
+            }
+
             switch (port)
             {
                 case InputPort:
@@ -605,6 +674,7 @@ namespace D.IOP
         public long WcsWordWrites = 0;   // TEMP: count 16-bit OUTs that land in the WCS window (0x8000-0xDFFF)
         public void WriteWord(ushort port, ushort value)
         {
+            if (RdcPort(port)) { RdcWrite(port, value); return; }
             if (port >= WcsBase && port <= WcsEnd) WcsWordWrites++;
             if (port == RetraceLatch)
             {
@@ -708,6 +778,18 @@ namespace D.IOP
         private readonly I93C46 _configEeprom;
         private readonly byte[] _hostProm = new byte[8];
         private I80186Pcb _pcb;
+
+        // ---- Rigid Disk Controller (RDC): 8x305 command/status @ 0x0214 + AM2942 DMA/FIFO @ 0x0200-0x0216 ----
+        // Bring-up: minimal FSM to (a) observe whether the IOP firmware drives the RDC, and (b) complete a
+        // command so RDiskCtlrIntr (slave IR3) / RDiskDmaIntr' (slave IR2) cascade to master IR5 -> IOP ISR.
+        // (No AM2942 DMA or DOB execution yet -- this increment only confirms the firmware reaches 0x0214.)
+        private bool _allowRDC;                       // set by the 0xF4 arbiter AllowRDC command
+        private byte _rdcCommand, _rdcStatus;         // 0x0214: write=command (s d xxxx cc), read=status (e d ss xx rr)
+        private int _rdcDmaAddr, _rdcDmaCount; private ushort _rdcDmaCmd;   // AM2942 regs
+        private bool _rdcCtlrInt, _rdcDmaInt, _prevRdcCtlrInt, _prevRdcDmaInt;   // -> slave IR3 / IR2
+        public System.Collections.Generic.List<string> RdcLog;   // diagnostic: every RDC/arbiter access
+        public long RdcHostClock;                     // set by the harness for RdcLog timestamps
+        public long ArbAllowRdcCount;                 // 0xF4 AllowRDC issue count (the 7.7M-poll)
 
         // Display vertical-retrace generator (slave IR0).
         private int _retracePeriod = 210400;   // ~26.3 ms field at 8 MHz

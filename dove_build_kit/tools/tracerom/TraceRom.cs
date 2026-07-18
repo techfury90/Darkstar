@@ -83,6 +83,7 @@ namespace DoveTrace
             _io.Fdc.CmdTrace = new List<string>();     // every FDC cmd + PCN + result bytes (opening ~950 cmds; catches the C36->C5 backward seek)
             _io.DmaLog = new System.Collections.Generic.List<string>();   // last FDC DMA transfers: count-programmed vs delivered
             _io.DmaFirst = new System.Collections.Generic.List<string>(); // first 60 FDC DMA transfers with sector (R5 vs R6 vs R9)
+            _io.RdcLog = new System.Collections.Generic.List<string>();    // RDC / arbiter accesses -- does the IOP firmware drive the rigid disk?
             _io.CpLoadLog = new List<string>();
 
             // ---- Dove Central Processor: executes the microcode the IOP loads ----
@@ -309,6 +310,7 @@ namespace DoveTrace
                 int addr = _cpu.InstructionAddress;
                 _dbgInstr = instr;
                 _mem.HostClock = instr;
+                _io.RdcHostClock = instr;
                 // TEMP: watch the vp 0x0FF IORegion map entry (CP word 0x400FF) — does it start 0x3D05 (real 0x53D)
                 // and only later become 0x5F05 (real 0x55F)?  That's the FindStartOfIORegion ordering race.
                 { ushort mv = _cp.ReadWord(0x400FF); if (mv != _map0FFw && _map0FFlogs < 30) { _map0FFw = mv;
@@ -1288,6 +1290,8 @@ namespace DoveTrace
                 Console.WriteLine("Largest 0xBB (desktopGray) run: start=0x" + bestStart.ToString("X5") + " len=" + bestLen + " (" + (bestLen / 1024) + "KB)");
             }
             Console.WriteLine();
+            Console.WriteLine("=== RDC / arbiter: does the IOP firmware drive the rigid disk? (ArbAllowRDC 0xF4 issued " + _io.ArbAllowRdcCount + "x) ===");
+            if (_io.RdcLog != null) { Console.WriteLine("   RDC port accesses logged: " + _io.RdcLog.Count); foreach (var l in _io.RdcLog) Console.WriteLine("   " + l); }
             Console.WriteLine("Top I/O ports by access count:");
             foreach (var kv in _io.PortCounts.OrderByDescending(k => k.Value).Take(25))
             {
