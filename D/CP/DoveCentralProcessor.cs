@@ -150,6 +150,10 @@ namespace D.CP
         public long XferTraceFrom = 0;         // start capturing XferChainLog after this CPi
         public List<string> MapArrRead;        // OQ54: every CP-side <-MD of the map array 0x400C0-0x40100 (vp 0xC0..0x100 + vp 0xFF) = GetState[0xFF]/FindStartOfIORegion inputs
         public List<string> SdReadLog;         // OQ59: every <-MD of the SD trap table (real 0x48200-0x48220) = trap dispatch reading SD[n] handler [gf,pc]; catch the CodeTrap(SD7)->ControlTrap(SD6) escalation
+        // MP-940 stall: which real address the dominant busy-spin (Mesa PC 0x898F/0x99D7) READS,
+        // and the last value seen -- pins the cell Pilot's Store is polling forever.
+        public System.Collections.Generic.Dictionary<int, long> PollAddrHist;
+        public int PollLastVal, PollLastAddr;
         public List<string> StackLog; // if set, logs stack push/pop with stackP + value (to trace @BLTL arg build)
         public List<string> R0Log;    // if set, logs every R0(TOS) change (to trace TOS<-value / TOS<-STK writes)
         public List<string> TrapLog;   // TEMP: map-fault gate (XRefBr/XwdDisp) X-bus values in the loop
@@ -612,6 +616,13 @@ namespace D.CP
                 // the real page falls out of the register nibble/byte routing (map fmt |rp[5-12]|r|d|w|rp[0-4]|),
                 // GetMapFlags LRot12's out the flag bits.  A pre-decoded <-MD re-mangles it -> R5=EEEE / MP-0200.
                 _xBus = ReadWord(_mar);
+                // MP-940 stall: histogram the addresses the dominant busy-spin reads (Mesa PC
+                // 0x898F/0x99D7).  The hottest = the cell Pilot's Store polls forever -> names the gate.
+                if (PollAddrHist != null && InstructionCount > 50000000 && (_lastDispR5 == 0x898F || _lastDispR5 == 0x99D7))
+                {
+                    long pc; PollAddrHist.TryGetValue(_mar, out pc); PollAddrHist[_mar] = pc + 1;
+                    PollLastVal = _xBus; PollLastAddr = _mar;
+                }
                 // TEMP: GetHandlerIORegionPtr:126 reads IORegion.segments[16] at IORegion+0x22 words.
                 // Real segment table is at CP word 0x52000 (real 0x520 = IORegion vp 0xC0); segments[16] at 0x52022.
                 // If this fires, GetHandlerIORegionPtr ran on the CORRECT IORegion. If it never fires, IORegion is the default.

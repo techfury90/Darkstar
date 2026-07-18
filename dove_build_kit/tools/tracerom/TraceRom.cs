@@ -69,7 +69,7 @@ namespace DoveTrace
         // Mailbox command lifecycle (mesaProcessor FCB command word @ phys 0xB0010 hi / 0xB0011 lo)
         // through the 940 stall: is Store's command serviced (cleared to noCommand) and the CP
         // proceeds, or does it spin re-issuing / never get answered?
-        static byte _mbxB0 = 0xEE, _mbxB1 = 0xEE; static int _mbxLogs = 0;
+        static byte _mbxB0 = 0xEE, _mbxB1 = 0xEE, _mbxCmdHi = 0xEE, _mbxCmdLo = 0xEE; static int _mbxLogs = 0;
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
@@ -138,6 +138,7 @@ namespace DoveTrace
             { var _la = Environment.GetEnvironmentVariable("DOVE_LOOP_ADDR"); _cp.LoopAddr = string.IsNullOrEmpty(_la) ? -1 : Convert.ToInt32(_la, 16); }
             _cp.LoopFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_LOOP_FROM") ?? "2147483647");
             _cp.RingFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_RING_FROM") ?? "2147483647");
+            _cp.PollAddrHist = new System.Collections.Generic.Dictionary<int, long>();  // MP-940: cell the 0x898F spin polls
             _cp.StkTrapLog = new List<string>();   // TechRef Table 2.11 stack over/underflow detector
             _cp.SpinMapLog = new List<string>();   // THE map set-ref spin probe (MAPA base + resolved entry)
             _cp.MapPhaseLog = new List<string>();  // FIRST Map<- outside c1 -- the invariant the DLion reference throws on
@@ -254,9 +255,10 @@ namespace DoveTrace
                   _doorbellTail.Add(rec); if (_doorbellTail.Count > 16) _doorbellTail.RemoveAt(0); }
                 if (_cpDoorbells >= 610) {   // dump the handoff mailbox commands, incl. the last (#614)
                     byte[] r = _mem.SystemRaw; int M = r.Length - 1;
-                    Console.Write("=== DOORBELL #" + _cpDoorbells + " mailbox FCB phys 0xB0000..20 @CPi " + _cp.InstructionCount + " IOP" + _dbgInstr + ": ");
-                    for (int i = 0; i < 0x20; i++) Console.Write(r[(0xB0000 + i) & M].ToString("X2") + (((i & 1) == 1) ? " " : ""));
-                    Console.WriteLine("\n        cmd @B0010=" + r[0xB0010 & M].ToString("X2") + "(" + DecMbx(r[0xB0010 & M]) + ") @B0011=" + r[0xB0011 & M].ToString("X2") + "(" + DecMbx(r[0xB0011 & M]) + ")");
+                    int sg = r[0xA4044 & M] | (r[0xA4045 & M] << 8); int Bm = (0xA0000 + 16 * sg) & M;
+                    Console.Write("=== DOORBELL #" + _cpDoorbells + " mesaProc FCB B=" + Bm.ToString("X5") + " (+0..20) @CPi " + _cp.InstructionCount + " IOP" + _dbgInstr + ": ");
+                    for (int i = 0; i < 0x20; i++) Console.Write(r[(Bm + i) & M].ToString("X2") + (((i & 1) == 1) ? " " : ""));
+                    Console.WriteLine("\n        cmd +0C=" + r[(Bm+0xC)&M].ToString("X2") + "(" + DecMbx(r[(Bm+0xC)&M]) + ") +0D=" + r[(Bm+0xD)&M].ToString("X2") + "(" + DecMbx(r[(Bm+0xD)&M]) + ") +10=" + r[(Bm+0x10)&M].ToString("X2") + "(" + DecMbx(r[(Bm+0x10)&M]) + ") +11=" + r[(Bm+0x11)&M].ToString("X2") + "(" + DecMbx(r[(Bm+0x11)&M]) + ")");
                 }
                 if (_cpDoorbells++ < 12) {
                     var s = _io.PicSlave; var m = _io.PicMaster;
@@ -374,13 +376,22 @@ namespace DoveTrace
                 // response -> cleared to noCommand (0), or re-issued (spin).  R5/CPaddr pin the CP.
                 if (_cp.InstructionCount > 44_000_000 && _mbxLogs < 600)
                 {
-                    byte b0 = _mem.SystemRaw[0xB0010], b1 = _mem.SystemRaw[0xB0011];
-                    if (b0 != _mbxB0 || b1 != _mbxB1)
+                    // Resolve the mesaProcessor FCB base dynamically (segEntry[A4044]) -- Pilot relocated
+                    // the IORegion, so the germ's hardcoded 0xB0010 is stale.  Command word at base+0x0C
+                    // (byte lane ambiguous -> log both) and base+0x10.
+                    byte[] rr = _mem.SystemRaw; int MM = rr.Length - 1;
+                    int seg44 = rr[0xA4044 & MM] | (rr[0xA4045 & MM] << 8);
+                    int Bm = (0xA0000 + 16 * seg44) & MM;
+                    byte b0 = rr[(Bm + 0x0C) & MM], b1 = rr[(Bm + 0x0D) & MM], b2 = rr[(Bm + 0x10) & MM], b3 = rr[(Bm + 0x11) & MM];
+                    if (b0 != _mbxB0 || b1 != _mbxB1 || b2 != _mbxCmdHi || b3 != _mbxCmdLo)
                     {
-                        Console.WriteLine("*** MBX cmd @B0010/11 = " + b0.ToString("X2") + " " + b1.ToString("X2")
-                            + "  [B0010=" + DecMbx(b0) + " | B0011=" + DecMbx(b1) + "]  @CPi " + _cp.InstructionCount
-                            + " IOP" + instr + " R5=" + _cp._lastDispR5.ToString("X4") + " RH5=" + _cp._lastDispRH5.ToString("X2") + " CPaddr=" + _cp.CurrentAddress.ToString("X3"));
-                        _mbxB0 = b0; _mbxB1 = b1; _mbxLogs++;
+                        System.Text.StringBuilder dsb = new System.Text.StringBuilder();
+                        for (int i = 0; i < 0x30; i++) dsb.Append(rr[(Bm + i) & MM].ToString("X2") + (((i & 1) == 1) ? " " : ""));
+                        Console.WriteLine("*** MBX(B=" + Bm.ToString("X5") + ") +0C/0D=" + b0.ToString("X2") + b1.ToString("X2")
+                            + " +10/11=" + b2.ToString("X2") + b3.ToString("X2")
+                            + "  [+0C=" + DecMbx(b0) + " +0D=" + DecMbx(b1) + " +10=" + DecMbx(b2) + " +11=" + DecMbx(b3) + "]  @CPi " + _cp.InstructionCount
+                            + " IOP" + instr + " R5=" + _cp._lastDispR5.ToString("X4") + "\n        FCB+00..30: " + dsb.ToString());
+                        _mbxB0 = b0; _mbxB1 = b1; _mbxCmdHi = b2; _mbxCmdLo = b3; _mbxLogs++;
                     }
                 }
                 // R5 (Mesa PC) histogram deep in the stall -- concentrated => busy-spin at one Mesa
@@ -1359,6 +1370,9 @@ namespace DoveTrace
             Console.WriteLine("   R5 (Mesa PC) histogram, CPi>50M, top 14 (concentrated=busy-spin / varied=blocked):");
             foreach (var kv in _r5Hist.OrderByDescending(k => k.Value).Take(14))
                 Console.WriteLine("      R5=" + kv.Key.ToString("X4") + " : " + kv.Value);
+            Console.WriteLine("   POLL-ADDRESS histogram -- what the 0x898F/0x99D7 spin READS (CPi>50M), top 12:");
+            foreach (var kv in _cp.PollAddrHist.OrderByDescending(k => k.Value).Take(12))
+                Console.WriteLine("      read real 0x" + kv.Key.ToString("X5") + " (CP word 0x" + (kv.Key >> 1).ToString("X5") + ") : " + kv.Value + "x  = last 0x" + (_mem.SystemRaw[kv.Key & (_mem.SystemRaw.Length-1)] | (_mem.SystemRaw[(kv.Key+1) & (_mem.SystemRaw.Length-1)]<<8)).ToString("X4"));
             { byte[] r = _mem.SystemRaw; int M = r.Length - 1;
               Console.WriteLine("   IORegion segment table @0xA4000 (handler-slot off -> FCB base) [floppy=off 0x44]:");
               for (int off = 0x00; off < 0x80; off += 2) {
