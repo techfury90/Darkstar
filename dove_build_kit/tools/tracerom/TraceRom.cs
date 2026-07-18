@@ -84,6 +84,12 @@ namespace DoveTrace
         // ORs into it, so it is written in SRAM right after IN 0xB0.  Arm on the LAST doorbell.
         static int _sramArm = 0;
         static System.Collections.Generic.List<string> _sramLog = new System.Collections.Generic.List<string>();
+        // MP-940: capture AX (handlerID) and BX (condition ptr) at the INT 0x6F inside
+        // WorkNotifyLoop (PC 0xFCCCF) -- AX is built as MOV BX,[DI]/MOV AL,BH/SHR AL,1, and
+        // %LoadHandlerSegment picks DS from AX.  A wrong handlerID => wrong DS => the notify
+        // lands in another handler's data and the intended task never wakes.
+        static System.Collections.Generic.List<string> _notifyLog = new System.Collections.Generic.List<string>();
+        static System.Collections.Generic.Dictionary<int,long> _notifyIdHist = new System.Collections.Generic.Dictionary<int,long>();
         static System.Collections.Generic.Dictionary<int,int[]> _wnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
@@ -461,6 +467,14 @@ namespace DoveTrace
                     int r5 = _cp._lastDispR5; long c; _r5Hist.TryGetValue(r5, out c); _r5Hist[r5] = c + 1;
                 }
 
+                if (addr == 0xFCCCF) {   // INT 0x6F = %NotifyHandlerCondition, inside WorkNotifyLoop
+                    int hid = _cpu.GetAX & 0xFF; long c; _notifyIdHist.TryGetValue(hid, out c); _notifyIdHist[hid] = c + 1;
+                    if (_notifyLog.Count < 60)
+                        _notifyLog.Add("INT 0x6F @IOP" + instr + " CPi " + _cp.InstructionCount
+                            + "  AX=0x" + _cpu.GetAX.ToString("X4") + " (handlerID=" + hid + ")"
+                            + "  BX=0x" + _cpu.GetBX.ToString("X4") + " (condPtr)  DI=0x" + _cpu.GetDI.ToString("X4") + "  DS=0x" + _cpu.GetDS.ToString("X4"));
+                }
+
                 if (watch.Contains(addr) && watchHit.Add(addr))
                     Console.WriteLine(String.Format("  WATCH {0} @instr {1}  AX={2:X4} [0x12 via DS]", Hex5(addr), instr, _cpu.GetAX));
 
@@ -777,6 +791,12 @@ namespace DoveTrace
                 dumpw("low 0xCE   ", 0x000CE, 16);
                 dumpw("word 58000 ", 0x58000, 16);
             }
+            Console.WriteLine("=== %NotifyHandlerCondition (INT 0x6F @0xFCCCF) -- WHO gets notified? ===");
+            Console.WriteLine("    handlerID histogram (1=beep 2=disk 3=display 4=ethernet 5=floppy 6=kbd 7=maintPanel 16=mesaProc 17=tty 18=rs232C 19=configuration):");
+            { var ks=new System.Collections.Generic.List<int>(_notifyIdHist.Keys); ks.Sort();
+              foreach (var k in ks) Console.WriteLine("      handlerID " + k + " : " + _notifyIdHist[k] + " notifies"); 
+              if (ks.Count==0) Console.WriteLine("      (INT 0x6F never reached)"); }
+            foreach (var l in _notifyLog) Console.WriteLine("    " + l);
             Console.WriteLine("=== 8259 IN-SERVICE, sampled EVERY IOP instruction (epochs were 1M-coarse) ===");
             Console.WriteLine("    autoEoi: master=" + _io.PicMaster.AutoEoi + " slave=" + _io.PicSlave.AutoEoi + "   (if true, ISR is never latched => any ISR reading is meaningless)");
             Console.WriteLine("    MASTER ISR non-zero for " + _mIsrNz + " instrs, max=0x" + _mIsrMax.ToString("X2") + ", longest consecutive run=" + _mIsrMaxRun + ", last non-zero @IOP" + _mIsrLast);
