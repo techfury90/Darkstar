@@ -92,6 +92,13 @@ namespace D.IOP
             // MP-940 hop-3: the WorkNotifier task reads workMaskCount (MOV DL,workMaskCount) and
             // walks workMaskConditionPtrs BEFORE the CMP DI,DX/JGE bail.  Log Opie-data READS in a
             // tight window just after doorbell #614 (IOP 25,621K) to expose both addresses.
+            // MP-940: how far does the workNotifier scan actually WALK?  Watch reads of
+            // workMaskCount (phys 0xA43B8) and the workMaskConditionPtrs table (0xA43BA..0xA43CF,
+            // 8 occupied entries then zeros) during the post-doorbell runs.  The highest table
+            // offset read = the observed scan extent -- no bit->index derivation needed.
+            if (TblReadLog != null && TblReadLog.Count < 250 && HostClock > 25621100
+                && sys >= 0xA43B8 && sys <= 0xA43D0)
+                TblReadLog.Add("R phys 0x" + sys.ToString("X5") + " (tbl+0x" + (sys-0xA43BA).ToString("X2") + ") -> 0x" + rv.ToString("X2") + " @IOP" + HostClock);
             // MP-940 DISCRIMINATOR: the workNotifier task must READ workNotifierBits (MOV SI,ptr /
             // XCHG [SI],AX).  The down-notify ISR also reads it -- but there are NO doorbells after
             // #614, so ANY read of phys 0xA430E after that ISR completes can only be the workNotifier
@@ -256,6 +263,8 @@ namespace D.IOP
         public System.Collections.Generic.Dictionary<int,long[]> TcbTrack;
         /// <summary>MP-940 discriminator: reads of workNotifierBits (phys 0xA430E).</summary>
         public System.Collections.Generic.List<string> WnbReadLog;
+        /// <summary>MP-940: reads of workMaskCount + workMaskConditionPtrs = observed scan extent.</summary>
+        public System.Collections.Generic.List<string> TblReadLog;
         /// <summary>MP-940 lifecycle: uncapped floppy/disk/ethernet FCB write counts + span + the +0x0E state histogram.</summary>
         public long FloppyFcbWrites, DiskFcbWrites, EtherFcbWrites, FloppyFcbFirst, FloppyFcbLast;
         public System.Collections.Generic.Dictionary<byte, long> FloppyStateHist;

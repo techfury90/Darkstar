@@ -155,6 +155,7 @@ namespace DoveTrace
             _mem.OpieInitLog = new List<string>();
             _mem.TcbTrack = new System.Collections.Generic.Dictionary<int,long[]>();
             _mem.WnbReadLog = new List<string>();
+            _mem.TblReadLog = new List<string>();
             _mem.FloppyStateHist = new System.Collections.Generic.Dictionary<byte, long>();
             _cp.FrameChainLog = new List<string>();   // frame/return-link chain at the @AB0 invocation
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
@@ -892,6 +893,9 @@ namespace DoveTrace
                 Console.WriteLine("    === MP-940 HOP-3 (WorkNtfr.asm): ISR SRAM writes after the LAST doorbell ===");
                 Console.WriteLine("    (writes to the 7 end-of-run 0x0080 candidates; the one OR'd 0x80 at the doorbell is workNotifierBits)");
                 foreach (var l in _sramLog) Console.WriteLine("      " + l);
+                Console.WriteLine("      === SCAN-EXTENT watch: reads of workMaskCount(0xA43B8) + table(0xA43BA+) after the doorbell ===");
+                if (_mem.TblReadLog != null) { foreach (var l in _mem.TblReadLog) Console.WriteLine("        " + l);
+                    if (_mem.TblReadLog.Count == 0) Console.WriteLine("        (NO reads -- the task never loads the count or walks the table)"); }
                 Console.WriteLine("      === workNotifierBits READ watch (phys 0xA430E) -- doorbell #614 ISR ran ~IOP25,620,950-25,621,100 ===");
                 Console.WriteLine("      ANY read after ~IOP25,621,100 can only be the workNotifier task (no further doorbells):");
                 if (_mem.WnbReadLog != null) { foreach (var l in _mem.WnbReadLog) Console.WriteLine("        " + l);
