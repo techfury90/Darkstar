@@ -208,6 +208,11 @@ namespace D.IOP
         /// ST1=0x01) -> the boot channel sees status != goodCompletion -> cGermDeviceError (921).  This trace
         /// names the exact failing (cylinder,head,sector) so the DMK->IMD geometry gap is visible.</summary>
         public System.Collections.Generic.List<string> ReadTrace;
+        /// <summary>Every FDC command (Seek/Sense/Read/...) with the present-cylinder (PCN) and result bytes,
+        /// capped to the boot's opening ~950 commands so the C36->C5 BACKWARD-seek transition (~cmd 630) is
+        /// captured. Answers: does the firmware issue Seek(0x0F,5)? what is PCN at the C5 ReadData? does the
+        /// read return success (ST0=00) or ST2.WC/ST1.ND?</summary>
+        public System.Collections.Generic.List<string> CmdTrace;
         private void Recent(string s)
         {
             if (RecentLog == null) return;
@@ -325,6 +330,17 @@ namespace D.IOP
                     _result[0] = 0x80;
                     StartResult(1);
                     break;
+            }
+            if (CmdTrace != null && CmdTrace.Count < 950)
+            {
+                int cc = _cmd.Length > 2 ? _cmd[2] : -1;
+                int rr = _cmd.Length > 4 ? _cmd[4] : -1;
+                int eot = _cmd.Length > 6 ? _cmd[6] : -1;
+                CmdTrace.Add("#" + CommandCount + " op=0x" + op.ToString("X2") + "(" + (op < Names.Length ? Names[op] : "?")
+                    + ") cmdC=" + cc + " H=" + head + " R=" + rr + " EOT=" + eot
+                    + " | PCN=" + _presentCyl + " ST0=" + _st0.ToString("X2")
+                    + " res[0/1/2]=" + _result[0].ToString("X2") + "/" + _result[1].ToString("X2") + "/" + _result[2].ToString("X2")
+                    + " resC=" + _result[3] + " resR=" + _result[5]);
             }
         }
 

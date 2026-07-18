@@ -79,6 +79,7 @@ namespace DoveTrace
             _io.Fdc.Log = new List<string>();
             _io.Fdc.RecentLog = new string[80];   // ring: the LAST 80 FDC commands (Log caps at the FIRST 60)
             _io.Fdc.ReadTrace = new List<string>();   // every Read Data cmd's C/H/R + outcome (missing-track = the 921 device error)
+            _io.Fdc.CmdTrace = new List<string>();     // every FDC cmd + PCN + result bytes (opening ~950 cmds; catches the C36->C5 backward seek)
             _io.DmaLog = new System.Collections.Generic.List<string>();   // last FDC DMA transfers: count-programmed vs delivered
             _io.CpLoadLog = new List<string>();
 
@@ -559,6 +560,20 @@ namespace DoveTrace
                 Console.WriteLine("=== 8272 READ TRACE (every Read Data cmd + outcome; a MISSING-TRACK line = the boot-device error -> 921) ===");
                 foreach (var l in _io.Fdc.ReadTrace) Console.WriteLine("   " + l);
             }
+            if (_io.Fdc.CmdTrace != null)
+            {
+                Console.WriteLine("=== 8272 CMD TRACE (opening ~950 cmds: Seek/Sense/Read + PCN + result bytes; watch the C36->C5 BACKWARD seek) ===");
+                foreach (var l in _io.Fdc.CmdTrace) Console.WriteLine("   " + l);
+            }
+            // Dump the shared IORegion (phys 0xA0000-0xB0000 = CP word 0x50000-0x58000 = IOP linear 0x0000-0x10000
+            // via MapReg8=5) so the germ's STUCK floppy request block (FloppyDiskFace operation: linear page vs
+            // C/H/R, buffer addr, deviceOrdinal, count, status) can be read out of shared memory at the wedge.
+            try {
+                byte[] ior = new byte[0x10000];
+                System.Array.Copy(_mem.SystemRaw, 0xA0000, ior, 0, 0x10000);
+                System.IO.File.WriteAllBytes("dove_ioregion.bin", ior);
+                Console.WriteLine("IORegion phys 0xA0000-0xB0000 (CP word 0x50000+) -> dove_ioregion.bin (64KB)");
+            } catch (System.Exception ex) { Console.WriteLine("IORegion dump failed: " + ex.Message); }
             Console.Write("HIGH-PORT (>=0x8000) writes by bucket: ");
             foreach (var kv in _io.HighPortWrites) Console.Write("0x" + kv.Key.ToString("X4") + "=" + kv.Value + "  ");
             Console.WriteLine(_io.HighPortWrites.Count == 0 ? "(none)" : "");
