@@ -251,9 +251,9 @@ namespace DoveTrace
                 // Boot-process structure writes stop when it blocks; scheduler PDA writes run to end.
                 // The highest-lastCPi page that STOPPED before end-of-run = the last structure written
                 // before the block -> localizes the failing call in PilotControl:302-355.
-                if (_cp.InstructionCount > 57000000 && _cp.InstructionCount < 59000000) {
-                    _blkWrites.Add(_cp.InstructionCount + " W phys 0x" + (b & 0x3FFFFF).ToString("X5") + " <- 0x" + (v & 0xFFFF).ToString("X4") + " R5=0x" + _cp._lastDispR5.ToString("X4") + " RH5=0x" + _cp._lastDispRH5.ToString("X2"));
-                    if (_blkWrites.Count > 90) _blkWrites.RemoveAt(0);
+                if (b >= 0xF0000 && b < 0x118000 && _cp.InstructionCount > 55000000) {   // boot-process STRUCTURE region
+                    _blkWrites.Add(_cp.InstructionCount + " W phys 0x" + b.ToString("X5") + " <- 0x" + (v & 0xFFFF).ToString("X4") + " R5=0x" + _cp._lastDispR5.ToString("X4") + " RH5=0x" + _cp._lastDispRH5.ToString("X2") + " CPaddr=" + _cp.CurrentAddress.ToString("X3"));
+                    if (_blkWrites.Count > 40) _blkWrites.RemoveAt(0);
                 }
                 if (_cp.InstructionCount > 40000000) { int pg = b >> 8;
                     long lc; _wrPageLast.TryGetValue(pg, out lc); if (_cp.InstructionCount > lc) _wrPageLast[pg] = _cp.InstructionCount;
@@ -1623,7 +1623,7 @@ namespace DoveTrace
               foreach (var kv in _wrPageLast) if (kv.Value < floor) st.Add(kv);
               st.Sort((a,b) => b.Value.CompareTo(a.Value));
               int sh=0; foreach (var kv in st) { long cn; _wrPageCnt.TryGetValue(kv.Key, out cn);
-                  Console.WriteLine("      page 0x" + (kv.Key<<8).ToString("X5") + "-0x" + ((kv.Key<<8)|0xFF).ToString("X5") + " (CPword; phys 0x" + ((kv.Key<<9)).ToString("X5") + ")  lastCPi=" + kv.Value + "  writes=" + cn);
+                  Console.WriteLine("      page 0x" + (kv.Key<<8).ToString("X5") + "-0x" + ((kv.Key<<8)|0xFF).ToString("X5") + " (real phys 0x" + ((kv.Key<<8)).ToString("X5") + ")  lastCPi=" + kv.Value + "  writes=" + cn);
                   if (++sh >= 24) break; }
               if (sh==0) Console.WriteLine("      (all write-pages active to end -> the boot process is still WRITING = busy-spin with side effects, not a clean block)");
               Console.WriteLine("   LAST ~90 CP writes across the block (CPi 57-59M) -- the transition from structure-fill to idle-loop is the block point:");
@@ -1632,7 +1632,7 @@ namespace DoveTrace
               var en = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int,long>>();
               foreach (var kv in _wrPageLast) if (kv.Value >= floor) en.Add(kv);
               en.Sort((a,b)=>b.Value.CompareTo(a.Value)); sh=0;
-              foreach (var kv in en) { long cn; _wrPageCnt.TryGetValue(kv.Key,out cn); Console.WriteLine("      page phys 0x" + (kv.Key<<9).ToString("X5") + " lastCPi=" + kv.Value + " writes=" + cn); if (++sh>=10) break; } }
+              foreach (var kv in en) { long cn; _wrPageCnt.TryGetValue(kv.Key,out cn); Console.WriteLine("      page real phys 0x" + (kv.Key<<8).ToString("X5") + " lastCPi=" + kv.Value + " writes=" + cn); if (++sh>=10) break; } }
             Console.WriteLine("   POLL-ADDRESS histogram -- what the 0x898F/0x99D7 spin READS (CPi>50M), top 12 [value = actual _xBus at read time]:");
             foreach (var kv in _cp.PollAddrHist.OrderByDescending(k => k.Value).Take(12))
             {
