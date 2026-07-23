@@ -210,7 +210,7 @@ namespace D.IOP
                     // not, so the ongoing timer heartbeat isn't blocked by a missing EOI.
                     if (!_autoEoi) WriteRegisterWord(OffsetInService, (ushort)(isr | bit));
                     WriteRegisterWord(OffsetIntRequest, (ushort)(ReadRegisterWord(OffsetIntRequest) & ~bit));
-                    AckCount++;
+                    AckCount++; InternalAckByBit[i]++;
                     return (ReadRegisterWord(OffsetIntVector) & 0xF8) | i;
                 }
             }
@@ -222,6 +222,8 @@ namespace D.IOP
         private bool _autoEoi;
 
         // Diagnostics for the integrated interrupt controller + Timer 2.
+        public readonly long[] InternalAckByBit = new long[8];   // WatchDog check: which internal-PIC sources actually get serviced (Timer2 = bit 5)
+        public readonly long[] TimerFireByReq = new long[16];    // request-bit -> times the timer reached maxA and requested an int
         public ushort InternalRequest { get { return ReadRegisterWord(OffsetIntRequest); } }
         public ushort InternalInService { get { return ReadRegisterWord(OffsetInService); } }
         public ushort InternalMask { get { return ReadRegisterWord(OffsetIntMask); } }
@@ -325,7 +327,9 @@ namespace D.IOP
                 if ((mode & 0x2000) != 0)       // INT enabled -> request an interrupt
                 {
                     WriteRegisterWord(OffsetIntRequest, (ushort)(ReadRegisterWord(OffsetIntRequest) | requestBit));
+                    for (int _b = 0; _b < 16; _b++) if ((requestBit & (1 << _b)) != 0) { TimerFireByReq[_b]++; break; }
                 }
+                else { for (int _b = 0; _b < 16; _b++) if ((requestBit & (1 << _b)) != 0) { TimerFireByReq[_b]++; break; } }  // reached maxA even if int disabled
                 if ((mode & 0x0001) == 0)        // single (not continuous) -> stop
                 {
                     mode &= unchecked((ushort)~0x8000);
