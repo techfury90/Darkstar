@@ -94,6 +94,15 @@ namespace DoveTrace
         static System.Collections.Generic.Dictionary<int,int[]> _wnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
+        // BLOCK-POINT hunt: last CP-instruction-count each Mesa macro-PC ((RH5<<16)|R5) was executed.
+        // The boot process's PCs stop being seen at the block (~CPi 50M); the idle/scheduler PCs run
+        // to end-of-run (~CPi 150M).  So the boot-process PC with the highest lastCPi below the idle
+        // plateau IS the blocking call -- to be GFT-mapped to a PilotControl:302-355 module.
+        static System.Collections.Generic.Dictionary<int, long> _pcLast = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.Dictionary<int, long> _pcCount = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.Dictionary<int, long> _wrPageLast = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.Dictionary<int, long> _wrPageCnt = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.List<string> _blkWrites = new System.Collections.Generic.List<string>();
         static int _v35count = 0, _v35postGMT = 0, _fcbCmdWrites = 0; static long _v35lastInstr = 0;
         static int _copyCount = 0, _copyMin = 0x7FFFFFFF, _copyMax = -1; static System.Collections.Generic.List<string> _copySample = new System.Collections.Generic.List<string>();
         class Mpc { public ushort first, last; public int count; public long firstInstr, lastInstr; }
@@ -238,6 +247,17 @@ namespace DoveTrace
                   Console.WriteLine("*** germ reads " + a.ToString("X5") + " = " + v.ToString("X4") + " (real0x"+rp.ToString("X3")+" bswap0x"+bs.ToString("X4")+" mod256=0x"+((rp)&0xFF).ToString("X2")+")  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _rd0FF++; }
                 return v; };
             _cp.WriteWord = (a, v) => { int b = (a << 1) & ramMask; sysRam[b] = (byte)(v >> 8); sysRam[(b + 1) & ramMask] = (byte)v;
+                // BLOCK-POINT (write side): bucket CP writes by 256-byte page -> lastCPi + count.
+                // Boot-process structure writes stop when it blocks; scheduler PDA writes run to end.
+                // The highest-lastCPi page that STOPPED before end-of-run = the last structure written
+                // before the block -> localizes the failing call in PilotControl:302-355.
+                if (_cp.InstructionCount > 57000000 && _cp.InstructionCount < 59000000) {
+                    _blkWrites.Add(_cp.InstructionCount + " W phys 0x" + (b & 0x3FFFFF).ToString("X5") + " <- 0x" + (v & 0xFFFF).ToString("X4") + " R5=0x" + _cp._lastDispR5.ToString("X4") + " RH5=0x" + _cp._lastDispRH5.ToString("X2"));
+                    if (_blkWrites.Count > 90) _blkWrites.RemoveAt(0);
+                }
+                if (_cp.InstructionCount > 40000000) { int pg = b >> 8;
+                    long lc; _wrPageLast.TryGetValue(pg, out lc); if (_cp.InstructionCount > lc) _wrPageLast[pg] = _cp.InstructionCount;
+                    long wc; _wrPageCnt.TryGetValue(pg, out wc); _wrPageCnt[pg] = wc + 1; }
                 // MP-940 FORK (MesaUpDn.asm:215/:227): does Pilot's NotifyIOP ever LAND the bits?
                 // CP writes to the mesaProcessor FCB header phys 0xA7C30..0xA7C3F -- especially
                 // downNotifyBits = words 2-3 = phys 0xA7C34/0xA7C36.  If the CP never writes these,
@@ -1588,6 +1608,31 @@ namespace DoveTrace
             Console.WriteLine("   R5 (Mesa PC) histogram, CPi>50M, top 14 (concentrated=busy-spin / varied=blocked):");
             foreach (var kv in _r5Hist.OrderByDescending(k => k.Value).Take(14))
                 Console.WriteLine("      R5=" + kv.Key.ToString("X4") + " : " + kv.Value);
+            { long finalCP = _cp.InstructionCount; long idleFloor = finalCP - 20000000;
+              Console.WriteLine("   BLOCK-POINT: Mesa PCs whose LAST execution was well before end (finalCPi=" + finalCP + "); the highest such = the boot process's block:");
+              var stopped = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int,long>>();
+              foreach (var kv in _pcLast) if (kv.Value < idleFloor) stopped.Add(kv);
+              stopped.Sort((a,b) => b.Value.CompareTo(a.Value));
+              int shown=0; foreach (var kv in stopped) { long cnt; _pcCount.TryGetValue(kv.Key, out cnt);
+                  Console.WriteLine("      PC(RH5:R5)=0x" + kv.Key.ToString("X5") + "  R5=0x" + (kv.Key & 0xFFFF).ToString("X4") + " RH5=0x" + (kv.Key>>16).ToString("X") + "  lastCPi=" + kv.Value + "  count=" + cnt);
+                  if (++shown >= 20) break; }
+              if (shown==0) Console.WriteLine("      (all executing PCs ran to end -> boot process blocked, its PC saved not executing; use the WRITE side)"); }
+            { long finalCP = _cp.InstructionCount; long floor = finalCP - 30000000;
+              Console.WriteLine("   BLOCK-POINT (WRITE side): CP write-pages whose LAST write stopped before end (finalCPi=" + finalCP + "); highest = last structure before the block:");
+              var st = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int,long>>();
+              foreach (var kv in _wrPageLast) if (kv.Value < floor) st.Add(kv);
+              st.Sort((a,b) => b.Value.CompareTo(a.Value));
+              int sh=0; foreach (var kv in st) { long cn; _wrPageCnt.TryGetValue(kv.Key, out cn);
+                  Console.WriteLine("      page 0x" + (kv.Key<<8).ToString("X5") + "-0x" + ((kv.Key<<8)|0xFF).ToString("X5") + " (CPword; phys 0x" + ((kv.Key<<9)).ToString("X5") + ")  lastCPi=" + kv.Value + "  writes=" + cn);
+                  if (++sh >= 24) break; }
+              if (sh==0) Console.WriteLine("      (all write-pages active to end -> the boot process is still WRITING = busy-spin with side effects, not a clean block)");
+              Console.WriteLine("   LAST ~90 CP writes across the block (CPi 57-59M) -- the transition from structure-fill to idle-loop is the block point:");
+              foreach (var l in _blkWrites) Console.WriteLine("      " + l);
+              Console.WriteLine("   (pages still written to END, for contrast -- these are the scheduler/idle writes):");
+              var en = new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int,long>>();
+              foreach (var kv in _wrPageLast) if (kv.Value >= floor) en.Add(kv);
+              en.Sort((a,b)=>b.Value.CompareTo(a.Value)); sh=0;
+              foreach (var kv in en) { long cn; _wrPageCnt.TryGetValue(kv.Key,out cn); Console.WriteLine("      page phys 0x" + (kv.Key<<9).ToString("X5") + " lastCPi=" + kv.Value + " writes=" + cn); if (++sh>=10) break; } }
             Console.WriteLine("   POLL-ADDRESS histogram -- what the 0x898F/0x99D7 spin READS (CPi>50M), top 12 [value = actual _xBus at read time]:");
             foreach (var kv in _cp.PollAddrHist.OrderByDescending(k => k.Value).Take(12))
             {
