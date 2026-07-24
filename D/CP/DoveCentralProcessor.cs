@@ -246,6 +246,11 @@ namespace D.CP
         // but neither cancel, so a cancel that should fire silently doesn't -- and the path length changes.
         private bool _marPageCrossBr;            // set by a page-crossing MAR<-, consumed next instruction
         private bool _pageCrossCancelPending;    // = _marPageCrossBr latched at the top of THIS instruction
+        // MP-935 FIX: mirror DLion CentralProcessor.cs:664 -- a page-crossing MAR<- cancels the FOLLOWING MDR<-
+        // store (the microcode's pageCross branch re-issues it with the carried address).  Dove had the branch and
+        // the IBDisp cancel (:759) but NOT this MDR<- cancel, so the un-carried store (real page, offset wrapped to
+        // 0) executed and clobbered whatever sat at page-offset 0 -- e.g. GFI 74's EFC4 control link (MP-935 root).
+        private readonly bool _pageCrossMdrCancel = Environment.GetEnvironmentVariable("DOVE_NO_PAGECROSS_MDR_CANCEL") != "1";
         public long _pageCrossCount;             // how many MAR<- actually crossed a page
         public long _ibDispCancels;        // IBDisps cancelled by a preceding pageCross (DLion CentralProcessor.cs:759)
         public List<string> CancelLog;           // the first 40, with call-site state
@@ -933,7 +938,9 @@ namespace D.CP
                         }
                         break;
                     case 2:
-                        if (WriteWord != null) WriteWord(_mar, _yBus);   // MDR<-
+                        // MDR<- -- DLion CentralProcessor.cs:664: cancel the store if the PRECEDING MAR<- crossed a
+                        // page (the un-carried splice address is wrong; the pageCross branch re-issues it correctly).
+                        if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel)) WriteWord(_mar, _yBus);
                         if (LinkVecWriteLog != null && LinkVecWriteLog.Count < 200)
                         {
                             // DECISIVE (OQ48): trace the SD-install burst (GermOpsImpl:1099-1102).  SD[sCodeTrap]=SD[7]@real0x4820E
