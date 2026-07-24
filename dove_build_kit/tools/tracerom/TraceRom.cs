@@ -94,6 +94,14 @@ namespace DoveTrace
         static System.Collections.Generic.Dictionary<int,int[]> _wnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
+        // MP-940 SPIN CAPTURE (robust, TraceRom-side, unconditional): every CP read/write after DOVE_SPIN_FROM
+        // (default 55M) bucketed by phys word address -> count + last value; plus microcode-CPaddr loop-body
+        // histogram.  The spin's most-read cell + its stuck value names the branch condition the spin waits on.
+        static System.Collections.Generic.Dictionary<int, long> _spinRd = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.Dictionary<int, int>  _spinRdVal = new System.Collections.Generic.Dictionary<int, int>();
+        static System.Collections.Generic.Dictionary<int, long> _spinWr = new System.Collections.Generic.Dictionary<int, long>();
+        static System.Collections.Generic.Dictionary<int, long> _spinPC = new System.Collections.Generic.Dictionary<int, long>();
+        static long _spinFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_SPIN_FROM") ?? "55000000");
         // BLOCK-POINT hunt: last CP-instruction-count each Mesa macro-PC ((RH5<<16)|R5) was executed.
         // The boot process's PCs stop being seen at the block (~CPi 50M); the idle/scheduler PCs run
         // to end-of-run (~CPi 150M).  So the boot-process PC with the highest lastCPi below the idle
@@ -215,6 +223,9 @@ namespace DoveTrace
             int ramMask = sysRam.Length - 1;
             // CP is big-endian (Mesa); MAR is a 16-bit-word physical address.
             _cp.ReadWord = a => { int b = (a << 1) & ramMask; ushort v = (ushort)((sysRam[b] << 8) | sysRam[(b + 1) & ramMask]);
+                // MP-940 SPIN CAPTURE: robust per-read bucket after the stall window opens.
+                if (_cp.InstructionCount > _spinFrom) { long sc; _spinRd.TryGetValue(a, out sc); _spinRd[a] = sc + 1; _spinRdVal[a] = v;
+                    int spc = _cp.CurrentAddress; long spcc; _spinPC.TryGetValue(spc, out spcc); _spinPC[spc] = spcc + 1; }
                 // FCB WATCH (operator candidate A): fcb.data.countMapPages ~= CP word 0x53E20 (2 words after the
                 // command word 0x53E1E).  numberVirtualPages = ByteSwap[countMapPages] * 256, and the available-VM
                 // interval is [0x100, numberVirtualPages).  Correct Daybreak => countMapPages ByteSwap = 0x100 (256)
@@ -247,6 +258,8 @@ namespace DoveTrace
                   Console.WriteLine("*** germ reads " + a.ToString("X5") + " = " + v.ToString("X4") + " (real0x"+rp.ToString("X3")+" bswap0x"+bs.ToString("X4")+" mod256=0x"+((rp)&0xFF).ToString("X2")+")  @CPi " + _cp.InstructionCount + " CPaddr " + _cp.CurrentAddress.ToString("X3")); _rd0FF++; }
                 return v; };
             _cp.WriteWord = (a, v) => { int b = (a << 1) & ramMask; sysRam[b] = (byte)(v >> 8); sysRam[(b + 1) & ramMask] = (byte)v;
+                // MP-940 SPIN CAPTURE (write side): the spin should write ~nothing; anything here is scheduler/other.
+                if (_cp.InstructionCount > _spinFrom) { long sc; _spinWr.TryGetValue(a, out sc); _spinWr[a] = sc + 1; }
                 // BLOCK-POINT (write side): bucket CP writes by 256-byte page -> lastCPi + count.
                 // Boot-process structure writes stop when it blocks; scheduler PDA writes run to end.
                 // The highest-lastCPi page that STOPPED before end-of-run = the last structure written
@@ -631,6 +644,30 @@ namespace DoveTrace
                         _io.RetraceCount, _io.RetraceClearReads,
                         _io.PicMaster.InService, _io.PicMaster.Request,
                         _io.PicSlave.InService, _io.PicSlave.Request));
+                    // MP-940 CLOCK-STARVATION probe: uPTC (U 0x32 = Process Tick Count) trajectory.
+                    // Timed waiters PSB[61]/[62] wake at uPTC == 0x1C65/0x1C66 (Process.mc:1104 XOR-eq test).
+                    // below target = starved; above = skipped (fatal, no recovery until wrap); == = scan didn't act.
+                    { var u=_cp.URegs; Console.WriteLine("            CPsched: uPTC=0x" + u[0x32].ToString("X4")
+                        + " uWDC=0x" + u[0x18].ToString("X4") + " uTicks=0x" + u[0x2A].ToString("X4")
+                        + " CPi=" + _cp.InstructionCount + " IE=" + (_cp.IE?1:0)
+                        + " mIntBrFires=" + _cp.MesaIntBrFires + " setIE=" + _cp.SetIeCount + " timerFires=" + _cp.TimerFireCount); }
+                    // MP-940 RESCHEDULE fork (operator): uIdleCountLow(B1) frozen@0 => IdleLoop never entered =>
+                    // Reschedule never reached => PEnd dispatch (uPFlags EB) routes back to Opcode not 0E->Reschedule.
+                    // Climbing => scheduler runs, bug in IdleInt exit.  uPSB(39) unchanged => no switch attempted.
+                    { var u=_cp.URegs; Console.WriteLine("            RESCHED: uIdleLo(B1)=0x" + u[0xB1].ToString("X4")
+                        + " uIdleHi(B2)=0x" + u[0xB2].ToString("X4") + " uPFlags(EB)=0x" + u[0xEB].ToString("X4")
+                        + " uPSB(39)=0x" + u[0x39].ToString("X4") + " uGFI(1E)=0x" + u[0x1E].ToString("X4")
+                        + " UrL(3B)=0x" + u[0x3B].ToString("X4") + " UrLHi(3C)=0x" + u[0x3C].ToString("X2")); }
+                    // COHERENT live-frame GFI at the last Mesa opcode boundary (IBDisp) -- averages out STOP-transient noise.
+                    // L(disp) = (rhL&0x1F)<<16 | R3 ; globallink = word[L-2] ; GFI = globallink>>2.  Dominant GFI over the
+                    // spin epochs = the module the CP is actually running (GFI 81=PilotControl).
+                    { int Ld=((_cp._lastDispRH3&0x1F)<<16)|_cp._lastDispR3;
+                      int gl=0; if (Ld>=2){ int pb=((Ld-2)<<1)&ramMask; gl=(sysRam[pb]<<8)|sysRam[pb+1]; }
+                      int pcd=((_cp._lastDispRH5&0xF)<<16)|_cp._lastDispR5;
+                      string an = _cp._lastDispAlpha==0x02?"aMW/Wait":_cp._lastDispAlpha==0x03?"aMR/ReEnter":_cp._lastDispAlpha==0x04?"aNC/Notify":_cp._lastDispAlpha==0x05?"aBC/Bcast":_cp._lastDispAlpha==0x10?"aDI":_cp._lastDispAlpha==0x11?"aEI":_cp._lastDispAlpha==0x74?"aWRPTC":_cp._lastDispAlpha==0x7C?"aRRPTC":_cp._lastDispAlpha==0x2B?"aBITBLT":"?";
+                      Console.WriteLine("            FRAME(disp): L=0x" + Ld.ToString("X5") + " globallink=0x" + gl.ToString("X4")
+                        + " GFI=" + (gl>>2) + "   PC=0x" + pcd.ToString("X5") + " (vp 0x" + (pcd>>8).ToString("X3") + ")  op=0x" + _cp._lastDispOp.ToString("X2")
+                        + " ALPHA=0x" + _cp._lastDispAlpha.ToString("X2") + "(" + an + ") ib=[" + _cp._lastDispIb0.ToString("X2") + "," + _cp._lastDispIb1.ToString("X2") + "] ptr=" + _cp._lastDispIbPtr); }
                     Console.WriteLine("            fdc: cmds=" + _io.Fdc.CommandCount + " reads=" + _io.Fdc.ReadCount +
                                       " lastC/H/R=" + _io.Fdc.LastReadC + "/" + _io.Fdc.LastReadH + "/" + _io.Fdc.LastReadR +
                                       " lastFdc@" + _lastFdcInstr + " wcs=" + (_io.HighPortWrites.Count > 0 && System.Linq.Enumerable.Any(_io.HighPortWrites, kv => kv.Key < 0xE000)));
@@ -663,6 +700,7 @@ namespace DoveTrace
             foreach (var line in ring) Console.WriteLine(line);
             Console.WriteLine();
             Console.WriteLine("== STOP: " + stopReason + " ==");
+            try { System.IO.File.WriteAllBytes("dove_build_kit/tools/tracerom/memdump.bin", _mem.SystemRaw); Console.WriteLine("[memdump.bin written " + _mem.SystemRaw.Length + " bytes @CPi " + _cp.InstructionCount + "]"); } catch (Exception _e) { Console.WriteLine("memdump fail " + _e.Message); }
             Console.WriteLine("Instructions executed: " + instr);
             Console.WriteLine("Hardware interrupts serviced: " + _intCount + " (last vector 0x" + _lastVector.ToString("X2") + ")");
             Console.WriteLine("Final: " + _cpu);
@@ -763,6 +801,35 @@ namespace DoveTrace
                 for (int i=0;i<256;i++) if (u[i]!=s[i]) Console.WriteLine("   U["+i.ToString("X2")+"]: "+s[i].ToString("X4")+" -> "+u[i].ToString("X4")+"  (delta "+((ushort)(u[i]-s[i]))+")");
             } else Console.WriteLine("=== U snapshot NOT captured (never reached @666 after 6.5M) ===");
             Console.WriteLine("CP timer: fires=" + _cp.TimerFireCount + " intStatReads=" + _cp.IntStatReads + " mesaIntBrFires=" + _cp.MesaIntBrFires + " (TimerPeriod=" + _cp.TimerPeriod + ")  IE=" + _cp.IE + " SetIeCount=" + _cp.SetIeCount);
+            { var u=_cp.URegs; Console.WriteLine("=== MP-940 uPTC FINAL: uPTC(U32)=0x" + u[0x32].ToString("X4")
+                + " uWDC(U18)=0x" + u[0x18].ToString("X4") + " uTicks(U2A)=0x" + u[0x2A].ToString("X4")
+                + "  | timed waiters PSB61=0x1C65 PSB62=0x1C66 -- uPTC<target=STARVED, >target=SKIPPED, ==target=SCAN-BUG ==="); }
+            // MP-940 LIVE FRAME (operator: PSB[56].context=0 means the frame is in registers, not saved).
+            // G(R4)/rhG(RH4) names the module the CP is executing NOW; L(R3)/rhL(RH3) is the live local frame;
+            // walk L-1=pc, L-2=globallink(GFTHandle), L-3=returnlink back to PilotControl (GFI 81).
+            { var al=_cp.ALU.R; var rh=_cp.RH;
+              Console.WriteLine("=== MP-940 LIVE FRAME REGS @STOP ===");
+              Console.WriteLine("   G(R4)=0x" + al[4].ToString("X4") + " rhG(RH4)=0x" + rh[4].ToString("X2")
+                + "  ->  Gframe virt=(rhG&F)<<16|G = 0x" + ((((rh[4]&0xF)<<16)|al[4])).ToString("X5")
+                + "   real=(rhG<<16|G) = 0x" + (((rh[4]<<16)|al[4])).ToString("X6"));
+              Console.WriteLine("   L(R3)=0x" + al[3].ToString("X4") + " rhL(RH3)=0x" + rh[3].ToString("X2")
+                + "  ->  Lframe virt=(rhL&F)<<16|L = 0x" + ((((rh[3]&0xF)<<16)|al[3])).ToString("X5")
+                + "   real=(rhL<<16|L) = 0x" + (((rh[3]<<16)|al[3])).ToString("X6"));
+              Console.WriteLine("   PC(R5)=0x" + al[5].ToString("X4") + " RH5=0x" + rh[5].ToString("X2")
+                + "  ->  virt 0x" + ((((rh[5]&0xF)<<16)|al[5])).ToString("X5") + " (vpage 0x" + (((((rh[5]&0xF)<<16)|al[5]))>>8).ToString("X3") + ")");
+              Console.WriteLine("   (also R0/TOS=0x" + al[0].ToString("X4") + " R1=0x" + al[1].ToString("X4") + " R2=0x" + al[2].ToString("X4") + " rhL2=0x" + rh[2].ToString("X2") + ")"); }
+            // MP-940 aMW WAIT STATE (operator decoder): UvQ2Hi/UvQ2 (U44/45) = condition VA the process waits on;
+            // test Condition.wakeup (bit 0x0001).  wakeup=1 => MWWW every pass = non-blocking Wait (stuck bit, :457 QWrite1
+            // never landed).  tail (0x1FF8) = queued PsbIndex; wakeup=1 & tail=0 => phantom wakeup (not a real Notify).
+            { var u=_cp.URegs; byte[] rr=_mem.SystemRaw; int M2=rr.Length-1;
+              int cvaR=((u[0x44]&0x1F)<<16)|u[0x45];   // real MAR-word (mask hi like L/G)
+              int cwR=((rr[(cvaR<<1)&M2]<<8)|rr[((cvaR<<1)+1)&M2]);
+              Console.WriteLine("=== MP-940 aMW WAIT STATE ===");
+              Console.WriteLine("   UvQ2Hi(U44)=0x" + u[0x44].ToString("X4") + " UvQ2(U45)=0x" + u[0x45].ToString("X4")
+                + "  conditionVA(real&1F)=0x" + cvaR.ToString("X5") + " phys=0x" + ((cvaR<<1)&M2).ToString("X6"));
+              Console.WriteLine("   conditionWORD=0x" + cwR.ToString("X4") + "  -> wakeup(0x0001)=" + (cwR&1) + "  tail(0x1FF8)>>3=" + ((cwR>>3)&0x3FF) + "  abortable(0x0002)=" + ((cwR>>1)&1));
+              Console.WriteLine("   UvQ1Hi(U42)=0x" + u[0x42].ToString("X4") + " UvQ1(U43)=0x" + u[0x43].ToString("X4") + "  (monitor lock VA)");
+              Console.WriteLine("   uWP(U10)=0x" + u[0x10].ToString("X4") + " uWW(U14)=0x" + u[0x14].ToString("X4") + " uWDC(U18)=0x" + u[0x18].ToString("X4")); }
             Console.Write("CP function hits: ");
             foreach (var kv in _cp.FuncHits) Console.Write(kv.Key + "=" + kv.Value + "  ");
             Console.WriteLine();
@@ -1642,6 +1709,26 @@ namespace DoveTrace
                                                                   : ("phys 0x" + (mar << 1).ToString("X5"));
                 Console.WriteLine("      _mar 0x" + mar.ToString("X5") + " = " + where + " : " + kv.Value + "x  lastVal=0x" + val.ToString("X4"));
             }
+            Console.WriteLine("   *** SPIN-READ histogram (robust, CPi>" + _spinFrom + "), top 24 [phys word -> count, lastVal, real page] ***");
+            foreach (var kv in _spinRd.OrderByDescending(k => k.Value).Take(24)) {
+                int wa = kv.Key; int sv; _spinRdVal.TryGetValue(wa, out sv); int ph = wa << 1;
+                // Decode via operator's PDA/PSB/VMmap layout (PSB.mesa): PDA base = phys 0xB0000 (vp0x100).
+                string tag;
+                if (ph == 0xA4000) tag = " <mesaHasLock>";
+                else if (ph == 0xA4002) tag = " <iopRequestsLock>";
+                else if (ph == 0xA7C3C) tag = " <fcb.command>";
+                else if (ph == 0xA7C32) tag = " <upNotifyBits>";
+                else if (ph >= 0x80000 && ph < 0x90000) tag = " <VMmap[vp 0x" + (((ph-0x80000)/2)).ToString("X4") + "]>";
+                else if (ph >= 0xB0000 && ph < 0xB0080) tag = " <PDA hdr +0x" + (ph-0xB0000).ToString("X2") + ">";
+                else if (ph >= 0xB0080 && ph < 0xB1000) { int pi=(ph-0xB0000)/16; int fo=((ph-0xB0000)%16)/2; string[] fn={"link","flags","context","timeout","mds","data","sticky","?7"}; tag = " <PSB[" + pi + "]." + fn[fo] + ">"; }
+                else tag = "";
+                Console.WriteLine("      word 0x" + wa.ToString("X5") + " phys 0x" + ph.ToString("X5") + " rp" + (wa >> 8) + " : " + kv.Value + "x  lastVal=0x" + sv.ToString("X4") + tag); }
+            Console.WriteLine("   SPIN-WRITE histogram (CPi>" + _spinFrom + "), top 12 (spin should write ~none):");
+            foreach (var kv in _spinWr.OrderByDescending(k => k.Value).Take(12)) {
+                int wa = kv.Key; Console.WriteLine("      word 0x" + wa.ToString("X5") + " phys 0x" + (wa<<1).ToString("X5") + " rp" + (wa>>8) + " : " + kv.Value + "x"); }
+            Console.WriteLine("   SPIN microcode-CPaddr histogram (loop body), top 16:");
+            foreach (var kv in _spinPC.OrderByDescending(k => k.Value).Take(16)) {
+                Console.WriteLine("      CPaddr 0x" + kv.Key.ToString("X3") + " : " + kv.Value + "x"); }
             { byte[] r = _mem.SystemRaw; int M = r.Length - 1;
               Console.WriteLine("   IORegion segment table @0xA4000 (handler-slot off -> FCB base) [floppy=off 0x44]:");
               for (int off = 0x00; off < 0x80; off += 2) {

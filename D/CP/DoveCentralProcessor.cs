@@ -208,6 +208,9 @@ namespace D.CP
         // When the run ends frozen in the @AB0 spin, this IS the opcode that entered the stuck primitive.
         public int _lastDispOp = -1, _lastDispR5, _lastDispRH5, _lastDispR2, _lastDispRH2;
         public int _lastDispR3, _lastDispRH3, _lastDispTOS, _lastDispSp, _lastDispAddr;
+        // MP-940 alpha capture: for a zESC (0xF8) dispatch, the ESC alpha = the byte after it in the IB,
+        // extracted the SAME way the CP executes it (_ib[ibPtr&1]) to avoid re-deriving the byte-PC lane.
+        public int _lastDispAlpha = -1, _lastDispIb0, _lastDispIb1, _lastDispIbPtr;
         public long _lastDispCPi;
         // INVOKING-OPCODE latch: the operator's reframe -- @AB0 is a bulk microcode SCAN primitive
         // (carries MesaIntBr, 49K CPi long => it is the FOREGROUND being interrupted), and zLL6/zJZB are
@@ -518,6 +521,17 @@ namespace D.CP
                                 + "  timerBit=" + (_timerInt ? 1 : 0) + " mIntBit=" + (_mInt ? 1 : 0) + " IE=" + (_ie ? 1 : 0));
                         _lastIntStatCPi = InstructionCount;
                         _timerInt = false;
+                        // MP-940 FIX (CONFIRMED + VERIFIED): the IOP->CP doorbell (_mInt) is read-to-clear on
+                        // <-IntStat, SYMMETRIC with the timer edge above.  The Daybreak interrupt microcode reads
+                        // IntStat and ORs it into rInt (5 sites), then clears rInt at IntReturns -- there is NO
+                        // port-write clearing an interrupt latch, so read-to-clear across ALL THREE bits
+                        // (13=MesaInt / 14=IOP / 15=timer) is the only model the microcode is consistent with.
+                        // Without this, the doorbell latch (set by IOP WriteCSReg b8) is NEVER cleared except by
+                        // Reset -> under Pilot (IE=1) MesaIntBr re-fires every idle pass -> IdleLoop diverts to
+                        // IdleInt -> resumes the waiting PSB instead of rescheduling -> aMW (Monitor.Wait) never
+                        // blocks -> MP-940 stall.  Verified: with this, aMW blocks, the reschedule switches
+                        // processes, and the boot advances past 940.  (env DOVE_ACK_MINT=0 restores the bug for A/B.)
+                        if (Environment.GetEnvironmentVariable("DOVE_ACK_MINT") != "0") _mInt = false;
                         _trapCode = 0;   // read-to-clear: the InitTrap code is acked by the @0 read
                         break;
                     case 0xA:   // <-ErrnIBnStkp: X[8-9]=trap, X[10-11]=~ibPtr, X[12-15]=~stackP.
@@ -1189,6 +1203,9 @@ namespace D.CP
                                 _lastDispR2 = _alu.R[2]; _lastDispRH2 = _rh[2];
                                 _lastDispR3 = _alu.R[3]; _lastDispRH3 = _rh[3];
                                 _lastDispTOS = _alu.R[0]; _lastDispSp = _stackP;
+                                // MP-940: capture the ESC alpha for a zESC dispatch (byte after 0xF8 = _ib[ibPtr&1]).
+                                _lastDispAlpha = (_ibFront == 0xF8) ? _ib[((int)_ibPtr) & 0x1] : -1;
+                                _lastDispIb0 = _ib[0]; _lastDispIb1 = _ib[1]; _lastDispIbPtr = (int)_ibPtr;
                                 _ab0Run = 0;   // a dispatch happened -> reset the @AB0-burst counter
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
