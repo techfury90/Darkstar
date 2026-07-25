@@ -61,8 +61,9 @@ OUT="dove_build_kit/tools/tracerom"          # or any scratch dir you can write
   D/IOP/i80186.cs D/IOP/I80186Bus.cs D/IOP/I80186Pcb.cs \
   D/IOP/I8259.cs D/IOP/I8254.cs D/IOP/I8251.cs D/IOP/I93C46.cs D/IOP/I8272.cs \
   D/IOP/DoveControlStore.cs D/IOP/DoveDisplayController.cs D/IOP/DoveIOPMemory.cs D/IOP/DoveIOPIO.cs \
+  D/IOP/DoveDiskController.cs \
   D/CP/DoveCentralProcessor.cs D/CP/Microinstruction.cs D/CP/AM2901.cs \
-  D/IO/FloppyDisk.cs \
+  D/IO/FloppyDisk.cs D/IO/Micropolis1325.cs \
   "$OUT/TraceRom.cs"
 ```
 

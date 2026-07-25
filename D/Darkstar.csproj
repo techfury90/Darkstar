@@ -165,6 +165,7 @@
     <Compile Include="IOP\Printer.cs" />
     <Compile Include="IO\FloppyDisk.cs" />
     <Compile Include="IO\FloppyDrive.cs" />
+    <Compile Include="IO\Micropolis1325.cs" />
     <Compile Include="IOP\i8085.cs" />
     <Compile Include="IOP\I8085IOBus.cs" />
     <Compile Include="IOP\I8085MemoryBus.cs" />
@@ -184,6 +185,7 @@
     <Compile Include="IOP\I8272.cs" />
     <Compile Include="IOP\DoveIOPMemory.cs" />
     <Compile Include="IOP\DoveIOPIO.cs" />
+    <Compile Include="IOP\DoveDiskController.cs" />
     <Compile Include="IOP\DoveDisplayController.cs" />
     <Compile Include="IOP\DoveControlStore.cs" />
     <Compile Include="CP\DoveCentralProcessor.cs" />

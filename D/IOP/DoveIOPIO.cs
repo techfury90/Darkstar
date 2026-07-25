@@ -28,6 +28,7 @@
 
 using System;
 using System.Collections.Generic;
+using D.IO;
 
 namespace D.IOP
 {
@@ -59,6 +60,12 @@ namespace D.IOP
             DoveIOPMemory dmem = memory as DoveIOPMemory;
             if (dmem != null) _display.DisplayReader = dmem.ReadDisplayWord;
             _configEeprom = new I93C46();
+
+            // Rigid disk: behavioral 8X305 controller + AM2942 DMA over a Micropolis-1325 pack
+            // (the drive this machine's EEPROM declares).  The backing image is attached by the
+            // harness/UI via the Disk accessor; unattached = a blank pack (all sectors unformatted).
+            _disk = new Micropolis1325();
+            _rdc = new DoveDiskController(_memory, _disk);
 
             // Floppy Read Data → 80186 DMA channel 0 → main memory.  DMA0 destination
             // is FFC4 (low 16) + FFC6 (upper 4 bits); FFC8 = transfer count.
@@ -312,53 +319,29 @@ namespace D.IOP
 
         private byte RdcRead(ushort port)
         {
-            byte v;
-            switch (port)
-            {
-                case 0x0214:                    // 8x305 status: read clears the RDiskCtlrIntr (like the FDC)
-                    v = _rdcStatus; _rdcCtlrInt = false; break;
-                case 0x0210: v = 0x00; break;   // AM2942 DMA status (RunSM/error) -- idle
-                case 0x0204: v = (byte)_rdcDmaCount; break;
-                case 0x0206: v = (byte)(_rdcDmaAddr >> 1); break;
-                default:     v = 0x00; break;
-            }
-            if (RdcLog != null && RdcLog.Count < 800)
-                RdcLog.Add("R  0x" + port.ToString("X4") + " -> 0x" + v.ToString("X2") + " @IOP" + RdcHostClock);
-            return v;
+            _rdc.Log = RdcLog; _rdc.HostClock = RdcHostClock;
+            return _rdc.ReadReg(port);
         }
 
         private void RdcWrite(ushort port, ushort value)
         {
-            if (RdcLog != null && RdcLog.Count < 800)
-                RdcLog.Add("W  0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4") + " @IOP" + RdcHostClock
-                    + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : ""));
-            switch (port)
-            {
-                case 0x0214:                    // 8x305 command: s d x x x x c c
-                    _rdcCommand = (byte)value;
-                    int cc = value & 0x3;        // 00 idle / 01 Fetch DOB / 10 Execute / 11 Store DOB
-                    _rdcStatus = (byte)cc;       // rr := cc, done=0 (received, running)
-                    if (cc != 0) { _rdcStatus |= 0x40; _rdcCtlrInt = true; }   // done + RDiskCtlrIntr (no DMA/DOB yet)
-                    break;
-                case 0x0208: _rdcDmaAddr = (value & 0x7FFF) << 9; break;       // load addr[23:9] (auto-reinit)
-                case 0x020A: _rdcDmaAddr = (_rdcDmaAddr & ~0x1FE) | ((value & 0xFF) << 1); break;  // addr[8:1]
-                case 0x020C: _rdcDmaCount = value; break;                       // word count (2's-comp <<1)
-                case 0x0210: _rdcDmaCmd = value; break;                         // DMA command (bit0=direction)
-                case 0x0216: _rdcDmaInt = true; break;                          // StartDMA -> (stub) RDiskDmaIntr'
-                default: break;
-            }
+            _rdc.Log = RdcLog; _rdc.HostClock = RdcHostClock;
+            _rdc.WriteReg(port, value);
         }
 
         /// <summary>Edge-raise the two RDC interrupts onto the slave 8259: RDiskCtlrIntr=IR3, RDiskDmaIntr'=IR2
-        /// (both cascade to master IR5, alongside FDC=IR4).  Slave bit numbers are INFERRED (spec open Q1).</summary>
+        /// (both cascade to master IR5, alongside FDC=IR4).  RDiskCtlrIntr is read-cleared on 0x0214,
+        /// RDiskDmaIntr' on 0x0210 -- so each StartDMA/command re-arms a fresh edge (the old stub latched
+        /// _rdcDmaInt forever, so IR2 fired exactly once).  Slave bit numbers are INFERRED (spec open Q1).</summary>
         private void SyncRdcIrq()
         {
-            if (_rdcCtlrInt && !_prevRdcCtlrInt) _picSlave.RaiseIrq(3);
-            if (!_rdcCtlrInt) _picSlave.LowerIrq(3);
-            _prevRdcCtlrInt = _rdcCtlrInt;
-            if (_rdcDmaInt && !_prevRdcDmaInt) _picSlave.RaiseIrq(2);
-            if (!_rdcDmaInt) _picSlave.LowerIrq(2);
-            _prevRdcDmaInt = _rdcDmaInt;
+            bool ctlr = _rdc.CtlrInt, dma = _rdc.DmaInt;
+            if (ctlr && !_prevRdcCtlrInt) _picSlave.RaiseIrq(3);
+            if (!ctlr) _picSlave.LowerIrq(3);
+            _prevRdcCtlrInt = ctlr;
+            if (dma && !_prevRdcDmaInt) _picSlave.RaiseIrq(2);
+            if (!dma) _picSlave.LowerIrq(2);
+            _prevRdcDmaInt = dma;
         }
 
         /// <summary>Master IR3 tracks the keyboard UART's RxRDY (KbrdInputReq).</summary>
@@ -780,16 +763,20 @@ namespace D.IOP
         private I80186Pcb _pcb;
 
         // ---- Rigid Disk Controller (RDC): 8x305 command/status @ 0x0214 + AM2942 DMA/FIFO @ 0x0200-0x0216 ----
-        // Bring-up: minimal FSM to (a) observe whether the IOP firmware drives the RDC, and (b) complete a
-        // command so RDiskCtlrIntr (slave IR3) / RDiskDmaIntr' (slave IR2) cascade to master IR5 -> IOP ISR.
-        // (No AM2942 DMA or DOB execution yet -- this increment only confirms the firmware reaches 0x0214.)
+        // Behavioral 8X305 + AM2942 in DoveDiskController over a Micropolis-1325 backing store.  The DOB
+        // round-trips through physical DRAM, ops execute against the pack, and the two completion interrupts
+        // (RDiskCtlrIntr = slave IR3, RDiskDmaIntr' = slave IR2) cascade to master IR5 -> IOP ISR.
+        private readonly DoveDiskController _rdc;
+        private readonly Micropolis1325 _disk;
         private bool _allowRDC;                       // set by the 0xF4 arbiter AllowRDC command
-        private byte _rdcCommand, _rdcStatus;         // 0x0214: write=command (s d xxxx cc), read=status (e d ss xx rr)
-        private int _rdcDmaAddr, _rdcDmaCount; private ushort _rdcDmaCmd;   // AM2942 regs
-        private bool _rdcCtlrInt, _rdcDmaInt, _prevRdcCtlrInt, _prevRdcDmaInt;   // -> slave IR3 / IR2
+        private bool _prevRdcCtlrInt, _prevRdcDmaInt; // edge state for the slave-8259 raise
         public System.Collections.Generic.List<string> RdcLog;   // diagnostic: every RDC/arbiter access
         public long RdcHostClock;                     // set by the harness for RdcLog timestamps
         public long ArbAllowRdcCount;                 // 0xF4 AllowRDC issue count (the 7.7M-poll)
+        /// <summary>The rigid-disk backing store; attach an image via Disk.Load(path) before boot.</summary>
+        public Micropolis1325 Disk { get { return _disk; } }
+        /// <summary>The behavioral rigid-disk controller (register interface + op execution).</summary>
+        public DoveDiskController Rdc { get { return _rdc; } }
 
         // Display vertical-retrace generator (slave IR0).
         private int _retracePeriod = 210400;   // ~26.3 ms field at 8 MHz
