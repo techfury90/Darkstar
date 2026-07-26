@@ -48,11 +48,17 @@
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Drawing" />
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="SDL2-CS, Version=0.0.0.0, Culture=neutral, processorArchitecture=MSIL">
+      <HintPath>..\packages\SDL2-CS.dll.2.0.0.0\lib\net20\SDL2-CS.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <!-- Doovke entry point -->
     <Compile Include="Doovke\DoovkeMachine.cs" />
     <Compile Include="Doovke\Program.cs" />
+    <Compile Include="Doovke\DoovkeWindow.cs" />
+    <Compile Include="Doovke\DoovkeKeyboard.cs" />
     <!-- CP: the Mesa microengine (shared 2901 + microword decode, Dove-specific engine) -->
     <Compile Include="CP\AM2901.cs" />
     <Compile Include="CP\Microinstruction.cs" />

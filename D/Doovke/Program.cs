@@ -13,6 +13,7 @@ namespace D.Doovke
     /// </summary>
     internal static class Program
     {
+        [System.STAThread]
         private static int Main(string[] args)
         {
             string bootRom = null, eeprom = null, floppy = null, fbOut = "doovke_fb.bin";
@@ -20,6 +21,7 @@ namespace D.Doovke
             long pokeAt = 0; byte pokeCode = 0; long keyDelay = 2000000;
             string ipTrace = null; long ipEvery = 1000;
             long ejectAt = -1, changeAt = -1; string changeTo = null;
+            bool headless = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -41,6 +43,7 @@ namespace D.Doovke
                     case "--eject-at":  ejectAt = long.Parse(next); i++; break;
                     case "--change-at": changeAt = long.Parse(next); i++; break;
                     case "--change-to": changeTo = next; i++; break;
+                    case "--headless":  headless = true; break;
                     case "-h":
                     case "--help":   Usage(); return 0;
                     default:
@@ -58,6 +61,17 @@ namespace D.Doovke
             }
 
             var machine = new DoovkeMachine(bootRom, eeprom);
+
+            // Interactive by default; --headless keeps the batch/regression path.
+            if (!headless)
+            {
+                if (!string.IsNullOrEmpty(floppy)) machine.LoadFloppy(0, floppy);
+                System.Windows.Forms.Application.EnableVisualStyles();
+                System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
+                System.Windows.Forms.Application.Run(new DoovkeWindow(machine, floppy));
+                return 0;
+            }
+
             Console.WriteLine("Doovke -- Dove/Daybreak (Xerox 6085)");
             Console.WriteLine("  boot ROM : " + bootRom);
             Console.WriteLine("  EEPROM   : " + (eeprom ?? "(none)"));
@@ -164,6 +178,7 @@ namespace D.Doovke
             Console.WriteLine("  --key-at <n>      inject a keystroke at IOP instruction n");
             Console.WriteLine("  --key <hex>       scan code in HEX (boot device = 0x63 + icon index)");
             Console.WriteLine("  --key-delay <n>   gap before the second press (default 2000000)");
+            Console.WriteLine("  --headless        run without the window (batch/regression)");
             Console.WriteLine("  --fb <file>       framebuffer output (default doovke_fb.bin)");
             Console.WriteLine("  --eject-at <n>    eject drive 0 at IOP instruction n");
             Console.WriteLine("  --change-at <n>   start a disk change at n (with --change-to)");
