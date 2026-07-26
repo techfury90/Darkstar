@@ -16,7 +16,7 @@ namespace D.Doovke
     /// </summary>
     public sealed class DoovkeWindow : Form
     {
-        private readonly DoovkeMachine _machine;
+        private DoovkeMachine _machine;
         private readonly object _machineLock = new object();
 
         // ---- display ----
@@ -112,6 +112,18 @@ namespace D.Doovke
             }
             mach.DropDownItems.Add(boot);
             mach.DropDownItems.Add("Send Scan &Code...", null, (s, e) => OnSendScanCode());
+            mach.DropDownItems.Add(new ToolStripSeparator());
+            mach.DropDownItems.Add("&Reset (Power Cycle)", null, (s, e) => PowerCycle(null));
+            // Boot-device keys are only accepted during the selection screen early in the boot,
+            // so choosing a device after the fact means power-cycling first.  These do both.
+            var bootFrom = new ToolStripMenuItem("Power Cycle && &Boot From");
+            for (int i = 0; i < 10; i++)
+            {
+                byte code = (byte)(0x63 + i);
+                bootFrom.DropDownItems.Add("F" + (i + 1) + "  (0x" + code.ToString("X2") + ")", null,
+                                           (s, e) => PowerCycle(code));
+            }
+            mach.DropDownItems.Add(bootFrom);
             menu.Items.Add(mach);
 
             MainMenuStrip = menu;
@@ -251,6 +263,30 @@ namespace D.Doovke
                     for (int i = 0; i < BatchSteps && _machineRunning && !_paused; i++) _machine.Step();
                 }
             }
+        }
+
+        /// <summary>
+        /// Power-cycle: tear the machine down and build a fresh one from the same ROM/EEPROM,
+        /// remounting whatever image is in the drive.  Rebuilding rather than poking a reset line
+        /// is what makes it a true cold start -- memory, devices and the control store all clear.
+        /// If a boot-device key is given, it is queued for the selection screen (twice, as the
+        /// firmware requires).
+        /// </summary>
+        private void PowerCycle(byte? bootKey)
+        {
+            _machineRunning = false;
+            var t = _machineThread;
+            if (t != null) t.Join(2000);
+
+            lock (_machineLock)
+            {
+                var fresh = new DoovkeMachine(_machine.BootRomPath, _machine.ConfigEepromPath);
+                if (!string.IsNullOrEmpty(_floppyPath)) fresh.LoadFloppy(0, _floppyPath);
+                if (bootKey.HasValue) fresh.ScheduleBootDeviceKey(bootKey.Value);
+                _machine = fresh;
+            }
+
+            StartMachine();
         }
 
         private void Shutdown()

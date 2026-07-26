@@ -66,6 +66,9 @@ namespace D.Doovke
             if (!headless)
             {
                 if (!string.IsNullOrEmpty(floppy)) machine.LoadFloppy(0, floppy);
+                // With a key given, queue the boot-device selection so the GUI boots straight
+                // from it instead of falling through to the firmware's default (the rigid disk).
+                if (pokeCode != 0) machine.ScheduleBootDeviceKey(pokeCode);
                 System.Windows.Forms.Application.EnableVisualStyles();
                 System.Windows.Forms.Application.SetCompatibleTextRenderingDefault(false);
                 System.Windows.Forms.Application.Run(new DoovkeWindow(machine, floppy));

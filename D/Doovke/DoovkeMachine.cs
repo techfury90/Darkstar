@@ -54,6 +54,13 @@ namespace D.Doovke
         /// </summary>
         public const double DiskChangeGapSeconds = 3.0;
 
+        // Keystrokes queued for a future instruction count.  The boot-device selection needs two
+        // presses a couple of million instructions apart, which is awkward to do by hand right
+        // after a power cycle, so callers can just queue them.
+        private readonly System.Collections.Generic.List<KeyPress> _scheduledKeys =
+            new System.Collections.Generic.List<KeyPress>();
+        private struct KeyPress { public long At; public byte Code; }
+
         private long _insertAtClock = -1;
         private string _pendingImage;
         private int _pendingDrive;
@@ -62,9 +69,15 @@ namespace D.Doovke
         public bool DiskChangeInProgress { get { return _insertAtClock >= 0; } }
         public bool Halted { get { return _iop.Halted; } }
 
+        /// <summary>Paths this machine was built from, so a power cycle can rebuild it.</summary>
+        public string BootRomPath { get; private set; }
+        public string ConfigEepromPath { get; private set; }
+
         public DoovkeMachine(string bootRomPath, string configEepromPath)
         {
             if (string.IsNullOrEmpty(bootRomPath)) throw new ArgumentNullException("bootRomPath");
+            BootRomPath = bootRomPath;
+            ConfigEepromPath = configEepromPath;
 
             _mem = new DoveIOPMemory(bootRomPath);
             _io = new DoveIOPIO(_mem);
@@ -154,6 +167,16 @@ namespace D.Doovke
             _io.Tick(clocks);
             ElapsedClocks += clocks;
 
+            // Fire any keystrokes that have come due.
+            for (int i = _scheduledKeys.Count - 1; i >= 0; i--)
+            {
+                if (IopInstructions >= _scheduledKeys[i].At)
+                {
+                    InjectKey(_scheduledKeys[i].Code);
+                    _scheduledKeys.RemoveAt(i);
+                }
+            }
+
             // Complete a pending disk change once the drive has been empty long enough.
             if (_insertAtClock >= 0 && ElapsedClocks >= _insertAtClock)
             {
@@ -179,6 +202,23 @@ namespace D.Doovke
         public void InjectKey(byte scanCode)
         {
             _io.InjectKeyboard(scanCode);
+        }
+
+        /// <summary>Deliver a key once the machine reaches the given instruction count.</summary>
+        public void ScheduleKey(byte scanCode, long atInstruction)
+        {
+            _scheduledKeys.Add(new KeyPress { At = atInstruction, Code = scanCode });
+        }
+
+        /// <summary>
+        /// Queue the boot-device selection for a machine that has just been powered on.
+        /// The firmware needs the key TWICE: the SelectionLoop consumes the first press to
+        /// highlight the icon and the second to boot.  Defaults match the proven boot.
+        /// </summary>
+        public void ScheduleBootDeviceKey(byte scanCode)
+        {
+            ScheduleKey(scanCode, 12000000);
+            ScheduleKey(scanCode, 14000000);
         }
 
         /// <summary>Mount an image immediately (use at power-on; for a swap use ChangeFloppy).</summary>
