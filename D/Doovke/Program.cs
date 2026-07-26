@@ -96,6 +96,10 @@ namespace D.Doovke
             System.IO.StreamWriter ipw = null;
             if (!string.IsNullOrEmpty(ipTrace)) ipw = new System.IO.StreamWriter(ipTrace);
 
+            // Watch the DDC control register (EC80).  The mix nibble (bits 4-7) is a
+            // function of (bitmap, cursor); several of its codes invert, so a change here
+            // between the boot screen and a later screen explains a whole-raster flip.
+            int lastCtl = -1;
             bool pressed1 = pokeAt <= 0;
             bool pressed2 = pokeAt <= 0 || keyDelay <= 0;
             while (machine.IopInstructions < budget)
@@ -114,6 +118,18 @@ namespace D.Doovke
                 if (ipw != null && (machine.IopInstructions % ipEvery) == 0)
                     ipw.WriteLine(machine.IopInstructions + " " + machine.Iop.InstructionAddress.ToString("X5"));
                 machine.Step();
+                if ((machine.IopInstructions & 0xFF) == 0)
+                {
+                    int ctl = machine.Display.ControlRegister;
+                    if (ctl != lastCtl)
+                    {
+                        lastCtl = ctl;
+                        Console.WriteLine(String.Format(
+                            "  DDC control EC80 = {0:X2}  (mix={1:X1} video={2} nonIlace={3} force={4}) @IOP {5} CP {6}",
+                            ctl, (ctl >> 4) & 0xF, (ctl & 2) != 0, (ctl & 1) != 0, (ctl & 8) != 0,
+                            machine.IopInstructions, machine.Cp.InstructionCount));
+                    }
+                }
                 if (!pressed1 && machine.IopInstructions >= pokeAt)
                 {
                     machine.InjectKey(pokeCode);

@@ -129,6 +129,9 @@ namespace D.IOP
 
         // ---- Decoded state ----
 
+        /// <summary>Raw display control register (EC80), so callers can watch it change.</summary>
+        public byte ControlRegister { get { return _reg[RegControl - WindowBase]; } }
+
         public bool VideoEnabled { get { return (_reg[RegControl - WindowBase] & 0x02) != 0; } }
         public bool NonInterlace { get { return (_reg[RegControl - WindowBase] & 0x01) != 0; } }
         public bool ForcePicture { get { return (_reg[RegControl - WindowBase] & 0x08) != 0; } }
@@ -227,6 +230,7 @@ namespace D.IOP
             }
 
             CompositeCursor(width, height);
+            ApplyMixOutsideCursor(width, height);
         }
 
         /// <summary>The 32-byte hardware cursor sprite buffer (ED00-ED1F), 16x16 1bpp.</summary>
@@ -268,27 +272,52 @@ namespace D.IOP
             }
         }
 
-        // 4-bit cursor/data mixing functions (App A Fig 4.0), V = bitmap, C = cursor.
+        /// <summary>
+        /// The 4-bit mix function (App A Fig 4.0), V = bitmap video, C = cursor video.
+        /// The code IS the truth table: bit (V*2 + C) of the nibble is the result, which
+        /// makes it the usual raster-op encoding and gives all 16 boolean functions of
+        /// two variables exactly once.  (The previous hand-written switch had four
+        /// duplicate entries -- 1/4, 2/8, 6/9, 7/D -- and so was missing NOR, V'C,
+        /// NAND and XNOR.  Mix 1 = NOR is the one the diagnostics uses.)
+        /// </summary>
         private static int MixPixel(int f, int v, int c)
         {
-            switch (f & 0x0F)
+            return (f >> ((v << 1) | c)) & 1;
+        }
+
+        /// <summary>
+        /// The mix is a function of the whole raster, not just the 16x16 sprite: outside
+        /// the cursor the cursor video C is simply 0, so a mix like 1 (NOR) or 3 (V')
+        /// inverts the entire picture and F forces it white.  Applying it only where the
+        /// sprite happened to be left inverting modes looking like no-ops -- which is why
+        /// the boot screen (mix E/C/4, all identity in V when C=0) rendered correctly
+        /// while the diagnostics menu (mix 1) came out inverted.
+        ///
+        /// The sprite region is already mixed with its real C bits by CompositeCursor, so
+        /// it is skipped here.
+        /// </summary>
+        private void ApplyMixOutsideCursor(int width, int height)
+        {
+            int mix = MixFunction;
+            byte m0 = (byte)MixPixel(mix, 0, 0);
+            byte m1 = (byte)MixPixel(mix, 1, 0);
+            if (m0 == 0 && m1 == 1) return;   // identity in V -- nothing to do
+
+            int cy0 = -1, cy1 = -1, cx0 = 0, cx1 = 0;
+            if (!CursorDisabled)
             {
-                case 0x0: return 0;
-                case 0x1: return v & (c ^ 1);
-                case 0x2: return v & c;
-                case 0x3: return v ^ 1;
-                case 0x4: return v & (c ^ 1);
-                case 0x5: return c ^ 1;
-                case 0x6: return v ^ c;
-                case 0x7: return v | (c ^ 1);
-                case 0x8: return v & c;
-                case 0x9: return v ^ c;
-                case 0xA: return c;
-                case 0xB: return (v ^ 1) | c;
-                case 0xC: return v;
-                case 0xD: return v | (c ^ 1);
-                case 0xE: return v | c;
-                default: return 1;
+                cx0 = CursorWord * 16 + CursorBitOffset; cx1 = cx0 + 16;
+                cy0 = CursorLine; cy1 = cy0 + 16;
+            }
+
+            for (int y = 0; y < height; y++)
+            {
+                int row = y * width;
+                bool band = y >= cy0 && y < cy1;
+                int lo = band ? Math.Max(0, Math.Min(width, cx0)) : width;
+                int hi = band ? Math.Max(0, Math.Min(width, cx1)) : width;
+                for (int x = 0; x < lo; x++) { int i = row + x; _frame[i] = _frame[i] != 0 ? m1 : m0; }
+                for (int x = hi; x < width; x++) { int i = row + x; _frame[i] = _frame[i] != 0 ? m1 : m0; }
             }
         }
 
