@@ -80,7 +80,7 @@ namespace D.Doovke
             _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); };
 
             Load += OnWindowLoad;
-            FormClosing += (s, e) => Shutdown();
+            FormClosing += (s, e) => { SaveRigidDisk(); Shutdown(); };
         }
 
         /// <summary>
@@ -106,6 +106,22 @@ namespace D.Doovke
             }
         }
 
+        /// <summary>
+        /// Flush the rigid pack.  Long operations (a format is many passes over the whole
+        /// surface) represent a lot of wall-clock time, so this runs on exit as well as on
+        /// demand -- and quietly does nothing if no pack file was attached.
+        /// </summary>
+        private void SaveRigidDisk()
+        {
+            if (string.IsNullOrEmpty(_machine.RigidDiskPath)) return;
+            try { lock (_machineLock) _machine.SaveRigidDisk(); }
+            catch (Exception ex)
+            {
+                MessageBox.Show(this, "Could not save the rigid disk: " + ex.Message,
+                                "Rigid disk", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+        }
+
         private MenuStrip BuildMenu()
         {
             var menu = new MenuStrip();
@@ -114,6 +130,8 @@ namespace D.Doovke
             file.DropDownItems.Add("&Load Floppy...", null, (s, e) => OnLoadFloppy());
             file.DropDownItems.Add("&Change Floppy...", null, (s, e) => OnChangeFloppy());
             file.DropDownItems.Add("&Eject Floppy", null, (s, e) => { lock (_machineLock) _machine.EjectFloppy(0); });
+            file.DropDownItems.Add(new ToolStripSeparator());
+            file.DropDownItems.Add("&Save Rigid Disk Now", null, (s, e) => SaveRigidDisk());
             file.DropDownItems.Add(new ToolStripSeparator());
             file.DropDownItems.Add("E&xit", null, (s, e) => Close());
             menu.Items.Add(file);

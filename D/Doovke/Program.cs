@@ -16,7 +16,7 @@ namespace D.Doovke
         [System.STAThread]
         private static int Main(string[] args)
         {
-            string bootRom = null, eeprom = null, floppy = null, fbOut = "doovke_fb.bin";
+            string bootRom = null, eeprom = null, floppy = null, rigid = null, fbOut = "doovke_fb.bin";
             long budget = 150000000;
             long pokeAt = 0; byte pokeCode = 0; long keyDelay = 2000000;
             string ipTrace = null; long ipEvery = 1000;
@@ -33,6 +33,7 @@ namespace D.Doovke
                     case "--rom":    bootRom = next; i++; break;
                     case "--eeprom": eeprom = next; i++; break;
                     case "--floppy": floppy = next; i++; break;
+                    case "--rigid":  rigid = next; i++; break;
                     case "--fb":     fbOut = next; i++; break;
                     case "--budget": budget = long.Parse(next); i++; break;
                     case "--key-at": pokeAt = long.Parse(next); i++; break;
@@ -74,6 +75,8 @@ namespace D.Doovke
             var machine = new DoovkeMachine(bootRom, eeprom);
 
             // Interactive by default; --headless keeps the batch/regression path.
+            if (!string.IsNullOrEmpty(rigid)) machine.LoadRigidDisk(rigid);
+
             if (!headless)
             {
                 if (!string.IsNullOrEmpty(floppy)) machine.LoadFloppy(0, floppy);
@@ -233,6 +236,12 @@ namespace D.Doovke
             Console.WriteLine("Config EEPROM reads: " + (eeLog == null ? 0 : eeLog.Count));
             Console.WriteLine("Control store lane writes: " + machine.Io.ControlStore.LaneWrites);
 
+            if (!string.IsNullOrEmpty(rigid))
+            {
+                machine.SaveRigidDisk();
+                Console.WriteLine("Rigid disk saved -> " + rigid);
+            }
+
             int w, h;
             byte[] frame = machine.RenderFrame(out w, out h);
             if (frame != null && w > 0)
@@ -263,6 +272,7 @@ namespace D.Doovke
             Console.WriteLine("usage: Doovke --rom <bootrom.bin> [options]");
             Console.WriteLine("  --eeprom <file>   config EEPROM image (93C46)");
             Console.WriteLine("  --floppy <file>   mount an image in drive 0");
+            Console.WriteLine("  --rigid <file>    rigid-disk pack file (WITHOUT THIS THE PACK IS NOT SAVED)");
             Console.WriteLine("  --budget <n>      IOP instructions to run (default 150000000)");
             Console.WriteLine("  --key-at <n>      inject a keystroke at IOP instruction n");
             Console.WriteLine("  --key <hex>       scan code in HEX (boot device = 0x63 + icon index)");

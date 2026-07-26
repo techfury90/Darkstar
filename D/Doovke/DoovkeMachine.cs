@@ -320,6 +320,26 @@ namespace D.Doovke
             ScheduleKey(scanCode, 14000000, true);
         }
 
+        /// <summary>
+        /// Attach the rigid-disk pack to a file.  WITHOUT this the pack exists only in memory
+        /// and everything written to it -- including a multi-pass format that takes an hour --
+        /// is discarded when the process exits.  Missing file = a blank (unformatted) pack,
+        /// which is the correct starting state for Offline Diagnostics' Format.
+        /// </summary>
+        public void LoadRigidDisk(string path)
+        {
+            RigidDiskPath = path;
+            _io.Disk.Load(path);
+        }
+
+        /// <summary>Flush the pack to its file; no-op if none was attached.</summary>
+        public void SaveRigidDisk()
+        {
+            if (!string.IsNullOrEmpty(RigidDiskPath)) _io.Disk.Save();
+        }
+
+        public string RigidDiskPath { get; private set; }
+
         /// <summary>Mount an image immediately (use at power-on; for a swap use ChangeFloppy).</summary>
         public void LoadFloppy(int drive, string path)
         {

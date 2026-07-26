@@ -125,6 +125,22 @@ namespace D.IO
                     }
                 }
             }
+
+            // Formatted-sector bitmap.  A freshly formatted sector is all zeros with an
+            // all-zero label, which is indistinguishable on disk from never-written -- so
+            // without this sidecar a format does NOT survive save/load and hours of work
+            // reload as a blank pack.  Absent file = fall back to the non-zero heuristic,
+            // which keeps older images working.
+            string fp = dataPath + ".formatted";
+            if (File.Exists(fp))
+            {
+                var bits = File.ReadAllBytes(fp);
+                for (int p = 0; p < TotalSectors && (p >> 3) < bits.Length; p++)
+                {
+                    if ((bits[p >> 3] & (1 << (p & 7))) == 0) continue;
+                    if (_data[p] == null) _data[p] = new byte[SectorBytes];
+                }
+            }
             if (_labelPath != null && File.Exists(_labelPath))
             {
                 var raw = File.ReadAllBytes(_labelPath);
@@ -156,6 +172,13 @@ namespace D.IO
             }
             if (File.Exists(dataPath)) File.Delete(dataPath);
             File.Move(tmp, dataPath);
+
+            // Which sectors are formatted -- see Load: an all-zero formatted sector is
+            // otherwise indistinguishable from an untouched one.
+            var fmtBits = new byte[(TotalSectors + 7) / 8];
+            for (int p = 0; p < TotalSectors; p++)
+                if (_data[p] != null) fmtBits[p >> 3] |= (byte)(1 << (p & 7));
+            File.WriteAllBytes(dataPath + ".formatted", fmtBits);
 
             string lp = dataPath + ".labels", ltmp = lp + ".tmp";
             using (var fs = new FileStream(ltmp, FileMode.Create, FileAccess.Write))
