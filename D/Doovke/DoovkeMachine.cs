@@ -61,6 +61,21 @@ namespace D.Doovke
             new System.Collections.Generic.List<KeyPress>();
         private struct KeyPress { public long At; public byte Code; }
 
+        // Keyboard and mouse share one 8251, which holds exactly one unread byte, so all
+        // input funnels through this FIFO and is handed over only when the Rx is free.
+        // Order matters: a mouse report is the three bytes FF,dX,dY and nothing may be
+        // interleaved into it or KEYMO would read a key event as a delta.
+        private readonly System.Collections.Generic.Queue<byte> _input =
+            new System.Collections.Generic.Queue<byte>();
+
+        // The guest's mouse position is absolute, but the IOP only ever *accumulates* the
+        // deltas we send into it, so we send relative motion and let the guest own the
+        // position.  (Steering an absolute shadow toward the host pointer would desync the
+        // moment the guest clamped at a screen edge: our shadow would keep travelling while
+        // the guest sat still, and the pointer would then ignore that much motion coming
+        // back.)  Motion accumulates here and is drained in >=1-pixel reports.
+        private int _mousePendingX, _mousePendingY;
+
         private long _insertAtClock = -1;
         private string _pendingImage;
         private int _pendingDrive;
@@ -172,10 +187,17 @@ namespace D.Doovke
             {
                 if (IopInstructions >= _scheduledKeys[i].At)
                 {
-                    InjectKey(_scheduledKeys[i].Code);
+                    // Press only, NO release: measured 2026-07-26, sending station|0x80
+                    // after the press stops the machine booting (FDC 0 / CP 0) where
+                    // press-only boots cleanly.  The boot ROM's SelectionLoop runs before
+                    // Pilot and stashes the raw byte at HexValue, so it does not appear to
+                    // use the down/up bitmap convention that KEYMO maintains later.
+                    QueueKey(_scheduledKeys[i].Code, true);
                     _scheduledKeys.RemoveAt(i);
                 }
             }
+
+            PumpInput();
 
             // Complete a pending disk change once the drive has been empty long enough.
             if (_insertAtClock >= 0 && ElapsedClocks >= _insertAtClock)
@@ -202,6 +224,70 @@ namespace D.Doovke
         public void InjectKey(byte scanCode)
         {
             _io.InjectKeyboard(scanCode);
+        }
+
+        /// <summary>
+        /// Queue a key press or release.  The wire byte is the KeyStation number, with bit 7
+        /// set for a release; the IOP's KEYMO handler maintains Pilot's down/up bitmap from
+        /// that (down = 0, up = 1, so a press clears the bit).
+        /// </summary>
+        public void QueueKey(byte station, bool down)
+        {
+            byte b = down ? station : (byte)(station | DoovkeKeyboard.ReleaseFlag);
+            lock (_input) _input.Enqueue(b);
+        }
+
+        /// <summary>Queue a raw wire byte, exactly as the keyboard would have sent it.</summary>
+        public void QueueRaw(byte b)
+        {
+            lock (_input) _input.Enqueue(b);
+        }
+
+        /// <summary>
+        /// Accumulate host mouse motion, in display pixels.  Motion is coalesced and split
+        /// into reports as the UART drains, so callers can feed this as fast as they like.
+        /// </summary>
+        public void QueueMouseMotion(int dx, int dy)
+        {
+            lock (_input) { _mousePendingX += dx; _mousePendingY += dy; }
+        }
+
+        /// <summary>Press or release a mouse button (stations 13/14/15).</summary>
+        public void QueueMouseButton(byte station, bool down)
+        {
+            QueueKey(station, down);
+        }
+
+        /// <summary>
+        /// Drain one byte of input if the UART can take it.  Mouse motion is only turned into
+        /// a report when the queue is otherwise empty, which coalesces a burst of host motion
+        /// into a single delta instead of flooding the 8251.
+        /// </summary>
+        private void PumpInput()
+        {
+            if (_io.KeyboardRxReady) return;
+
+            lock (_input)
+            {
+                if (_input.Count == 0 && (_mousePendingX != 0 || _mousePendingY != 0))
+                {
+                    int dx = Clamp127(_mousePendingX);
+                    int dy = Clamp127(_mousePendingY);
+                    _mousePendingX -= dx; _mousePendingY -= dy;
+                    _input.Enqueue(0xFF);            // mouse-report prefix
+                    _input.Enqueue(SignMagnitude(dx));
+                    _input.Enqueue(SignMagnitude(dy));
+                }
+                if (_input.Count > 0) _io.InjectKeyboard(_input.Dequeue());
+            }
+        }
+
+        private static int Clamp127(int d) { return d > 127 ? 127 : (d < -127 ? -127 : d); }
+
+        /// <summary>Deltas are sign-magnitude: bit 7 is the sign, bits 0-6 the magnitude.</summary>
+        private static byte SignMagnitude(int d)
+        {
+            return d < 0 ? (byte)(0x80 | (-d)) : (byte)d;
         }
 
         /// <summary>Deliver a key once the machine reaches the given instruction count.</summary>

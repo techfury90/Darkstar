@@ -21,7 +21,7 @@ namespace D.Doovke
             long pokeAt = 0; byte pokeCode = 0; long keyDelay = 2000000;
             string ipTrace = null; long ipEvery = 1000;
             long ejectAt = -1, changeAt = -1; string changeTo = null;
-            bool headless = false;
+            bool headless = false; bool keyRelease = false;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -44,6 +44,7 @@ namespace D.Doovke
                     case "--change-at": changeAt = long.Parse(next); i++; break;
                     case "--change-to": changeTo = next; i++; break;
                     case "--headless":  headless = true; break;
+                    case "--key-release": keyRelease = true; break;
                     case "-h":
                     case "--help":   Usage(); return 0;
                     default:
@@ -132,14 +133,14 @@ namespace D.Doovke
                 }
                 if (!pressed1 && machine.IopInstructions >= pokeAt)
                 {
-                    machine.InjectKey(pokeCode);
-                    Console.WriteLine("  key 0x" + pokeCode.ToString("X2") + " press 1 @IOP instruction " + machine.IopInstructions);
+                    machine.QueueKey(pokeCode, true); if (keyRelease) machine.QueueKey(pokeCode, false);
+                    Console.WriteLine("  station " + pokeCode + " press 1 @IOP instruction " + machine.IopInstructions);
                     pressed1 = true;
                 }
                 else if (pressed1 && !pressed2 && machine.IopInstructions >= pokeAt + keyDelay)
                 {
-                    machine.InjectKey(pokeCode);
-                    Console.WriteLine("  key 0x" + pokeCode.ToString("X2") + " press 2 @IOP instruction " + machine.IopInstructions);
+                    machine.QueueKey(pokeCode, true); if (keyRelease) machine.QueueKey(pokeCode, false);
+                    Console.WriteLine("  station " + pokeCode + " press 2 @IOP instruction " + machine.IopInstructions);
                     pressed2 = true;
                 }
             }

@@ -356,6 +356,13 @@ namespace D.IOP
         /// and asserts KbrdInputReq (master IR3).  For boot-device selection the byte
         /// is raw (0x63=F1/disk .. 0x6C=F10); KEYMO stores it at HexValue (0x3DB2).
         /// </summary>
+        /// <summary>
+        /// True while a byte is sitting in the 8251 Rx unread.  Injecting another now would
+        /// overrun it and lose one, so multi-byte traffic (mouse reports, press/release
+        /// pairs, fast typing) has to wait for this to clear.
+        /// </summary>
+        public bool KeyboardRxReady { get { return _keyboardUart.RxReady; } }
+
         public void InjectKeyboard(byte scancode)
         {
             _keyboardUart.InjectRx(scancode);

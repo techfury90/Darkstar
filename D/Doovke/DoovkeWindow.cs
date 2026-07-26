@@ -77,7 +77,7 @@ namespace D.Doovke
             _32bppDisplayBuffer = new int[_displayWidth * _displayHeight];
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
-            _refreshTimer.Tick += (s, e) => UpdateAndRender();
+            _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); };
 
             Load += OnWindowLoad;
             FormClosing += (s, e) => Shutdown();
@@ -129,8 +129,8 @@ namespace D.Doovke
             for (int i = 0; i < 10; i++)
             {
                 byte code = (byte)(0x63 + i);
-                boot.DropDownItems.Add("F" + (i + 1) + "  (0x" + code.ToString("X2") + ")", null,
-                                       (s, e) => SendKey(code));
+                boot.DropDownItems.Add("F" + (i + 1) + "  (station " + code + ")", null,
+                                       (s, e) => { SendKey(code, true); SendKey(code, false); });
             }
             mach.DropDownItems.Add(boot);
             mach.DropDownItems.Add("Send Scan &Code...", null, (s, e) => OnSendScanCode());
@@ -333,20 +333,133 @@ namespace D.Doovke
 
         protected override void OnKeyDown(KeyEventArgs e)
         {
-            byte code;
-            if (DoovkeKeyboard.TryMap(e.KeyCode, e.Shift, out code))
+            // Alt releases a captured mouse, the same gesture Darkstar uses.
+            if (e.Alt) { ReleaseMouse(); e.Handled = true; e.SuppressKeyPress = true; return; }
+
+            byte station;
+            if (DoovkeKeyboard.TryStation(e.KeyCode, out station))
             {
-                SendKey(code);
+                // Auto-repeat resends KeyDown without an intervening KeyUp; the guest holds a
+                // down/up bitmap, so repeats are redundant and only cost UART bandwidth.
+                if (_keysDown.Add(e.KeyCode)) SendKey(station, true);
                 e.Handled = true;
                 e.SuppressKeyPress = true;
             }
             base.OnKeyDown(e);
         }
 
-        private void SendKey(byte code)
+        protected override void OnKeyUp(KeyEventArgs e)
         {
-            lock (_machineLock) _machine.InjectKey(code);
+            byte station;
+            if (DoovkeKeyboard.TryStation(e.KeyCode, out station))
+            {
+                _keysDown.Remove(e.KeyCode);
+                SendKey(station, false);
+                e.Handled = true;
+                e.SuppressKeyPress = true;
+            }
+            base.OnKeyUp(e);
         }
+
+        /// <summary>Release every held key -- on focus loss, so nothing sticks down.</summary>
+        private void ReleaseAllKeys()
+        {
+            foreach (var k in new System.Collections.Generic.List<Keys>(_keysDown))
+            {
+                byte station;
+                if (DoovkeKeyboard.TryStation(k, out station)) SendKey(station, false);
+            }
+            _keysDown.Clear();
+        }
+
+        protected override void OnDeactivate(EventArgs e)
+        {
+            ReleaseAllKeys();
+            ReleaseMouse();
+            base.OnDeactivate(e);
+        }
+
+        private void SendKey(byte station, bool down)
+        {
+            lock (_machineLock) _machine.QueueKey(station, down);
+        }
+
+        // ---- mouse -----------------------------------------------------------------------
+        //
+        // Driven by polling rather than by mouse events: SDL owns the display panel's window
+        // handle, so whether a given WM_MOUSEMOVE surfaces as a WinForms event or is consumed
+        // by SDL is not something worth depending on.  Cursor.Position and Control.MouseButtons
+        // read the real state regardless of who receives the messages.
+        //
+        // Motion is relative: while captured, the host pointer is warped back to the centre of
+        // the display each poll and the distance it moved becomes the delta.
+
+        private void PollMouse()
+        {
+            if (!_mouseCaptured)
+            {
+                // Pressing a button over the display captures, the same as Darkstar.
+                if (Control.MouseButtons != MouseButtons.None &&
+                    _displayBox.ClientRectangle.Contains(_displayBox.PointToClient(Cursor.Position)))
+                {
+                    CaptureMouse();
+                }
+                return;
+            }
+
+            var centre = _displayBox.PointToScreen(new System.Drawing.Point(
+                _displayBox.ClientSize.Width / 2, _displayBox.ClientSize.Height / 2));
+            var now = Cursor.Position;
+            int dx = now.X - centre.X, dy = now.Y - centre.Y;
+            if (dx != 0 || dy != 0)
+            {
+                // Display pixels are host pixels: the panel is sized 1:1 to the framebuffer.
+                lock (_machineLock) _machine.QueueMouseMotion(dx, dy);
+                Cursor.Position = centre;
+            }
+
+            var buttons = Control.MouseButtons;
+            if (buttons != _mouseButtons)
+            {
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationMouseRed);
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationMouseBlue);
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMouseMiddle);
+                _mouseButtons = buttons;
+            }
+        }
+
+        private void UpdateButton(MouseButtons now, MouseButtons was, MouseButtons which, byte station)
+        {
+            bool a = (now & which) != 0, b = (was & which) != 0;
+            if (a != b) { lock (_machineLock) _machine.QueueMouseButton(station, a); }
+        }
+
+        private void CaptureMouse()
+        {
+            if (_mouseCaptured) return;
+            _mouseCaptured = true;
+            _mouseButtons = MouseButtons.None;
+            Cursor.Position = _displayBox.PointToScreen(new System.Drawing.Point(
+                _displayBox.ClientSize.Width / 2, _displayBox.ClientSize.Height / 2));
+            Cursor.Hide();
+        }
+
+        private void ReleaseMouse()
+        {
+            if (!_mouseCaptured) return;
+            _mouseCaptured = false;
+            // Let go of any button the guest still thinks is down.
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationMouseRed);
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationMouseBlue);
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMouseMiddle);
+            _mouseButtons = MouseButtons.None;
+            Cursor.Show();
+        }
+
+        private readonly System.Collections.Generic.HashSet<Keys> _keysDown =
+            new System.Collections.Generic.HashSet<Keys>();
+        private bool _mouseCaptured;
+        private MouseButtons _mouseButtons = MouseButtons.None;
 
         // ---- menu handlers ---------------------------------------------------------------
 
@@ -393,7 +506,7 @@ namespace D.Doovke
                 byte code;
                 try { code = Convert.ToByte(box.Text.Trim(), 16); }
                 catch { MessageBox.Show(this, "Not a hex byte: " + box.Text); return; }
-                SendKey(code);
+                lock (_machineLock) _machine.QueueRaw(code);
             }
         }
     }
