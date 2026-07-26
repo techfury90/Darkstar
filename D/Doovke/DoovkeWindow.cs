@@ -396,11 +396,23 @@ namespace D.Doovke
 
         private void PollMouse()
         {
+            // Track the host buttons every poll so capture can trigger on the EDGE of a
+            // press.  Level-triggering re-grabbed the pointer on any poll where a button
+            // happened to be down -- which is every poll while a menu item is being clicked
+            // or a dialog dragged, making the whole UI unusable.
+            bool anyDown = Control.MouseButtons != MouseButtons.None;
+            bool pressEdge = anyDown && !_hostButtonsWereDown;
+            _hostButtonsWereDown = anyDown;
+
             if (!_mouseCaptured)
             {
-                // Pressing a button over the display captures, the same as Darkstar.
-                if (Control.MouseButtons != MouseButtons.None &&
-                    _displayBox.ClientRectangle.Contains(_displayBox.PointToClient(Cursor.Position)))
+                // Press inside the display captures, as in Darkstar -- but only when this
+                // window is genuinely the one being used.  A modal dialog makes ActiveForm
+                // the dialog, and an open menu drops down OVER the display area, so without
+                // these the pointer gets grabbed the moment a menu is clicked.
+                if (pressEdge
+                    && Form.ActiveForm == this && ContainsFocus && !AnyMenuOpen()
+                    && _displayBox.ClientRectangle.Contains(_displayBox.PointToClient(Cursor.Position)))
                 {
                     CaptureMouse();
                 }
@@ -423,13 +435,23 @@ namespace D.Doovke
             bool right = (b & MouseButtons.Right) != 0;
             bool middle = (b & MouseButtons.Middle) != 0;
 
-            // Most hosts have no middle button, so Point+Adjust chorded stands in for Menu --
-            // the same convention the era's own systems used.  While chorded the individual
-            // buttons are lifted, so the guest sees one Menu press rather than three buttons.
-            bool chord = left && right;
-            SetButton(DoovkeKeyboard.ScanPoint, left && !chord, ref _pointDown);
-            SetButton(DoovkeKeyboard.ScanAdjust, right && !chord, ref _adjustDown);
-            SetButton(DoovkeKeyboard.ScanMenu, middle || chord, ref _menuDown);
+            // Straight through: the guest systems implement Point+Adjust chording for Menu
+            // themselves, so synthesising it here would double up.
+            SetButton(DoovkeKeyboard.ScanPoint, left, ref _pointDown);
+            SetButton(DoovkeKeyboard.ScanAdjust, right, ref _adjustDown);
+            SetButton(DoovkeKeyboard.ScanMenu, middle, ref _menuDown);
+        }
+
+        /// <summary>True while any menu drop-down is showing (it overlays the display area).</summary>
+        private bool AnyMenuOpen()
+        {
+            if (MainMenuStrip == null) return false;
+            foreach (ToolStripItem item in MainMenuStrip.Items)
+            {
+                ToolStripMenuItem mi = item as ToolStripMenuItem;
+                if (mi != null && mi.DropDown != null && mi.DropDown.Visible) return true;
+            }
+            return false;
         }
 
         private void SetButton(byte scan, bool want, ref bool have)
@@ -462,6 +484,7 @@ namespace D.Doovke
         private readonly System.Collections.Generic.HashSet<Keys> _keysDown =
             new System.Collections.Generic.HashSet<Keys>();
         private bool _mouseCaptured;
+        private bool _hostButtonsWereDown;
         private bool _pointDown, _adjustDown, _menuDown;
 
         // ---- menu handlers ---------------------------------------------------------------
