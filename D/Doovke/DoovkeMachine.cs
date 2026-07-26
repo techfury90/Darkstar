@@ -59,7 +59,7 @@ namespace D.Doovke
         // after a power cycle, so callers can just queue them.
         private readonly System.Collections.Generic.List<KeyPress> _scheduledKeys =
             new System.Collections.Generic.List<KeyPress>();
-        private struct KeyPress { public long At; public byte Code; }
+        private struct KeyPress { public long At; public byte Code; public bool Down; }
 
         // Keyboard and mouse share one 8251, which holds exactly one unread byte, so all
         // input funnels through this FIFO and is handed over only when the Rx is free.
@@ -187,12 +187,7 @@ namespace D.Doovke
             {
                 if (IopInstructions >= _scheduledKeys[i].At)
                 {
-                    // Press only, NO release: measured 2026-07-26, sending station|0x80
-                    // after the press stops the machine booting (FDC 0 / CP 0) where
-                    // press-only boots cleanly.  The boot ROM's SelectionLoop runs before
-                    // Pilot and stashes the raw byte at HexValue, so it does not appear to
-                    // use the down/up bitmap convention that KEYMO maintains later.
-                    QueueKey(_scheduledKeys[i].Code, true);
+                    QueueKey(_scheduledKeys[i].Code, _scheduledKeys[i].Down);
                     _scheduledKeys.RemoveAt(i);
                 }
             }
@@ -291,9 +286,23 @@ namespace D.Doovke
         }
 
         /// <summary>Deliver a key once the machine reaches the given instruction count.</summary>
-        public void ScheduleKey(byte scanCode, long atInstruction)
+        /// <summary>Schedule a press (down = true) or release (down = false).</summary>
+        public void ScheduleKey(byte scanCode, long atInstruction, bool down)
         {
-            _scheduledKeys.Add(new KeyPress { At = atInstruction, Code = scanCode });
+            _scheduledKeys.Add(new KeyPress { At = atInstruction, Code = scanCode, Down = down });
+        }
+
+        /// <summary>
+        /// Schedule a full keystroke, held down for holdInstructions.  A hold is REQUIRED: the
+        /// guest polls the down/up bitmap periodically, so a press and release delivered
+        /// back-to-back are both consumed between two polls and the key is never seen at all
+        /// (measured -- station 27 typed this way echoed nothing, while the same station held
+        /// by a human types fine).
+        /// </summary>
+        public void ScheduleKeystroke(byte scanCode, long atInstruction, long holdInstructions)
+        {
+            ScheduleKey(scanCode, atInstruction, true);
+            ScheduleKey(scanCode, atInstruction + holdInstructions, false);
         }
 
         /// <summary>
@@ -303,8 +312,12 @@ namespace D.Doovke
         /// </summary>
         public void ScheduleBootDeviceKey(byte scanCode)
         {
-            ScheduleKey(scanCode, 12000000);
-            ScheduleKey(scanCode, 14000000);
+            // Press only, NO release: measured 2026-07-26, sending station|0x80 after the
+            // press stops the machine booting (FDC 0 / CP 0) where press-only boots cleanly.
+            // The boot ROM's SelectionLoop runs before Pilot and stashes the raw byte at
+            // HexValue, so it does not use the down/up bitmap convention KEYMO keeps later.
+            ScheduleKey(scanCode, 12000000, true);
+            ScheduleKey(scanCode, 14000000, true);
         }
 
         /// <summary>Mount an image immediately (use at power-on; for a swap use ChangeFloppy).</summary>

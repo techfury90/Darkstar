@@ -418,27 +418,31 @@ namespace D.Doovke
                 Cursor.Position = centre;
             }
 
-            var buttons = Control.MouseButtons;
-            if (buttons != _mouseButtons)
-            {
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationPoint);
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationAdjust);
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMenu);
-                _mouseButtons = buttons;
-            }
+            var b = Control.MouseButtons;
+            bool left = (b & MouseButtons.Left) != 0;
+            bool right = (b & MouseButtons.Right) != 0;
+            bool middle = (b & MouseButtons.Middle) != 0;
+
+            // Most hosts have no middle button, so Point+Adjust chorded stands in for Menu --
+            // the same convention the era's own systems used.  While chorded the individual
+            // buttons are lifted, so the guest sees one Menu press rather than three buttons.
+            bool chord = left && right;
+            SetButton(DoovkeKeyboard.ScanPoint, left && !chord, ref _pointDown);
+            SetButton(DoovkeKeyboard.ScanAdjust, right && !chord, ref _adjustDown);
+            SetButton(DoovkeKeyboard.ScanMenu, middle || chord, ref _menuDown);
         }
 
-        private void UpdateButton(MouseButtons now, MouseButtons was, MouseButtons which, byte station)
+        private void SetButton(byte scan, bool want, ref bool have)
         {
-            bool a = (now & which) != 0, b = (was & which) != 0;
-            if (a != b) { lock (_machineLock) _machine.QueueMouseButton(station, a); }
+            if (want == have) return;
+            have = want;
+            lock (_machineLock) _machine.QueueMouseButton(scan, want);
         }
 
         private void CaptureMouse()
         {
             if (_mouseCaptured) return;
             _mouseCaptured = true;
-            _mouseButtons = MouseButtons.None;
             Cursor.Position = _displayBox.PointToScreen(new System.Drawing.Point(
                 _displayBox.ClientSize.Width / 2, _displayBox.ClientSize.Height / 2));
             Cursor.Hide();
@@ -449,17 +453,16 @@ namespace D.Doovke
             if (!_mouseCaptured) return;
             _mouseCaptured = false;
             // Let go of any button the guest still thinks is down.
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationPoint);
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationAdjust);
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMenu);
-            _mouseButtons = MouseButtons.None;
+            SetButton(DoovkeKeyboard.ScanPoint, false, ref _pointDown);
+            SetButton(DoovkeKeyboard.ScanAdjust, false, ref _adjustDown);
+            SetButton(DoovkeKeyboard.ScanMenu, false, ref _menuDown);
             Cursor.Show();
         }
 
         private readonly System.Collections.Generic.HashSet<Keys> _keysDown =
             new System.Collections.Generic.HashSet<Keys>();
         private bool _mouseCaptured;
-        private MouseButtons _mouseButtons = MouseButtons.None;
+        private bool _pointDown, _adjustDown, _menuDown;
 
         // ---- menu handlers ---------------------------------------------------------------
 

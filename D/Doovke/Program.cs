@@ -22,6 +22,7 @@ namespace D.Doovke
             string ipTrace = null; long ipEvery = 1000;
             long ejectAt = -1, changeAt = -1; string changeTo = null;
             bool headless = false; bool keyRelease = false;
+            string typeCodes = null; long probeAt = -1, probeGap = 2000000, probeHold = 1000000; int probeFrom = 0, probeTo = -1; int probeDelim = -1;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -45,6 +46,15 @@ namespace D.Doovke
                     case "--change-to": changeTo = next; i++; break;
                     case "--headless":  headless = true; break;
                     case "--key-release": keyRelease = true; break;
+                    // Type each station in [from,to] so the guest's echo reveals its own
+                    // station->character table, whatever table that turns out to be.
+                    case "--probe-at":    probeAt = long.Parse(next); i++; break;
+                    case "--probe-from":  probeFrom = int.Parse(next); i++; break;
+                    case "--probe-to":    probeTo = int.Parse(next); i++; break;
+                    case "--probe-gap":   probeGap = long.Parse(next); i++; break;
+                    case "--probe-hold":  probeHold = long.Parse(next); i++; break;
+                    case "--type":        typeCodes = next; i++; break;
+                    case "--probe-delim": probeDelim = int.Parse(next); i++; break;
                     case "-h":
                     case "--help":   Usage(); return 0;
                     default:
@@ -101,6 +111,33 @@ namespace D.Doovke
             // function of (bitmap, cursor); several of its codes invert, so a change here
             // between the boot screen and a later screen explains a whole-raster flip.
             int lastCtl = -1;
+            // After each probed station, render and count set pixels.  A station the guest
+            // acts on moves the screen; one it ignores leaves the count identical.  This finds
+            // which stations do anything without having to read the glyphs.
+            long nextWatch = long.MaxValue; int watchStation = -1; int lastCount = -1;
+            if (probeAt >= 0 && !string.IsNullOrEmpty(typeCodes))
+            {
+                long at = probeAt;
+                Console.WriteLine("  typing scan codes: " + typeCodes);
+                foreach (var t in typeCodes.Split(new char[] { ',' }))
+                {
+                    machine.ScheduleKeystroke((byte)int.Parse(t.Trim()), at, probeHold);
+                    at += probeGap;
+                }
+            }
+            else if (probeAt >= 0 && probeTo >= probeFrom)
+            {
+                long at = probeAt;
+                Console.WriteLine("  probe: stations " + probeFrom + ".." + probeTo
+                                  + (probeDelim >= 0 ? " delimited by " + probeDelim : "")
+                                  + ", every " + probeGap + " instructions from " + probeAt);
+                for (int st = probeFrom; st <= probeTo; st++)
+                {
+                    machine.ScheduleKeystroke((byte)st, at, probeHold); at += probeGap;
+                    if (probeDelim >= 0) { machine.ScheduleKeystroke((byte)probeDelim, at, probeHold); at += probeGap; }
+                }
+                nextWatch = probeAt + probeGap - 1; watchStation = probeFrom;
+            }
             bool pressed1 = pokeAt <= 0;
             bool pressed2 = pokeAt <= 0 || keyDelay <= 0;
             while (machine.IopInstructions < budget)
@@ -119,6 +156,17 @@ namespace D.Doovke
                 if (ipw != null && (machine.IopInstructions % ipEvery) == 0)
                     ipw.WriteLine(machine.IopInstructions + " " + machine.Iop.InstructionAddress.ToString("X5"));
                 machine.Step();
+                if (machine.IopInstructions >= nextWatch && watchStation >= 0)
+                {
+                    int ww, hh; byte[] fr = machine.RenderFrame(out ww, out hh);
+                    int cnt = 0; if (fr != null) foreach (var b in fr) if (b != 0) cnt++;
+                    if (lastCount >= 0 && cnt != lastCount)
+                        Console.WriteLine("  *** station " + watchStation + " CHANGED the screen: "
+                                          + lastCount + " -> " + cnt + " pixels");
+                    lastCount = cnt;
+                    watchStation++; nextWatch += probeGap;
+                    if (watchStation > probeTo) { watchStation = -1; nextWatch = long.MaxValue; }
+                }
                 if ((machine.IopInstructions & 0xFF) == 0)
                 {
                     int ctl = machine.Display.ControlRegister;

@@ -4,134 +4,108 @@ using System.Windows.Forms;
 namespace D.Doovke
 {
     /// <summary>
-    /// Host key -> 6085 KeyStation number.
+    /// Host key -> 6085 keyboard WIRE SCAN CODE.
     ///
-    /// The 6085 keyboard is **Level V** (LevelVKeys.mesa, 1985), not the Level IV keyboard of
-    /// the 8010 Star.  The two agree on the letters and digits, which is what makes them easy
-    /// to conflate, but Level V additionally populates the numeric keypad, the -Alt shift
-    /// keys, the Japanese input keys and the diagnostic bits, and it reassigns some of the
-    /// bits Level IV left spare (74 is LeftBracket here, not Level IV's Half).
+    /// There are two distinct layers here, and conflating them is what made every key come out
+    /// as a different letter:
     ///
-    /// There is no separate "scan code": the byte on the wire IS the station number, with bit
-    /// 7 clear for a press and set for a release (KEYMO.asm).  Pilot sees a 112-bit down/up
-    /// bitmap in which -- inverted from the obvious reading -- down = 0 and up = 1, so a press
-    /// CLEARS the station's bit and a release SETS it.  The IOP firmware maintains that map
-    /// itself; Doovke only has to deliver well-formed bytes.
+    ///   1. the wire scan code -- what the keyboard's 8048 puts on the UART, and therefore what
+    ///      Doovke must feed KEYMO.  These are the KBIndexInit indices (KyMoInit.asm), and they
+    ///      run in a clean near-QWERTY order.  THIS TABLE.
+    ///   2. the KeyStation / bitmap bit -- where KEYMO's KBIndex translation lands it in the
+    ///      112-bit down/up map Pilot reads.  Only relevant if you bypass KEYMO and write the
+    ///      bitmap directly, in which case note the packing is MSB-first within each byte:
+    ///      bit = 0x80 >> (station % 8).
     ///
-    /// The guest tracks the shift keys as ordinary stations and does its own case folding, so
-    /// this table is deliberately NOT shift-sensitive: a press sends the unshifted station,
-    /// plus a real LeftShift/RightShift press, exactly as the hardware would.
+    /// Sending layer-2 numbers into layer 1 does not fail loudly -- KEYMO happily translates
+    /// them, so every keystroke arrives as a real but WRONG key.  Measured: sending P's bit
+    /// (27) typed "O", O's bit (41) typed "L", L's bit (42) typed ";" and Q's bit (35) typed
+    /// "D", because 27/41/42/35 are the scan codes of o/l/semicolon/d.
     ///
-    /// KEYBOARD TYPE, measured 2026-07-26: all EIGHT museum 6085 EEPROM dumps in the build
-    /// kit (serials spanning 1986-1988) carry eePromKBType = 1, not the 3 = level5 a 6085 was
-    /// expected to report.  The offset is not in doubt -- its neighbours decode sensibly
-    /// (RigidSctPerTrk = 16, RigidHdPerCyl = 8) and eePromDispType varies machine-to-machine
-    /// while this field does not.  Whether 1 is "level4" in the same namespace as the Mesa
-    /// KeyboardType enum, or a wire-level code the IOP translates into the Mesa ordinal, is a
-    /// source question and is NOT settled here.
+    /// Press = scan, release = scan | 0x80.  The guest polls the down/up bitmap, so a key has
+    /// to be HELD across a poll: a press and release delivered back-to-back are never seen.
     ///
-    /// Either way Doovke does not have to decide: it hands the genuine EEPROM to the genuine
-    /// IOP firmware, so whatever MesaUpDn's readKeyboardType does with the value happens for
-    /// real.  The EEPROM is deliberately NOT patched -- no real machine says 3, and its
-    /// checksum at word 62 is a boot gate (corrupting it alone hangs the machine before the
-    /// display is even programmed, measured).
-    ///
-    /// None of this changes the numbers below: a station number is what the keyboard hardware
-    /// puts on the wire, and Level IV and Level V agree on every station Level IV has.  The
-    /// Level-V-only stations (keypad, -Alt shifts, DoubleQuote, Japanese keys) are left mapped
-    /// because a real Level V keyboard would physically send them; if the guest turns out to
-    /// name bits through a Level IV table, those are the ones that would do nothing.
+    /// The guest tracks the shift keys as ordinary keys and folds case itself, so this table is
+    /// deliberately NOT shift-sensitive: send the unshifted code plus a real shift press.
     /// </summary>
     public static class DoovkeKeyboard
     {
-        /// <summary>Bit 7 set = release.  A press is the bare station number.</summary>
+        /// <summary>Bit 7 set = release.  A press is the bare scan code.</summary>
         public const byte ReleaseFlag = 0x80;
 
-        // Mouse buttons live in the same station space (MouseFace mirrors them into the
-        // keyboard bitmap).  Level V names: Point selects, Adjust extends, Menu pops up.
-        public const byte StationPoint = 13;   // Mouse1 -- host LEFT
-        public const byte StationAdjust = 14;  // Mouse3 -- host RIGHT
-        public const byte StationMenu = 15;    // Mouse2 -- host MIDDLE
+        // Mouse buttons are scan codes like any other key (movement is the separate
+        // 0xFF + dX + dY report).  Point selects, Adjust extends, Menu pops up.
+        public const byte ScanPoint = 1;    // host LEFT
+        public const byte ScanAdjust = 2;   // host RIGHT
+        public const byte ScanMenu = 3;     // host MIDDLE
 
         private static readonly Dictionary<Keys, byte> Map = new Dictionary<Keys, byte>
         {
-            // ---- Letters (shared with Level IV) ----
-            { Keys.A, 37 }, { Keys.B, 55 }, { Keys.C, 53 }, { Keys.D, 21 }, { Keys.E, 19 },
-            { Keys.F, 51 }, { Keys.G, 66 }, { Keys.H, 68 }, { Keys.I, 39 }, { Keys.J, 54 },
-            { Keys.K, 25 }, { Keys.L, 42 }, { Keys.M, 71 }, { Keys.N, 70 }, { Keys.O, 41 },
-            { Keys.P, 27 }, { Keys.Q, 35 }, { Keys.R, 64 }, { Keys.S, 36 }, { Keys.T, 65 },
-            { Keys.U, 22 }, { Keys.V, 23 }, { Keys.W, 34 }, { Keys.X, 40 }, { Keys.Y, 67 },
-            { Keys.Z, 56 },
+            // ---- Letters ----
+            { Keys.Q, 19 }, { Keys.W, 20 }, { Keys.E, 21 }, { Keys.R, 22 }, { Keys.T, 23 },
+            { Keys.Y, 24 }, { Keys.U, 25 }, { Keys.I, 26 }, { Keys.O, 27 }, { Keys.P, 28 },
+            { Keys.A, 33 }, { Keys.S, 34 }, { Keys.D, 35 }, { Keys.F, 36 }, { Keys.G, 37 },
+            { Keys.H, 38 }, { Keys.J, 39 }, { Keys.K, 40 }, { Keys.L, 41 },
+            { Keys.Z, 47 }, { Keys.X, 48 }, { Keys.C, 49 }, { Keys.V, 50 }, { Keys.B, 51 },
+            { Keys.N, 52 }, { Keys.M, 53 },
 
-            // ---- Main digit row (shared with Level IV) ----
-            { Keys.D0, 24 }, { Keys.D1, 48 }, { Keys.D2, 33 }, { Keys.D3, 32 }, { Keys.D4, 17 },
-            { Keys.D5, 16 }, { Keys.D6, 18 }, { Keys.D7, 20 }, { Keys.D8, 69 }, { Keys.D9, 38 },
-
-            // ---- Numeric keypad (Level V only -- these are NOT the digit-row stations) ----
-            { Keys.NumPad0, 98 }, { Keys.NumPad1, 94 }, { Keys.NumPad2, 5 },  { Keys.NumPad3, 6 },
-            { Keys.NumPad4, 84 }, { Keys.NumPad5, 85 }, { Keys.NumPad6, 87 }, { Keys.NumPad7, 81 },
-            { Keys.NumPad8, 82 }, { Keys.NumPad9, 83 },
-            { Keys.Add, 8 }, { Keys.Subtract, 9 }, { Keys.Multiply, 10 }, { Keys.Divide, 11 },
-            { Keys.Decimal, 105 },      // KeypadPeriod
-            { Keys.NumLock, 12 },       // KeypadClear
+            // ---- Digits ----
+            { Keys.D1, 5 }, { Keys.D2, 6 }, { Keys.D3, 7 }, { Keys.D4, 8 },  { Keys.D5, 9 },
+            { Keys.D6, 10 }, { Keys.D7, 11 }, { Keys.D8, 12 }, { Keys.D9, 13 }, { Keys.D0, 14 },
+            // The keypad's own scan codes are not in the table we have, so the host keypad is
+            // mapped onto the main digit row as a Doovke convenience.  Replace if they turn up.
+            { Keys.NumPad1, 5 }, { Keys.NumPad2, 6 }, { Keys.NumPad3, 7 }, { Keys.NumPad4, 8 },
+            { Keys.NumPad5, 9 }, { Keys.NumPad6, 10 }, { Keys.NumPad7, 11 }, { Keys.NumPad8, 12 },
+            { Keys.NumPad9, 13 }, { Keys.NumPad0, 14 },
 
             // ---- Symbols ----
-            { Keys.OemMinus, 26 },        // Dash
-            { Keys.Oemplus, 75 },         // Equal
-            { Keys.OemQuestion, 28 },     // Slash
-            { Keys.Oemcomma, 43 },        // Comma
-            { Keys.OemPeriod, 58 },       // Period
-            { Keys.Oem1, 59 },            // SemiColon
-            { Keys.Oem7, 44 },            // Quote
-            { Keys.OemOpenBrackets, 74 }, // LeftBracket
-            { Keys.Oem6, 45 },            // RightBracket
-            { Keys.Oem3, 61 },            // OpenQuote
-            // SingleQuote (7) and DoubleQuote (108) are separate physical Level V keys with no
-            // host equivalent, so they are reachable only via Machine > Send Scan Code.
+            { Keys.OemMinus, 15 },         // Dash
+            { Keys.Oemplus, 16 },          // Equal
+            { Keys.OemOpenBrackets, 29 },  // LeftBracket
+            { Keys.Oem6, 30 },             // RightBracket
+            { Keys.Oem1, 42 },             // SemiColon
+            { Keys.Oem7, 43 },             // SingleQuote
+            { Keys.Oemcomma, 54 },         // Comma
+            { Keys.OemPeriod, 55 },        // Period
+            { Keys.OemQuestion, 56 },      // Slash
+            // DoubleQuote (44) is its own key on this keyboard, with no host equivalent.
 
-            // ---- Editing ----
-            { Keys.Space, 73 },
-            { Keys.Tab, 49 },
-            { Keys.Back, 31 },          // BS
-            { Keys.Delete, 62 },
-            { Keys.CapsLock, 72 },      // Lock
-            { Keys.Enter, 60 },         // NewPara -- the 6085's Return
-            { Keys.LineFeed, 50 },      // ParaTab
+            // ---- Control / editing ----
+            { Keys.Tab, 17 },           // RightTab
+            { Keys.LineFeed, 18 },      // ParaTab
+            { Keys.Enter, 31 },         // Return
+            { Keys.Space, 61 },
+            { Keys.ShiftKey, 45 }, { Keys.LShiftKey, 45 },
+            { Keys.RShiftKey, 57 },
+            { Keys.CapsLock, 109 },     // Lock
+            // No separate Backspace code in the table we have, so host Backspace is mapped to
+            // Delete alongside the Delete key, since typing is unusable without it.
+            { Keys.Back, 85 }, { Keys.Delete, 85 },
 
-            // ---- Modifiers ----
-            { Keys.ShiftKey, 57 }, { Keys.LShiftKey, 57 },
-            { Keys.RShiftKey, 76 },
-            // LeftShiftAlt (107), RightShiftAlt (111) and Case (3) are Level V additions with
-            // no natural host key; host Alt is reserved for releasing the captured mouse.
+            // ---- Function / Xerox keys ----
+            { Keys.Escape, 84 },        // Stop
+            { Keys.F12, 86 },           // Undo
+            { Keys.PageUp, 87 },        // Again
+            { Keys.Home, 88 },          // Find
+            { Keys.PageDown, 89 },      // Copy
+            { Keys.End, 91 },           // Same / Paste
+            { Keys.Insert, 93 },        // Open
+            { Keys.Apps, 94 },          // Props
+            { Keys.ControlKey, 108 },   // Font
 
             // ---- Boot-device row ----
-            // Stations 99-108.  The boot ROM's SelectionLoop reads these raw as the boot-device
-            // icons, which is the one mapping confirmed on the machine -- F2 = station 100
-            // boots the floppy.  Only meaningful at the boot screen: under Pilot these are
-            // Bold/Italic/Underline/Superscript/Subscript/Smaller and then keypad and quote
-            // keys, so F7-F10 duplicate stations that have their own entries above.
+            // Codes 99-108 are what the boot ROM's SelectionLoop reads raw as the boot-device
+            // icons -- the one mapping confirmed on the machine (F2 = 100 boots the floppy).
+            // Under the running system these are Center/Bold/Italic/.../Underline/Font, so
+            // several of these duplicate keys that have their own entries above.
             { Keys.F1,  99 }, { Keys.F2, 100 }, { Keys.F3, 101 }, { Keys.F4, 102 }, { Keys.F5, 103 },
             { Keys.F6, 104 }, { Keys.F7, 105 }, { Keys.F8, 106 }, { Keys.F9, 107 }, { Keys.F10, 108 },
-
-            // ---- Xerox named keys ----
-            // The 6085 has no F1-F10, so there is no hardware correspondence here; the host
-            // keys below are a Doovke convention chosen for familiarity, not a spec.
-            { Keys.Escape, 77 },        // Stop
-            { Keys.F11, 92 },           // Help
-            { Keys.F12, 79 },           // Undo
-            { Keys.Home, 90 },          // Find
-            { Keys.End, 63 },           // Next
-            { Keys.Insert, 46 },        // Open
-            { Keys.Apps, 52 },          // Props
-            { Keys.PageUp, 91 },        // Again
-            { Keys.PageDown, 89 },      // Copy
-            { Keys.ControlKey, 47 },    // Special
         };
 
-        /// <summary>Translate a host key to a KeyStation number; false if unmapped.</summary>
-        public static bool TryStation(Keys key, out byte station)
+        /// <summary>Translate a host key to a wire scan code; false if unmapped.</summary>
+        public static bool TryStation(Keys key, out byte scan)
         {
-            return Map.TryGetValue(key, out station);
+            return Map.TryGetValue(key, out scan);
         }
     }
 }
