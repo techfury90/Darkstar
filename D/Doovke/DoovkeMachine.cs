@@ -323,7 +323,32 @@ namespace D.Doovke
         /// <summary>Mount an image immediately (use at power-on; for a swap use ChangeFloppy).</summary>
         public void LoadFloppy(int drive, string path)
         {
-            _io.Fdc.Drives[drive] = new D.IO.FloppyDisk(path);
+            // A malformed image throws out of the IMD parser.  On the deferred-insert path
+            // that happens inside Step(), on the machine thread, where an unhandled exception
+            // takes the whole process down -- so record it and leave the drive empty instead.
+            try
+            {
+                _io.Fdc.Drives[drive] = new D.IO.FloppyDisk(path);
+                LastFloppyError = null;
+            }
+            catch (Exception e)
+            {
+                _io.Fdc.Drives[drive] = null;
+                LastFloppyError = path + ": " + e.Message;
+            }
+        }
+
+        /// <summary>Why the last image failed to mount, or null if it mounted.</summary>
+        public string LastFloppyError { get; private set; }
+
+        /// <summary>
+        /// Try to parse an image without mounting it, so a caller can report a bad one before
+        /// disturbing the running machine.  Returns null if it is readable.
+        /// </summary>
+        public static string ValidateImage(string path)
+        {
+            try { new D.IO.FloppyDisk(path); return null; }
+            catch (Exception e) { return e.Message; }
         }
 
         /// <summary>

@@ -244,6 +244,11 @@ namespace D.Doovke
                 RenderDisplay();
             }
 
+            if (_machineFault != null)
+            {
+                _statusLabel.Text = "MACHINE STOPPED -- " + _machineFault;
+                return;
+            }
             _statusLabel.Text = string.Format("IOP {0:N0}   CP {1:N0}   floppy: {2}{3}{4}",
                 instr, _machine.Cp.InstructionCount,
                 haveDisk ? System.IO.Path.GetFileName(_floppyPath ?? "(image)") : "(empty)",
@@ -282,9 +287,19 @@ namespace D.Doovke
             while (_machineRunning)
             {
                 if (_paused) { Thread.Sleep(20); continue; }
-                lock (_machineLock)
+                try
                 {
-                    for (int i = 0; i < BatchSteps && _machineRunning && !_paused; i++) _machine.Step();
+                    lock (_machineLock)
+                    {
+                        for (int i = 0; i < BatchSteps && _machineRunning && !_paused; i++) _machine.Step();
+                    }
+                }
+                catch (Exception e)
+                {
+                    // This thread is a background thread: an unhandled exception here would
+                    // terminate the process with no explanation.  Stop and report instead.
+                    _machineFault = e.GetType().Name + ": " + e.Message;
+                    _machineRunning = false;
                 }
             }
         }
@@ -485,6 +500,7 @@ namespace D.Doovke
             new System.Collections.Generic.HashSet<Keys>();
         private bool _mouseCaptured;
         private bool _hostButtonsWereDown;
+        private volatile string _machineFault;
         private bool _pointDown, _adjustDown, _menuDown;
 
         // ---- menu handlers ---------------------------------------------------------------
@@ -501,7 +517,7 @@ namespace D.Doovke
         private void OnLoadFloppy()
         {
             string path = PickImage();
-            if (path == null) return;
+            if (path == null || !ImageIsReadable(path)) return;
             lock (_machineLock) _machine.LoadFloppy(0, path);
             _floppyPath = path;
         }
@@ -509,10 +525,25 @@ namespace D.Doovke
         private void OnChangeFloppy()
         {
             string path = PickImage();
-            if (path == null) return;
+            if (path == null || !ImageIsReadable(path)) return;
             // Goes through a real no-media gap so the guest latches the change.
             lock (_machineLock) _machine.ChangeFloppy(0, path);
             _floppyPath = path;
+        }
+
+        /// <summary>
+        /// Report an unreadable image up front rather than letting it fail later on the
+        /// machine thread, where the drive would just silently stay empty.
+        /// </summary>
+        private bool ImageIsReadable(string path)
+        {
+            string err = DoovkeMachine.ValidateImage(path);
+            if (err == null) return true;
+            string nl = Environment.NewLine;
+            MessageBox.Show(this, "Cannot read this disk image:" + nl + nl + err + nl + nl
+                            + "The drive has been left as it was.",
+                            "Bad disk image", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return false;
         }
 
         private void OnSendScanCode()
