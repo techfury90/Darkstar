@@ -19,6 +19,7 @@ namespace D.Doovke
             long budget = 150000000;
             long pokeAt = 0; byte pokeCode = 0; long keyDelay = 2000000;
             string ipTrace = null; long ipEvery = 1000;
+            long ejectAt = -1, changeAt = -1; string changeTo = null;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -37,6 +38,9 @@ namespace D.Doovke
                     case "--key-delay": keyDelay = long.Parse(next); i++; break;
                     case "--iptrace":       ipTrace = next; i++; break;
                     case "--iptrace-every": ipEvery = long.Parse(next); i++; break;
+                    case "--eject-at":  ejectAt = long.Parse(next); i++; break;
+                    case "--change-at": changeAt = long.Parse(next); i++; break;
+                    case "--change-to": changeTo = next; i++; break;
                     case "-h":
                     case "--help":   Usage(); return 0;
                     default:
@@ -79,6 +83,17 @@ namespace D.Doovke
             bool pressed2 = pokeAt <= 0 || keyDelay <= 0;
             while (machine.IopInstructions < budget)
             {
+                if (ejectAt >= 0 && machine.IopInstructions == ejectAt)
+                {
+                    machine.EjectFloppy(0);
+                    Console.WriteLine("  floppy 0 EJECTED @IOP instruction " + machine.IopInstructions);
+                }
+                if (changeAt >= 0 && machine.IopInstructions == changeAt && !string.IsNullOrEmpty(changeTo))
+                {
+                    machine.ChangeFloppy(0, changeTo);
+                    Console.WriteLine("  floppy 0 CHANGE started @IOP instruction " + machine.IopInstructions
+                                      + " (drive empty for " + DoovkeMachine.DiskChangeGapSeconds + "s, then -> " + changeTo + ")");
+                }
                 if (ipw != null && (machine.IopInstructions % ipEvery) == 0)
                     ipw.WriteLine(machine.IopInstructions + " " + machine.Iop.InstructionAddress.ToString("X5"));
                 machine.Step();
@@ -108,7 +123,9 @@ namespace D.Doovke
             Console.WriteLine("CP load/control events: " + (cpLog == null ? 0 : cpLog.Count));
             if (cpLog != null && cpLog.Count > 0)
                 Console.WriteLine("  " + string.Join("  ", cpLog.GetRange(0, Math.Min(24, cpLog.Count))));
-            Console.WriteLine("FDC commands: " + machine.Io.Fdc.CommandCount);
+            Console.WriteLine("FDC commands: " + machine.Io.Fdc.CommandCount
+                              + "   no-media stalls: " + machine.Io.Fdc.NoMediaStalls
+                              + "   FDC resets: " + machine.Io.Fdc.ResetCount);
             var eeLog = machine.Io.ConfigEeprom.ReadLog;
             Console.WriteLine("Config EEPROM reads: " + (eeLog == null ? 0 : eeLog.Count));
             Console.WriteLine("Control store lane writes: " + machine.Io.ControlStore.LaneWrites);
@@ -148,6 +165,9 @@ namespace D.Doovke
             Console.WriteLine("  --key <hex>       scan code in HEX (boot device = 0x63 + icon index)");
             Console.WriteLine("  --key-delay <n>   gap before the second press (default 2000000)");
             Console.WriteLine("  --fb <file>       framebuffer output (default doovke_fb.bin)");
+            Console.WriteLine("  --eject-at <n>    eject drive 0 at IOP instruction n");
+            Console.WriteLine("  --change-at <n>   start a disk change at n (with --change-to)");
+            Console.WriteLine("  --change-to <f>   image to insert after the no-media gap");
         }
     }
 }

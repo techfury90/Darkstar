@@ -60,6 +60,61 @@ namespace D.IOP
         /// <summary>Optional attached media: 4 double-sided drives (IMD images).</summary>
         public FloppyDisk[] Drives = new FloppyDisk[4];
 
+        // ---- Media presence ------------------------------------------------------------
+        // The stock 6085 5.25" drive leaves the READY / disk-change line OPEN (undriven), so
+        // ST3.Ready and ST0.ReadyLineChangedDuringCommandExecution NEVER fire on this machine;
+        // those guest branches exist defensively only.  Presence is really sensed through index
+        // pulses: no diskette => platter not spinning => no index => the 8272 never finds an
+        // address mark => the command SIMPLY DOES NOT COMPLETE.  The IOP's software timeout
+        // (PFloppy.ASM:32/596/607-621) then fakes a CRC error and forces a retry, which surfaces
+        // as iocb.TimeoutOccurred -> FloppyHeadDoveB.mesa:229 RETURN[notReady] -- the first status
+        // check, before any ST0/ST3 read.
+        //
+        // ** This must be a STALL, not a missing-address-mark result. **  A missing AM decodes as
+        // recordNotFound (FloppyHeadDoveB.mesa:276), a different path that never reads as a media
+        // change, so the guest would keep the old disk's identity.
+        //
+        // Note the distinction preserved below: NO DISK => stall; disk present but the track is
+        // blank/unformatted => the existing missing-AM result, which is correct for that case.
+        private bool _noMedia;                       // a media-requiring command hit an empty drive
+        public long NoMediaStalls;                   // diagnostic: how many commands stalled
+
+        /// <summary>Only drive 0 physically exists on this FDC (PFloppy.ASM:990); any other
+        /// unit select behaves as an empty drive and times out.</summary>
+        public bool HasMedia(int unit) { return unit == 0 && Drives[0] != null; }
+
+        private static bool NeedsMedia(int op)
+        {
+            switch (op)
+            {
+                case 0x02:   // Read Track
+                case 0x05:   // Write Data
+                case 0x06:   // Read Data
+                case 0x09:   // Write Deleted Data
+                case 0x0A:   // Read ID
+                case 0x0C:   // Read Deleted Data
+                case 0x0D:   // Format Track
+                case 0x11: case 0x19: case 0x1D:   // Scan
+                    return true;
+                default:
+                    // Specify / Sense Interrupt / Sense Drive are FDC-internal, and
+                    // Recalibrate/Seek are drive-mechanical (track-0 sensing works with no
+                    // diskette), so all of those still complete normally on an empty drive.
+                    return false;
+            }
+        }
+
+        /// <summary>Model an empty drive: leave the command in execution forever, with no
+        /// interrupt and no result phase, so the IOP's software timeout is what fires.</summary>
+        private void StallNoMedia()
+        {
+            NoMediaStalls++;
+            _noMedia = true;
+            _phase = Phase.Execution;
+            _execData = null; _execIdx = 0;
+            // deliberately: no _int, no StartResult -- the command never completes.
+        }
+
         // No constructor reset: the controller powers up idle (RQM=1, no INT).  The
         // boot driver issues the explicit 0xC0-bit2 reset when it wants the
         // drive-status senses + reset interrupt.
@@ -82,6 +137,7 @@ namespace D.IOP
         public void Reset()
         {
             ResetCount++;
+            _noMedia = false;      // the timeout handler resets the FDC to recover
             _phase = Phase.Command;
             _cmdIdx = _cmdLen = _resIdx = _resLen = 0;
             _execData = null; _execIdx = 0;
@@ -96,6 +152,9 @@ namespace D.IOP
         /// <summary>Read the Main Status Register (port 0x50).</summary>
         public byte ReadMainStatus()
         {
+            // Stalled on an empty drive: permanently busy, never ready for a transfer, so the
+            // host's poll loop runs out its retries.  Only an FDC reset clears this.
+            if (_noMedia) return (byte)CB;
             int s = RQM;
             if (_phase == Phase.Result) s |= DIO | CB;
             else if (_phase == Phase.Execution) s |= CB | DIO;   // exec data reads FDC->CPU
@@ -249,6 +308,10 @@ namespace D.IOP
             Recent(Names[op] + "(" + BitConverter.ToString(_cmd, 0, _cmdLen) + ")");
             int unit = _cmd.Length > 1 ? (_cmd[1] & 0x03) : 0;
             int head = _cmd.Length > 1 ? ((_cmd[1] >> 2) & 0x01) : 0;
+
+            // Empty drive (or a select of the non-existent drive 1): stall instead of
+            // completing, so detection happens via the IOP timeout rather than a status bit.
+            if (NeedsMedia(op) && !HasMedia(unit)) { StallNoMedia(); return; }
 
             switch (op)
             {

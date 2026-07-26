@@ -39,6 +39,27 @@ namespace D.Doovke
         public DoveDisplayController Display { get { return _io.Display; } }
 
         public long IopInstructions { get; private set; }
+
+        /// <summary>80186 clocks elapsed, so media timing can be expressed in real seconds.</summary>
+        public long ElapsedClocks { get; private set; }
+        public const long IopClockHz = 8000000;
+
+        /// <summary>
+        /// How long the drive must stay empty across a disk change.  Calibrated from the real
+        /// machine (door open + reinsert + spin-up).  The guest only latches "media changed" if
+        /// its poll/retry loop actually observes the not-ready window, so swapping the bytes
+        /// underneath a running command -- or using too short a gap -- reproduces the classic
+        /// "Gotek swapped too fast" bug: nothing goes not-ready, the latch never sets, and the
+        /// guest keeps operating on the previous disk's identity.
+        /// </summary>
+        public const double DiskChangeGapSeconds = 3.0;
+
+        private long _insertAtClock = -1;
+        private string _pendingImage;
+        private int _pendingDrive;
+
+        /// <summary>True while a disk change is in progress (drive deliberately empty).</summary>
+        public bool DiskChangeInProgress { get { return _insertAtClock >= 0; } }
         public bool Halted { get { return _iop.Halted; } }
 
         public DoovkeMachine(string bootRomPath, string configEepromPath)
@@ -131,6 +152,15 @@ namespace D.Doovke
 
             int clocks = _iop.Execute();
             _io.Tick(clocks);
+            ElapsedClocks += clocks;
+
+            // Complete a pending disk change once the drive has been empty long enough.
+            if (_insertAtClock >= 0 && ElapsedClocks >= _insertAtClock)
+            {
+                _insertAtClock = -1;
+                if (!string.IsNullOrEmpty(_pendingImage)) LoadFloppy(_pendingDrive, _pendingImage);
+                _pendingImage = null;
+            }
             // Execute() no-ops while the CP is halted, so this is safe before the IOP starts it.
             _cp.Execute(CpStepsPerIopInstruction);
             IopInstructions++;
@@ -151,14 +181,39 @@ namespace D.Doovke
             _io.InjectKeyboard(scanCode);
         }
 
+        /// <summary>Mount an image immediately (use at power-on; for a swap use ChangeFloppy).</summary>
         public void LoadFloppy(int drive, string path)
         {
             _io.Fdc.Drives[drive] = new D.IO.FloppyDisk(path);
         }
 
+        /// <summary>
+        /// Remove the diskette.  From here every media-requiring FDC command stalls, so the
+        /// IOP's software timeout fires and the guest sees notReady.
+        /// </summary>
         public void EjectFloppy(int drive)
         {
             _io.Fdc.Drives[drive] = null;
+        }
+
+        /// <summary>
+        /// Swap diskettes the way a human does: eject, leave the drive genuinely empty for
+        /// DiskChangeGapSeconds, then insert.  Routing every change through a real no-media gap
+        /// is what makes the guest notice -- the diagnostics' own retry loop times out while the
+        /// drive is empty, latches the change, and then reads the new disk cleanly.
+        /// The insertion happens from Step(), so callers never block.
+        /// </summary>
+        public void ChangeFloppy(int drive, string path)
+        {
+            ChangeFloppy(drive, path, DiskChangeGapSeconds);
+        }
+
+        public void ChangeFloppy(int drive, string path, double gapSeconds)
+        {
+            EjectFloppy(drive);
+            _pendingDrive = drive;
+            _pendingImage = path;
+            _insertAtClock = ElapsedClocks + (long)(gapSeconds * IopClockHz);
         }
 
         /// <summary>
