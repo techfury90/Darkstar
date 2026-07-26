@@ -421,9 +421,9 @@ namespace D.Doovke
             var buttons = Control.MouseButtons;
             if (buttons != _mouseButtons)
             {
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationMouseRed);
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationMouseBlue);
-                UpdateButton(buttons, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMouseMiddle);
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationPoint);
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationAdjust);
+                UpdateButton(buttons, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMenu);
                 _mouseButtons = buttons;
             }
         }
@@ -449,9 +449,9 @@ namespace D.Doovke
             if (!_mouseCaptured) return;
             _mouseCaptured = false;
             // Let go of any button the guest still thinks is down.
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationMouseRed);
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationMouseBlue);
-            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMouseMiddle);
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Left, DoovkeKeyboard.StationPoint);
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Right, DoovkeKeyboard.StationAdjust);
+            UpdateButton(MouseButtons.None, _mouseButtons, MouseButtons.Middle, DoovkeKeyboard.StationMenu);
             _mouseButtons = MouseButtons.None;
             Cursor.Show();
         }
