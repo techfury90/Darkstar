@@ -44,6 +44,20 @@ namespace D.IOP
         // The 34-word DOB image (host-order words, exactly as they sit in DRAM, big-endian).
         private readonly ushort[] _dob = new ushort[34];
         private readonly byte[] _dataBuf = new byte[512];   // staging for one data page
+        private int _dataDmaAddr; private bool _dataDmaArmed;   // read data-page DMA armed pre-Execute, emitted at cc=2
+        private int _dobAddr = -1;   // physical address of the DOB (last <=34-word DMA target) -- IOCB is just below it
+        // DIAGNOSTIC gate: DOVE_NO_DATA_DMA=1 suppresses the 512-byte data-page transfer (both directions)
+        // to test whether the data DMA write into mds0 (phys 0x95800) is what corrupts the germ frame heap.
+        private readonly bool _noDataDma =
+            System.Environment.GetEnvironmentVariable("DOVE_NO_DATA_DMA") == "1";
+        // Blank-page read model.  INVARIANT (operator, not to be questioned): the drive is MFM and
+        // "unformatted" means NO sector headers exist, so EVERY read fails by construction -- there is
+        // no low-level format.  DEFAULT = not-found.  A real machine boots straight past an all-failing
+        // unformatted drive, so the germ MUST tolerate the not-found; the bug is that my emulator turns
+        // that tolerable "no format" result into a fatal AsynchronousVMIOError.  (DOVE_DISK_LLFORMAT=1
+        // is an experiment-only escape hatch and violates the invariant; do not use for boot.)
+        private readonly bool _notFoundOnBlank =
+            System.Environment.GetEnvironmentVariable("DOVE_DISK_LLFORMAT") != "1";
 
         public System.Collections.Generic.List<string> Log;   // optional diagnostic
         public long HostClock;
@@ -162,7 +176,13 @@ namespace D.IOP
                     CtlrInt = true;
                     break;
                 case 2:  // Execute the DOB operation
-                    ExecuteDob();                // sets _status 0x42 / 0xC2 and fills DOB error fields
+                    ExecuteDob();                // sets _status 0x42 / 0xC2, fills DOB error fields + _dataBuf
+                    if (_dataDmaArmed)           // now _dataBuf is valid -> emit the read data page to mem
+                    {
+                        if (!_noDataDma)
+                            for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
+                        _dataDmaArmed = false;
+                    }
                     CtlrInt = true;
                     break;
                 case 3:  // Store DOB back (the FIFO->mem StartDMA follows and writes it out)
@@ -181,6 +201,7 @@ namespace D.IOP
             if (n <= 34)
             {
                 // DOB transfer.
+                _dobAddr = _dmaAddr;            // remember where the DOB lives (IOCB is just below it)
                 if (_dmaDir == 1)               // mem->FIFO: ingest the DOB image
                 {
                     for (int w = 0; w < 34; w++) _dob[w] = RdWord(_dmaAddr + w * 2);
@@ -194,13 +215,12 @@ namespace D.IOP
             else
             {
                 // Data page.
-                if (_dmaDir == 1)               // mem->disk: capture data from memory (write ops)
-                {
-                    for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask];
-                }
-                else                            // disk->mem: emit the staged data to memory (read ops)
-                {
-                    for (int i = 0; i < 512; i++) Sys[(_dmaAddr + i) & Mask] = _dataBuf[i];
+                if (_dmaDir == 1)               // mem->disk: capture data from memory NOW (write ops feed
+                    { if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask]; }
+                else                            // disk->mem (read): the firmware arms this StartDMA BEFORE
+                {                               // cc=2, so DON'T emit yet -- _dataBuf isn't filled until
+                    _dataDmaArmed = true;       // Execute runs ReadSector.  Record the target; emit at cc=2.
+                    _dataDmaAddr = _dmaAddr;
                 }
             }
             DmaInt = true;                      // RDiskDmaIntr' (AM2942 end-of-transfer)
@@ -227,8 +247,10 @@ namespace D.IOP
         private const int W_HeaderError = 10, W_LabelError = 11, W_DataError = 12, W_LastError = 13;
         private const int W_CurrentCyl = 14, W_DriveCtlrStatus = 20;
 
-        // Error type bytes (§7.1).
+        // Error type bytes (§7.1).  The "not found" family is what an UNFORMATTED platter returns
+        // (no address marks/headers to find) -- see DiskHeadLabeledDukeA:880-892.
         private const int ErrNone = 0x00, ErrLabelVerify = 0x23, ErrSectorNotFound = 0x81;
+        private const int ErrLabelAddrMark = 0x21, ErrDataAddrMark = 0x31;
 
         private void ExecuteDob()
         {
@@ -281,24 +303,70 @@ namespace D.IOP
                     // illegal / not-yet-modelled op -- report cleanly, no data
                     break;
             }
+
+            // COMPLETION BOOKKEEPING (root cause of cStorage/AsynchronousVMIOError->cGermAllocFault):
+            // Pilot's DataTransferImpl.Poll judges op success by pagesCompleted, NOT by the error bytes:
+            //   dobPagesCompleted = pageNumber(dob.header) - pageNumber(op.clientHeader)
+            //   pagesCompleted    = read ? MIN[dob, dma] : dob   (must be > 0 or the op is "no progress")
+            // A non-goodCompletion status -> DiskStatusToDataStatus -> ioError -> Space.IOError[page]
+            // -> uncaught -> 0935.  So on a SUCCESSFUL sector transfer we must advance dob.header
+            // (CHS words 16-17) to the sector AFTER the last one transferred, so pageNumber advances
+            // by the N sectors done (N=1 per DOB in this model).  The request CHS is still in
+            // (cyl,head,sector); the label/currentCyl/status fields already reflect completion.
+            if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6))
+            {
+                int ns = sector + 1, nh = head, nc = cyl;
+                if (ns >= Micropolis1325.SectorsPerTrack) { ns = 0; nh++; if (nh >= Micropolis1325.Heads) { nh = 0; nc++; } }
+                _dob[16] = Bswap((ushort)nc);                 // cylinder  (ByteSwappedWord)
+                _dob[17] = (ushort)((ns << 8) | nh);          // sector(hi) : head(lo)
+            }
+            if (Log != null)   // DOB completion lines are rare (one per op) -- bypass the 800 register-log cap
+            {
+                // Snapshot the IOCB words just below the DOB (firmware decrements iocb.pageCount there per
+                // DiskDove.asm:1094-1104).  Read RAW phys words; report byte-swapped too.  DOB-8=iocb.pageCount.
+                string iocb = "";
+                if (_dobAddr >= 0)
+                    for (int off = -0x14; off <= 0; off += 2)
+                    {
+                        int a = _dobAddr + off; ushort v = RdWord(a);
+                        iocb += "[" + (off).ToString() + "]" + v.ToString("X4") + "(bs " + Bswap(v).ToString("X4") + ") ";
+                    }
+                Log.Add("DOB op=" + op + " req CHS=[" + cyl + "," + head + "," + sector + "]"
+                    + " err=" + error + " -> hdr w16=" + _dob[16].ToString("X4") + " w17=" + _dob[17].ToString("X4")
+                    + " HdrErr=" + (_dob[W_HeaderError] >> 8).ToString("X2") + " currentCyl=" + _dob[W_CurrentCyl].ToString("X4")
+                    + " dmaCount=0x" + _dmaCount.ToString("X4") + " dobAddr=0x" + _dobAddr.ToString("X5") + " @IOP" + HostClock
+                    + "  IOCB(off from DOB): " + iocb);
+            }
+
             _status = (byte)(error ? 0xC2 : 0x42);          // e+d on error, else done
         }
 
         private bool ReadSector(int cyl, int head, int sector, bool verifyLabel)
         {
             int page = Micropolis1325.Page(cyl, head, sector);
+            if (!_disk.IsFormatted(page))
+            {
+                if (_notFoundOnBlank)
+                {
+                    // UNFORMATTED-platter model (env-gated): no address marks -> not-found family.
+                    // This raises Space.IOError on the germ's PV read (AsynchronousVMIOError -> 0935).
+                    SetErr(W_HeaderError, ErrSectorNotFound);
+                    SetErr(W_LabelError, ErrLabelAddrMark);
+                    SetErr(W_DataError, ErrDataAddrMark);
+                    SetErr(W_LastError, ErrSectorNotFound);
+                    for (int i = 0; i < 512; i++) _dataBuf[i] = 0xE5;
+                    return true;                    // -> status 0xC2
+                }
+                // LOW-LEVEL-FORMATTED blank drive (default): sector headers exist, so the read SUCCEEDS
+                // and returns ZERO data + ZERO label.  The completion is goodCompletion (with the header
+                // advanced below); Pilot's PV seal/version check -- not the disk layer -- decides the
+                // volume is uninitialized.  No Space.IOError.
+                for (int i = 0; i < 512; i++) _dataBuf[i] = 0x00;
+                if (!verifyLabel) for (int i = 0; i < 10; i++) _dob[23 + i] = 0;
+                return false;                       // success
+            }
             var data = _disk.ReadData(page);
             var label = _disk.ReadLabel(page);
-            if (data == null)
-            {
-                // Unformatted sector: the DiskShapeDescriptor probe reads a blank pack here.  Return
-                // a clean completion but a ZEROED page + ZEROED label whose seal fails validation ->
-                // Pilot takes the format path.  (Must clear the DOB label too, else the firmware's own
-                // request label survives in words 23-32 and reads as a valid seal.)
-                Array.Clear(_dataBuf, 0, 512);
-                for (int i = 0; i < 10; i++) _dob[23 + i] = 0;
-                return false;
-            }
             if (verifyLabel && label != null)
             {
                 // compare the on-disk label (words 0-7 significant) against the DOB label (w23-30)
@@ -326,6 +394,17 @@ namespace D.IOP
         private bool ReadLabelOnly(int cyl, int head, int sector)
         {
             int page = Micropolis1325.Page(cyl, head, sector);
+            if (!_disk.IsFormatted(page))
+            {
+                if (_notFoundOnBlank)               // unformatted -> label address mark not found
+                {
+                    SetErr(W_LabelError, ErrLabelAddrMark);
+                    SetErr(W_LastError, ErrSectorNotFound);
+                    return true;
+                }
+                for (int i = 0; i < 10; i++) _dob[23 + i] = 0;   // LL-formatted: zero label, success
+                return false;
+            }
             var label = _disk.ReadLabel(page);
             for (int i = 0; i < 10; i++) _dob[23 + i] = label != null ? label[i] : (ushort)0;
             return false;

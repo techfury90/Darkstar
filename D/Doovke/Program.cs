@@ -1,0 +1,153 @@
+using System;
+using System.IO;
+
+namespace D.Doovke
+{
+    /// <summary>
+    /// Doovke entry point (Dove/Daybreak = Xerox 6085).  Darkstar remains the DLion target.
+    ///
+    /// This first cut is headless: it assembles the machine, boots it, optionally injects a
+    /// keystroke, and writes the framebuffer out so the screen can be inspected.  The UI
+    /// (window + live keyboard + floppy load/eject) grows onto DoovkeMachine from here --
+    /// the machine deliberately exposes InjectKey/LoadFloppy/RenderFrame for exactly that.
+    /// </summary>
+    internal static class Program
+    {
+        private static int Main(string[] args)
+        {
+            string bootRom = null, eeprom = null, floppy = null, fbOut = "doovke_fb.bin";
+            long budget = 150000000;
+            long pokeAt = 0; byte pokeCode = 0; long keyDelay = 2000000;
+            string ipTrace = null; long ipEvery = 1000;
+
+            for (int i = 0; i < args.Length; i++)
+            {
+                string a = args[i];
+                string next = (i + 1 < args.Length) ? args[i + 1] : null;
+                switch (a)
+                {
+                    case "--rom":    bootRom = next; i++; break;
+                    case "--eeprom": eeprom = next; i++; break;
+                    case "--floppy": floppy = next; i++; break;
+                    case "--fb":     fbOut = next; i++; break;
+                    case "--budget": budget = long.Parse(next); i++; break;
+                    case "--key-at": pokeAt = long.Parse(next); i++; break;
+                    // Scan code is HEX: the boot-device selection byte is 0x63 + icon index.
+                    case "--key":       pokeCode = (byte)Convert.ToInt32(next, 16); i++; break;
+                    case "--key-delay": keyDelay = long.Parse(next); i++; break;
+                    case "--iptrace":       ipTrace = next; i++; break;
+                    case "--iptrace-every": ipEvery = long.Parse(next); i++; break;
+                    case "-h":
+                    case "--help":   Usage(); return 0;
+                    default:
+                        Console.Error.WriteLine("unknown argument: " + a);
+                        Usage();
+                        return 2;
+                }
+            }
+
+            if (string.IsNullOrEmpty(bootRom))
+            {
+                Console.Error.WriteLine("--rom is required (Dove IOP boot ROM, 16 KB, loads at 0xFC000)");
+                Usage();
+                return 2;
+            }
+
+            var machine = new DoovkeMachine(bootRom, eeprom);
+            Console.WriteLine("Doovke -- Dove/Daybreak (Xerox 6085)");
+            Console.WriteLine("  boot ROM : " + bootRom);
+            Console.WriteLine("  EEPROM   : " + (eeprom ?? "(none)"));
+
+            if (!string.IsNullOrEmpty(floppy))
+            {
+                machine.LoadFloppy(0, floppy);
+                Console.WriteLine("  floppy 0 : " + floppy);
+            }
+
+            // Diagnostics: did the IOP ever load/start the CP, and did it touch the floppy?
+            machine.Io.CpLoadLog = new System.Collections.Generic.List<string>();
+            machine.Io.ConfigEeprom.ReadLog = new System.Collections.Generic.List<int>();
+
+            Console.WriteLine("Running " + budget + " IOP instructions...");
+            Console.WriteLine("  reset state: " + machine.Iop);
+            // The boot-device selection needs the key pressed TWICE for the diagnostics disk:
+            // the SelectionLoop consumes the first press to highlight the icon, the second to boot.
+            System.IO.StreamWriter ipw = null;
+            if (!string.IsNullOrEmpty(ipTrace)) ipw = new System.IO.StreamWriter(ipTrace);
+
+            bool pressed1 = pokeAt <= 0;
+            bool pressed2 = pokeAt <= 0 || keyDelay <= 0;
+            while (machine.IopInstructions < budget)
+            {
+                if (ipw != null && (machine.IopInstructions % ipEvery) == 0)
+                    ipw.WriteLine(machine.IopInstructions + " " + machine.Iop.InstructionAddress.ToString("X5"));
+                machine.Step();
+                if (!pressed1 && machine.IopInstructions >= pokeAt)
+                {
+                    machine.InjectKey(pokeCode);
+                    Console.WriteLine("  key 0x" + pokeCode.ToString("X2") + " press 1 @IOP instruction " + machine.IopInstructions);
+                    pressed1 = true;
+                }
+                else if (pressed1 && !pressed2 && machine.IopInstructions >= pokeAt + keyDelay)
+                {
+                    machine.InjectKey(pokeCode);
+                    Console.WriteLine("  key 0x" + pokeCode.ToString("X2") + " press 2 @IOP instruction " + machine.IopInstructions);
+                    pressed2 = true;
+                }
+            }
+
+            if (ipw != null) { ipw.Flush(); ipw.Close(); Console.WriteLine("IP trace -> " + ipTrace); }
+
+            Console.WriteLine();
+            Console.WriteLine("Stopped after " + machine.IopInstructions + " IOP instructions"
+                              + " (CP executed " + machine.Cp.InstructionCount + ")"
+                              + (machine.Halted ? " [IOP halted]" : string.Empty));
+
+            Console.WriteLine("  final state: " + machine.Iop);
+            var cpLog = machine.Io.CpLoadLog;
+            Console.WriteLine("CP load/control events: " + (cpLog == null ? 0 : cpLog.Count));
+            if (cpLog != null && cpLog.Count > 0)
+                Console.WriteLine("  " + string.Join("  ", cpLog.GetRange(0, Math.Min(24, cpLog.Count))));
+            Console.WriteLine("FDC commands: " + machine.Io.Fdc.CommandCount);
+            var eeLog = machine.Io.ConfigEeprom.ReadLog;
+            Console.WriteLine("Config EEPROM reads: " + (eeLog == null ? 0 : eeLog.Count));
+            Console.WriteLine("Control store lane writes: " + machine.Io.ControlStore.LaneWrites);
+
+            int w, h;
+            byte[] frame = machine.RenderFrame(out w, out h);
+            if (frame != null && w > 0)
+            {
+                using (var fs = new FileStream(fbOut, FileMode.Create))
+                using (var bw = new BinaryWriter(fs))
+                {
+                    bw.Write(w);
+                    bw.Write(h);
+                    bw.Write(frame);
+                }
+                int set = 0;
+                foreach (var b in frame) if (b != 0) set++;
+                Console.WriteLine(string.Format("Framebuffer {0}x{1} -> {2}  ({3} of {4} pixels set)",
+                                                w, h, fbOut, set, frame.Length));
+            }
+            else
+            {
+                Console.WriteLine("Display not programmed -- no framebuffer to write.");
+            }
+
+            return 0;
+        }
+
+        private static void Usage()
+        {
+            Console.WriteLine();
+            Console.WriteLine("usage: Doovke --rom <bootrom.bin> [options]");
+            Console.WriteLine("  --eeprom <file>   config EEPROM image (93C46)");
+            Console.WriteLine("  --floppy <file>   mount an image in drive 0");
+            Console.WriteLine("  --budget <n>      IOP instructions to run (default 150000000)");
+            Console.WriteLine("  --key-at <n>      inject a keystroke at IOP instruction n");
+            Console.WriteLine("  --key <hex>       scan code in HEX (boot device = 0x63 + icon index)");
+            Console.WriteLine("  --key-delay <n>   gap before the second press (default 2000000)");
+            Console.WriteLine("  --fb <file>       framebuffer output (default doovke_fb.bin)");
+        }
+    }
+}

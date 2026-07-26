@@ -56,7 +56,58 @@ namespace D.CP
         // MesaIntBr (InterruptsDaybreak.mc:68) fires on ANY of rInt bit13 MesaInt / bit14 IOP /
         // bit15 timer -- not just the IOP doorbell.  counter0 is a mode-2 rate generator; model it
         // as a periodic edge every _timerPeriod CP instructions.
+        // ---- 8254 PIT on the Mesa bus (what aRRIT reads) ----------------------------------
+        // Channels 1+2 form ONE 32-bit down-counter: timer = (T2<<16)|T1.  Ports are the FULL
+        // 8-bit RH[rB] on an fYNorm 0xC "IO<-" reference (TechRef fY table "IO-", drives the MDC
+        // IORef line) -- IO refs bypass the MAR splice entirely, so the port never nibble-collapses.
+        //   0x41 = T1Count (low 16)   0x42 = T2Count (high 16)   0x43 = T012Control
+        // Writing 0xDC (T12Latch) to 0x43 snapshots BOTH halves simultaneously; reads are
+        // LSB-then-MSB per channel.  Values are returned RAW (still counting down) -- the germ does
+        // its own down-count->elapsed conversion (MiscDaybreak.mc:156,162).
+        // Rate: counter-0 reload 0x0C35 (3125) = 50 ms => 62.5 kHz => 16 us/count; against the
+        // existing TimerPeriod (40000 CP instr ~ 50 ms) that is ~12.8 CP instructions per count.
+        // ON by default: without the readable 8254 count-down aRRIT reads zeros, the germ's
+        // zJNZB timing gate fires on a phantom, and the boot dies in the zESC a00 guard (MP 0935).
+        public bool Io8254Enabled = true;
+        private uint _pit32 = 0xFFFFFFFF;
+        private int _pitAccum;
+        private ushort _pitLatch1, _pitLatch2;
+        private bool _pitLatched, _pitMsb1, _pitMsb2;
+        private bool _ioRefPending; private int _ioPort;
+        public long IoRefCount, PitReadCount;
         private long _timerCounter;
+        private ushort Pit8254Read()
+        {
+            PitReadCount++;
+            switch (_ioPort)
+            {
+                case 0x41:
+                {
+                    ushort v = _pitLatched ? _pitLatch1 : (ushort)(_pit32 & 0xFFFF);
+                    ushort b = _pitMsb1 ? (ushort)((v >> 8) & 0xFF) : (ushort)(v & 0xFF);
+                    if (_pitMsb1) _pitLatched = false;   // T1 MSB is the last byte of the protocol
+                    _pitMsb1 = !_pitMsb1;
+                    return b;
+                }
+                case 0x42:
+                {
+                    ushort v = _pitLatched ? _pitLatch2 : (ushort)((_pit32 >> 16) & 0xFFFF);
+                    ushort b = _pitMsb2 ? (ushort)((v >> 8) & 0xFF) : (ushort)(v & 0xFF);
+                    _pitMsb2 = !_pitMsb2;
+                    return b;
+                }
+                default: return 0;
+            }
+        }
+        private void Pit8254Write(ushort v)
+        {
+            if (_ioPort == 0x43 && (v & 0xFF) == 0xDC)
+            {
+                _pitLatch1 = (ushort)(_pit32 & 0xFFFF);
+                _pitLatch2 = (ushort)((_pit32 >> 16) & 0xFFFF);
+                _pitLatched = true; _pitMsb1 = false; _pitMsb2 = false;
+            }
+        }
         public int TimerPeriod = 40000;
         public long TimerFireCount;     // diagnostics: timer edges raised
         public long IntStatReads;       // diagnostics: <-IntStat reads (timer acks)
@@ -166,7 +217,54 @@ namespace D.CP
         public List<string> MapReadLog; // TEMP: Map<- references near the IORegion end (aGMF / FindStartOfIORegion)
         public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
         public List<string> WrmpLog;   // TEMP: every @WRMP (zESC alpha 0x77) = THE maintenance-panel post chokepoint
+        public List<string> KfcbLog;   // error-raise capture: every zKFCB (0xF0) in [KfcbLogFrom,KfcbLogTo] -- logs
+        public long KfcbLogFrom;       // the signal descriptor + arg on the stack so the INNER (root) raise is readable
+        public long KfcbLogTo = long.MaxValue;
+        // Dispatch ring: raw (op + pending IB pair) at EVERY dispatch, last 64 kept (auto-overwrite).
+        // Dumped at each KFCB so the raise-site byte stream `9a XX fd 00 YY f0 23` is reconstructable
+        // regardless of the operand straddling the IB word boundary (int arrays = no per-dispatch alloc).
+        public int[] DispRingCPi, DispRingOp, DispRingIb, DispRingPtr, DispRingR5, DispRingRH5;
+        public int DispRingPos;
         public int RetLogFrom = 15300, RetLogTo = 15340;   // TEMP: zRET (0xEF) trace window
+        // Live <-MD read trace across the SignalHandler walk: the ONLY trustworthy A/B decider.
+        // Logs every memory read (mar>=0x40000) in [WalkRdFrom,WalkRdTo] so we see the real frame-chain
+        // addresses SignalHandler actually reads (the static handle->real follow is stale/incomplete).
+        public List<string> WalkRdLog; public long WalkRdFrom = long.MaxValue, WalkRdTo = 0; public int WalkRdGfi = 109;
+        // StashPC watch: capture every WriteWord that stores the buggy saved-PC 0x5CA3 or targets
+        // GFI 99's frame [F-1]=0x788EB.  With R5/pc16/Q at the write we see whether R5 already lacked
+        // bit 7 (upstream page-cross corruption) or the stash itself dropped it -- the operator's #3.
+        public List<string> StashWatchLog; public int StashWatchAddr = -1, StashWatchVal = -1;
+        public long StashWatchFrom = 0, StashWatchTo = long.MaxValue;
+        // Process save/restore stkptr round-trip watch: <-ErrnIBnStkp (SAVE side, returns ~stackP) and
+        // every stackP<- (RESTORE side).  Answers: does resume-stkptr == save-stkptr, or save+1?
+        public List<string> ProcSwLog; public long ProcSwFrom = long.MaxValue, ProcSwTo = 0;
+        // Per-MICROWORD sp trace: every microword that moves _stackP, with the mechanism and the
+        // decoded Daybreak stack fields -- to find the exact microword where the eval stack gains a slot.
+        public List<string> SpTraceLog; public long SpTraceFrom = long.MaxValue, SpTraceTo = 0;
+        // IE provenance: every ClrIE/SetIE with its microword + macro PC, to see what last set IE
+        // before the aRRIT-polled loop (and whether a ClrIE the germ issued was honoured).
+        public List<string> IeLog; public long IeFrom = long.MaxValue, IeTo = 0;
+        // Raw-microword dump for named addresses: prints the 48-bit word + every decoded field, so the
+        // U-address formation can be diffed against the TechRef encoding (uStkDepth must resolve to 0x33).
+        public List<string> UwDumpLog; public int UwDumpA = -1, UwDumpB = -1, UwDumpC = -1;
+        // U-address census: every Uaddr-mode U access, keyed by the address my decoder forms.
+        // Validates rA/fZ bit positions + nibble order against the source RegDef table.
+        public long[] UAddrHist; public long UAddrFrom = long.MaxValue, UAddrTo = 0;
+        // Module code-region census: for every code read, attribute it to the CURRENT frame's GFI
+        // ([L-2]>>2) and record min/max code address + samples.  This bounds each module's REAL code
+        // extent from live execution -- the only trustworthy bound (GFT "next codebase" is not: GFI 99's
+        // verified live code lies past the next codebase, so entries are stale or layout is non-contiguous).
+        public long[] ModCensCount; public int[] ModCensMin, ModCensMax; public string[] ModCensSample;
+        public long ModCensFrom = long.MaxValue, ModCensTo = 0;
+        // Opcode-length census: OpLenHist[op, n] = times opcode `op` consumed n IB bytes (n=0 means the next
+        // dispatch was non-sequential, i.e. this op branched/transferred).
+        public long[,] OpLenHist; public long OpLenFrom = long.MaxValue, OpLenTo = 0;
+        private int _opLenPrevOp = -1, _opLenPrevPos = 0, _opLenPrevRH = -1;
+        // Exact dispatch trace: raw (op, R5, RH5, pc16) per dispatch.  Offline the opcode BYTE POSITION is
+        // recovered by matching the op value against the real code bytes, giving EXACT instruction lengths
+        // (the R5-derived census is off: zESC is provably 2 bytes yet measures 3B most of the time).
+        public int[] DispTrOp, DispTrR5, DispTrRH5, DispTrPc16, DispTrTOS, DispTrSp, DispTrU1, DispTrU2, DispTrInt, DispTrMA, DispTrCPi; public int DispTrN;
+        public long DispTrFrom = long.MaxValue, DispTrTo = 0;
         public int[] AddrHist;          // TEMP: microword-address histogram -- names microcode spins
         public List<string> LoopLog;    // TEMP: full-state dump across microcode-spin iterations
         public int LoopAddr = -1, LoopFrom = int.MaxValue;
@@ -563,6 +661,11 @@ namespace D.CP
                                 // re-creates it (DSKf then clamps to 0E at every trap entry -- ProcListXfer:381).
                         _xBus = (ushort)(((_trapCode & 3) << 6) | (((~(int)_ibPtr) & 0x3) << 4)
                             | ((_stkFieldDepth ? (_stackP + 1) : ~_stackP) & 0xf));
+                        if (ProcSwLog != null && InstructionCount >= ProcSwFrom && InstructionCount < ProcSwTo
+                            && ProcSwLog.Count < 400)
+                            ProcSwLog.Add("SAVE <-ErrnIBnStkp CPi=" + InstructionCount + " @" + addr.ToString("X3")
+                                + "  stackP=" + _stackP + "  field(~sp)=0x" + (_xBus & 0xf).ToString("X")
+                                + "  ibPtr=" + (int)_ibPtr + " trap=" + _trapCode);
                         _trapCode = 0;   // read-to-clear
                         break;
                     case 0xB:   // <-RH
@@ -615,6 +718,23 @@ namespace D.CP
                 invertPc16 = true;
             }
 
+            if (UwDumpLog != null && UwDumpLog.Count < 40
+                && (addr == UwDumpA || addr == UwDumpB || addr == UwDumpC))
+            {
+                UwDumpLog.Add("uw @" + addr.ToString("X3") + " raw=0x" + mi.Word.ToString("X12")
+                    + "  rA=" + mi.rA.ToString("X") + " rB=" + mi.rB.ToString("X")
+                    + " fSfZ=" + (int)mi.fSfZ + " fSfY=" + (int)mi.fSfY
+                    + " fX=" + ((int)mi.fX).ToString("X") + " fY=" + mi.fY.ToString("X")
+                    + " fZ=" + mi.fZ.ToString("X")
+                    + " | UAddress=(rA<<4)|fZ=0x" + mi.UAddress.ToString("X2")
+                    + "  alt=(fZ<<4)|rA=0x" + (((mi.fZ << 4) | mi.rA)).ToString("X2")
+                    + "  SURead=" + (mi.SURead ? 1 : 0) + " SUWrite=" + (mi.SUWrite ? 1 : 0)
+                    + " stackP=" + _stackP + " CPi=" + InstructionCount
+                    + " | " + mi.Disassemble(-1));
+            }
+            if (UAddrHist != null && (mi.SURead || mi.SUWrite) && (int)mi.fSfZ >= 2
+                && InstructionCount >= UAddrFrom && InstructionCount < UAddrTo)
+                UAddrHist[mi.UAddress & 0xFF]++;
             if (mi.SURead)
             {
                 switch ((int)mi.fSfZ)
@@ -641,7 +761,51 @@ namespace D.CP
                 // ucode consumes the raw map entry two ways: translation loads it straight into rhRx/Rx and
                 // the real page falls out of the register nibble/byte routing (map fmt |rp[5-12]|r|d|w|rp[0-4]|),
                 // GetMapFlags LRot12's out the flag bits.  A pre-decoded <-MD re-mangles it -> R5=EEEE / MP-0200.
-                _xBus = ReadWord(_mar);
+                if (_ioRefPending) { _xBus = Pit8254Read(); _ioRefPending = false; }
+                else _xBus = ReadWord(_mar);
+                if (WalkRdLog != null && InstructionCount >= WalkRdFrom && InstructionCount < WalkRdTo
+                    && _mar >= 0x40000 && WalkRdLog.Count < 4000)
+                {
+                    // Spectator gate: capture ONLY while the germ's current frame is GFI 109 (Signals =
+                    // SignalHandler/CheckCatch).  current GFI = [L-2]>>2 (the local frame's global link).
+                    // Tag reads by target: low-MDS 0x781xx = AllocationVector (IGNORE - the allocator
+                    // masquerade filter); 0x78xxx-0x79xxx = frame words ([F-1]=ReadPC,[F-3]=walk step);
+                    // else = codebase (zCATCH scan / enable intervals).
+                    int Lr = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                    int curGFI = (Lr > 0x100) ? (ReadWord(Lr - 2) >> 2) : -1;
+                    if (WalkRdGfi < 0 || curGFI == WalkRdGfi)   // WalkRdGfi<0 = log every frame (no GFI gate)
+                    {
+                        string tg = (_mar >= 0x78100 && _mar <= 0x781FF) ? "AV" :
+                                    ((_mar >= 0x78000 && _mar <= 0x7A000) ? "FRM" : "COD");
+                        WalkRdLog.Add("CPi=" + InstructionCount + " @" + addr.ToString("X3") + " " + tg
+                            + " mar=0x" + _mar.ToString("X5") + " =0x" + _xBus.ToString("X4")
+                            + " L=0x" + Lr.ToString("X5") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X"));
+                    }
+                }
+                // Module code-region census (env DOVE_MODCENS_FROM/TO).  Excludes the VM-map array
+                // (0x40000-0x41FFF) and the frame heap (0x78000-0x7A000) so only real code counts.
+                if (ModCensCount != null && InstructionCount >= ModCensFrom && InstructionCount < ModCensTo
+                    && _mar >= 0x42000 && !(_mar >= 0x78000 && _mar <= 0x7A000))
+                {
+                    int Lc = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                    if (Lc > 0x1000)
+                    {
+                        int gw = ReadWord(Lc - 2);
+                        if ((gw & 3) == 0)
+                        {
+                            int gi = gw >> 2;
+                            if (gi > 0 && gi < 256)
+                            {
+                                ModCensCount[gi]++;
+                                if (_mar < ModCensMin[gi]) ModCensMin[gi] = _mar;
+                                if (_mar > ModCensMax[gi]) ModCensMax[gi] = _mar;
+                                if (ModCensSample[gi] == null) ModCensSample[gi] = "";
+                                if (ModCensSample[gi].Length < 70)
+                                    ModCensSample[gi] += " 0x" + _mar.ToString("X5") + "=" + _xBus.ToString("X4");
+                            }
+                        }
+                    }
+                }
                 // MP-940 stall: histogram the addresses the dominant busy-spin reads (Mesa PC
                 // 0x898F/0x99D7).  The hottest = the cell Pilot's Store polls forever -> names the gate.
                 if (PollAddrHist != null && InstructionCount > 50000000 && (_lastDispR5 == 0x898F || _lastDispR5 == 0x99D7))
@@ -940,7 +1104,22 @@ namespace D.CP
                     case 2:
                         // MDR<- -- DLion CentralProcessor.cs:664: cancel the store if the PRECEDING MAR<- crossed a
                         // page (the un-carried splice address is wrong; the pageCross branch re-issues it correctly).
-                        if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel)) WriteWord(_mar, _yBus);
+                        if (_ioRefPending) { Pit8254Write(_yBus); _ioRefPending = false; }
+                        else if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel)) WriteWord(_mar, _yBus);
+                        // StashPC watch (env DOVE_STASHWATCH): catch the write that saves GFI 99's PC.
+                        if (StashWatchLog != null && StashWatchLog.Count < 2000
+                            && InstructionCount >= StashWatchFrom && InstructionCount < StashWatchTo
+                            && (_mar == StashWatchAddr || _yBus == StashWatchVal))
+                        {
+                            int Lr = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                            StashWatchLog.Add("CPi=" + InstructionCount + " @" + addr.ToString("X3")
+                                + (_mar == StashWatchAddr ? " [ADDR]" : "") + (_yBus == StashWatchVal ? " [VAL]" : "")
+                                + " mar=0x" + _mar.ToString("X5") + " <-0x" + _yBus.ToString("X4")
+                                + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X")
+                                + " pc16=" + (_pc16 ? 1 : 0)
+                                + " R2=" + _alu.R[2].ToString("X4") + " R6=" + _alu.R[6].ToString("X4")
+                                + " Q=" + _alu.Q.ToString("X4") + " L=0x" + Lr.ToString("X5"));
+                        }
                         if (LinkVecWriteLog != null && LinkVecWriteLog.Count < 200)
                         {
                             // DECISIVE (OQ48): trace the SD-install burst (GermOpsImpl:1099-1102).  SD[sCodeTrap]=SD[7]@real0x4820E
@@ -1099,6 +1278,14 @@ namespace D.CP
                         MesaInterruptRequest = false;
                         Note("ClrMPIntIOP");
                         break;
+                    case 0xC:   // IO<- (Daybreak fYNorm 0xC).  TechRef fY table renders it "IO-"; the
+                                // MDC decodes it into IORef, routing this reference to Mesa-bus I/O
+                                // (the 8254 among them) instead of DRAM.  My decoder previously had
+                                // 0xC = ClrDPRq (a DLion name) and swallowed the reference silently,
+                                // so aRRIT's reads fell through to DRAM and returned zeros.
+                        if (Io8254Enabled) { _ioRefPending = true; _ioPort = _rh[mi.rB] & 0xFF; IoRefCount++; }
+                        Note("IO<-");
+                        break;
                     case 0x2:   // ClrIntErr: clear the error/trap latch (the trap code the germ
                                 // reads via <-IntStat X[8-9] / <-ErrnIBnStkP).  Was a no-op, which
                                 // left the InitTrap code (1) stuck set forever -> phantom trap.
@@ -1106,10 +1293,18 @@ namespace D.CP
                         Note("ClrIntErr");
                         break;
                     case 0xE:   // ClrIE: disable interrupts (Daybreak fYNorm 0xE, TmMacroTables:274).
+                        if (IeLog != null && InstructionCount >= IeFrom && InstructionCount < IeTo && IeLog.Count < 600)
+                            IeLog.Add("ClrIE  CPi=" + InstructionCount + " @" + addr.ToString("X3")
+                                + "  IE " + (_ie ? 1 : 0) + " -> 0"
+                                + "  R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X2"));
                         _ie = false;
                         Note("ClrIE");
                         break;
                     case 0xF:   // SetIE: enable interrupts (Daybreak fYNorm 0xF, TmMacroTables:276).
+                        if (IeLog != null && InstructionCount >= IeFrom && InstructionCount < IeTo && IeLog.Count < 600)
+                            IeLog.Add("SetIE  CPi=" + InstructionCount + " @" + addr.ToString("X3")
+                                + "  IE " + (_ie ? 1 : 0) + " -> 1"
+                                + "  R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X2"));
                         _ie = true; SetIeCount++;
                         Note("SetIE");
                         break;
@@ -1213,6 +1408,51 @@ namespace D.CP
                                 // MP-940: capture the ESC alpha for a zESC dispatch (byte after 0xF8 = _ib[ibPtr&1]).
                                 _lastDispAlpha = (_ibFront == 0xF8) ? _ib[((int)_ibPtr) & 0x1] : -1;
                                 _lastDispIb0 = _ib[0]; _lastDispIb1 = _ib[1]; _lastDispIbPtr = (int)_ibPtr;
+                                // Dispatch ring: cheap int-array capture of (op + pending pair) at THIS dispatch,
+                                // so a KFCB dump can replay the raise-site byte stream incl. straddled operands.
+                                if (DispRingCPi != null && InstructionCount >= KfcbLogFrom && InstructionCount < KfcbLogTo)
+                                {
+                                    int di = DispRingPos & 63;
+                                    DispRingCPi[di] = (int)InstructionCount;
+                                    DispRingOp[di] = _ibFront;
+                                    DispRingIb[di] = (_ib[0] << 8) | _ib[1];
+                                    DispRingPtr[di] = (int)_ibPtr;
+                                    DispRingR5[di] = _alu.R[5];
+                                    DispRingRH5[di] = _rh[5];
+                                    DispRingPos++;
+                                }
+                                if (DispTrOp != null && InstructionCount >= DispTrFrom && InstructionCount < DispTrTo
+                                    && DispTrN < DispTrOp.Length)
+                                {
+                                    DispTrOp[DispTrN] = _ibFront; DispTrR5[DispTrN] = _alu.R[5];
+                                    DispTrRH5[DispTrN] = _rh[5]; DispTrPc16[DispTrN] = _pc16 ? 1 : 0;
+                                    // stack state feeding this dispatch -- for a conditional branch this IS its input
+                                    DispTrTOS[DispTrN] = _alu.R[0]; DispTrSp[DispTrN] = _stackP;
+                                    int sp1 = _stackP - 1, sp2 = _stackP - 2;
+                                    DispTrU1[DispTrN] = (sp1 >= 0 && sp1 < _u.Length) ? _u[sp1] : -1;
+                                    DispTrU2[DispTrN] = (sp2 >= 0 && sp2 < _u.Length) ? _u[sp2] : -1;
+                                    // interrupt state feeding IBDisp: MesaIntBr = (_mInt||_timerInt) && _ie
+                                    DispTrInt[DispTrN] = (_mInt ? 1 : 0) | (_timerInt ? 2 : 0) | (_ie ? 4 : 0)
+                                                       | (((_mInt || _timerInt) && _ie) ? 8 : 0);
+                                    DispTrMA[DispTrN] = (int)_mIntAsserts;
+                                    DispTrCPi[DispTrN] = (int)InstructionCount;
+                                    DispTrN++;
+                                }
+                                // Opcode-LENGTH census (env DOVE_OPLEN_FROM/TO): byte position of this dispatch is
+                                // {R5,pc16} => 2*R5 + pc16.  The delta to the NEXT dispatch = how many IB bytes this
+                                // opcode consumed.  Gives an empirical "opcode -> length" table to diff against the
+                                // ISA: any opcode whose length is wrong (or bimodal) is a front-end decode bug.
+                                if (OpLenHist != null && InstructionCount >= OpLenFrom && InstructionCount < OpLenTo)
+                                {
+                                    int pos = (_alu.R[5] << 1) | (_pc16 ? 1 : 0);
+                                    if (_opLenPrevOp >= 0 && _rh[5] == _opLenPrevRH)
+                                    {
+                                        int d = pos - _opLenPrevPos;
+                                        if (d >= 1 && d <= 4) OpLenHist[_opLenPrevOp, d]++;
+                                        else if (d != 0) OpLenHist[_opLenPrevOp, 0]++;   // non-sequential (branch/xfer)
+                                    }
+                                    _opLenPrevOp = _ibFront; _opLenPrevPos = pos; _opLenPrevRH = _rh[5];
+                                }
                                 _ab0Run = 0;   // a dispatch happened -> reset the @AB0-burst counter
                                 _niaModifier |= _ibFront;
                                 _niaModType = 1;   // IBDispatch
@@ -1268,6 +1508,119 @@ namespace D.CP
                                     WrmpLog.Add("MP <- " + _alu.R[0].ToString("X4") + " (dec " + _alu.R[0]
                                         + ")  @CPi " + InstructionCount + " @" + addr.ToString("X3")
                                         + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " sp=" + _stackP);
+                                // ERROR-RAISE capture: zKFCB (0xF0) with an error alpha = SD[sError/sErrorList/
+                                // sReturnError/sReturnErrorList].  At IBDisp the args are on the stack BEFORE the
+                                // raise runs: TOS(R0) + _u[sp-1..] hold the DESC'd signal descriptor {taggedGFI,index}
+                                // and the ErrorType ordinal.  The FIRST raise in the storage window is the INNER root
+                                // (inline-constant ordinal), the re-raise wrapper (GFI 120) fires after it.
+                                // The KFCB alpha straddles the IB word boundary, so we can't filter by it here;
+                                // log EVERY zKFCB (0xF0) in the [From,To] window and identify error raises by the
+                                // stack (a signal descriptor {taggedGFI 0x01xx, index} + the ErrorType arg).
+                                if (KfcbLog != null && _ibFront == 0xF0 && InstructionCount >= KfcbLogFrom
+                                    && InstructionCount < KfcbLogTo && KfcbLog.Count < 500)
+                                {
+                                    string stk = "";
+                                    for (int k = 1; k <= 6; k++)
+                                        stk += (_stackP - k >= 0 ? _u[_stackP - k].ToString("X4") : "----") + ",";
+                                    KfcbLog.Add("KFCB CPi=" + InstructionCount + " R5=" + _alu.R[5].ToString("X4")
+                                        + " RH5=" + _rh[5].ToString("X") + " sp=" + _stackP
+                                        + " TOS=" + _alu.R[0].ToString("X4") + " stk-1..-6=" + stk
+                                        + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2")
+                                        + "] ptr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4")
+                                        // signal-walk anchor: L (=d.raiser = current local frame) + pc16 + all links
+                                        + "  L=" + (((_rh[3] & 0xF) << 16) | _alu.R[3]).ToString("X5")
+                                        + " rhL:L=" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4")
+                                        + " GF=" + (((_rh[2] & 0xF) << 16) | _alu.R[2]).ToString("X5")
+                                        + " pc16=" + (_pc16 ? 1 : 0)
+                                        + " links=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 8), i => _link[i].ToString("X"))));
+                                    // Read the LIVE frame words at L (=d.raiser) via the VM map -- the STOP memdump's
+                                    // frame heap is reused (all-zero), so the return-link/PC must be captured now.
+                                    // ReadWord(w) reads phys byte w<<1; VMmap word for vp is at phys 0x80000 -> word
+                                    // 0x40000+vp; frame word = rp*256 + (vw&0xFF), rp=((mw&0x1F)<<8)|(mw>>8).
+                                    if (ReadWord != null)
+                                    {
+                                        // Full SignalHandler+CheckCatch emulation with the CERTIFIED GetFrame primitive
+                                        // (FastXfer.mc:345-350): GetFrame(link) = SINGLE MDS translation, real =
+                                        // map(0x30000 + (link&~3)); tag=link&3 (frame0/proc1/indirect2/rep3).  Frame
+                                        // header: [F-1]=PC, [F-2]=globalLink(=GFI<<2), [F-3]=returnLink.  CheckCatch:
+                                        // codebase=GFT[GFI]; catchCode=cb[3]; count=cb[cc/2]; EnableTable=cb+cc/2+1+count;
+                                        // items stride-3 {start,length,idx}; catch iff (PC-1) in [start,start+length).
+                                        System.Func<int, int> mapReal = vw => {
+                                            int vp = (vw >> 8) & 0x1FFF; int mw = ReadWord(0x40000 + vp);
+                                            int rp = ((mw & 0x1F) << 8) | (mw >> 8); return rp * 256 + (vw & 0xFF);
+                                        };
+                                        System.Func<int, int> vrd = vw => ReadWord(mapReal(vw));   // read a virtual word
+                                        // CheckCatch Part 1: CodeBytes[cb][bytePC] -- inline zCATCH scan.  Big-endian:
+                                        // even byte = hi (w>>8), odd = lo (w&0xFF).  cb is a word base, bpc a byte offset.
+                                        System.Func<int, int, int> cbyte = (cbase, bpc) => {
+                                            int w = vrd(cbase + ((bpc & 0x1FFFF) >> 1));
+                                            return ((bpc & 1) != 0) ? (w & 0xFF) : ((w >> 8) & 0xFF);
+                                        };
+                                        int raiserReal = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                                        int link = ReadWord(raiserReal - 3);   // ReadReturnLink[raiser] -> start at caller
+                                        string walk = "";
+                                        for (int depth = 0; depth < 14; depth++)
+                                        {
+                                            int tag = link & 3;
+                                            if (tag == 2) {
+                                                // indirect ShortControlLink -> points to a 2-word LONG ControlLink; the
+                                                // microcode keeps Q=link (tag intact) and reads with Q+-1 arithmetic, NOT masked.
+                                                // Read Q-1/Q/Q+1 to pin the offset, then re-dispatch on the ControlLink's w0 tag.
+                                                int qm1 = vrd(0x30000 + link - 1), q0 = vrd(0x30000 + link), qp1 = vrd(0x30000 + link + 1);
+                                                walk += "\n      [d" + depth + "] link=" + link.ToString("X4") + " INDIRECT MDS[Q-1,Q,Q+1]="
+                                                      + qm1.ToString("X4") + "," + q0.ToString("X4") + "," + qp1.ToString("X4");
+                                                // re-dispatch: pick the word that looks like a valid frame link (tag-0, nonzero handle)
+                                                int nx = (qp1 != 0 && (qp1 & 3) == 0) ? qp1 : ((q0 != 0 && (q0 & 3) == 0) ? q0 : qm1);
+                                                link = nx; continue;
+                                            }
+                                            if (tag != 0) { walk += "\n      [d" + depth + "] link=" + link.ToString("X4") + " tag=" + tag + " (non-frame STOP)"; break; }
+                                            if ((link & 0xFFFC) == 0) { walk += "\n      [d" + depth + "] NULL link -> top of stack, no catch"; break; }
+                                            int fReal = mapReal(0x30000 + (link & 0xFFFC));
+                                            int pc = ReadWord(fReal - 1), gl = ReadWord(fReal - 2), rl = ReadWord(fReal - 3);
+                                            int gfi = gl >> 2, gvw = 0x20000 + 4 * gfi;
+                                            int cb = ((vrd(gvw + 3) << 16) | vrd(gvw + 2)) & 0x1FFFFF;
+                                            int cc = vrd(cb + 3), pcm1 = (pc - 1) & 0xFFFF;
+                                            // Part 1 data: the byte AT the return PC (candidate zCATCH) + its operand (catchIndex).
+                                            int bPC = cbyte(cb, pc), bPC1 = cbyte(cb, pc + 1), bPCm1 = cbyte(cb, pcm1);
+                                            string res;
+                                            if (cc == 0) res = "cc=0 no-catch-table";
+                                            else {
+                                                int evoff = cc >> 1, count = vrd(cb + evoff), et = cb + evoff + 1 + count, n = vrd(et);
+                                                res = "cc=" + cc.ToString("X") + " n=" + n.ToString("X");
+                                                bool got = false;
+                                                for (int i = 0; i < n && i < 40; i++)
+                                                {
+                                                    int st = vrd(et + 1 + i * 3), ln = vrd(et + 2 + i * 3);
+                                                    if (st <= pcm1 && pcm1 < st + ln) { res += " *** CATCH @[" + st.ToString("X") + "," + (st + ln).ToString("X") + ") idx=" + vrd(et + 3 + i * 3).ToString("X"); got = true; break; }
+                                                }
+                                                if (!got) { res += " NO-MATCH intervals="; for (int i = 0; i < n && i < 8; i++) res += "[" + vrd(et + 1 + i * 3).ToString("X") + "," + (vrd(et + 1 + i * 3) + vrd(et + 2 + i * 3)).ToString("X") + ")"; }
+                                            }
+                                            walk += "\n      [d" + depth + "] link=" + link.ToString("X4") + " F=0x" + fReal.ToString("X5")
+                                                  + " GFI=" + gfi + " PC=" + pc.ToString("X4") + " PC-1=" + pcm1.ToString("X4") + " cb=0x" + cb.ToString("X")
+                                                  + " code[PC-1,PC,PC+1]=" + bPCm1.ToString("X2") + "," + bPC.ToString("X2") + "," + bPC1.ToString("X2") + " " + res;
+                                            if (res.Contains("CATCH")) break;
+                                            link = rl;
+                                        }
+                                        KfcbLog.Add("    SIGWALK+CHECKCATCH (GetFrame=single MDS xlate):" + walk);
+                                    }
+                                    // Replay the dispatch ring (byte stream leading INTO this f0) so the inline
+                                    // 9a-XX ordinal at the raise site is directly readable, no stack-slot guessing.
+                                    if (DispRingCPi != null)
+                                    {
+                                        int start = DispRingPos - 40; if (start < 0) start = 0;
+                                        for (int r = start; r < DispRingPos; r++)
+                                        {
+                                            int di = r & 63;
+                                            KfcbLog.Add("    disp CPi=" + DispRingCPi[di]
+                                                + " op=" + DispRingOp[di].ToString("X2")
+                                                + " ib=[" + ((DispRingIb[di] >> 8) & 0xFF).ToString("X2") + ","
+                                                + (DispRingIb[di] & 0xFF).ToString("X2") + "]"
+                                                + " ptr=" + DispRingPtr[di]
+                                                + " R5=" + DispRingR5[di].ToString("X4")
+                                                + " RH5=" + DispRingRH5[di].ToString("X2"));
+                                        }
+                                    }
+                                }
                                 if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
                                     IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " IBDisp dispatched " + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " -> advance front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]");
                                 _ibFront = _ib[((int)_ibPtr) & 0x1];
@@ -1406,12 +1759,17 @@ namespace D.CP
             // `STATE <- d.state` ("Must be last"), where state is a PrincOps.StateVector carrying
             // stk[0..14) AND stkptr -- "holds args of called procedure".  If STATE<- doesn't restore stkptr,
             // the germ resumes on a pointer nobody set.  Log every non-pop/push write to _stackP.
+            int _spBefore = _stackP;
             if (mi.LoadStackP)
             {
                 if (StkTrapLog != null && StkTrapLog.Count < 40)
                     StkTrapLog.Add("--- stackP<- @" + addr.ToString("X3") + " CPi=" + InstructionCount
                         + "   sp " + _stackP + " -> " + (_yBus & 0xf) + "   (Ybus=" + _yBus.ToString("X4") + ")   "
                         + mi.Disassemble(-1));
+                if (ProcSwLog != null && InstructionCount >= ProcSwFrom && InstructionCount < ProcSwTo
+                    && ProcSwLog.Count < 400)
+                    ProcSwLog.Add("RESTORE stackP<-  CPi=" + InstructionCount + " @" + addr.ToString("X3")
+                        + "  sp " + _stackP + " -> " + (_yBus & 0xf) + "   (Ybus=0x" + _yBus.ToString("X4") + ")");
                 _stackP = (_yBus & 0xf);
             }
 
@@ -1474,6 +1832,39 @@ namespace D.CP
                 else if (mi.Pop) _stackP = (_stackP - 1) & 0xf;
             }
 
+            // ALSO log StackOperation microwords that moved NOTHING because StackTest != None
+            // (my decoder treats those combined rows as non-modifying over/underflow TESTS).  If
+            // Daybreak expects motion on any of them, the missing delta is invisible to a
+            // changed-sp-only trace -- this is where a hidden +/-1 would hide.
+            if (SpTraceLog != null && _stackP == _spBefore && mi.StackOperation
+                && mi.StackTest != StackTestType.None
+                && InstructionCount >= SpTraceFrom && InstructionCount < SpTraceTo
+                && SpTraceLog.Count < 3000)
+            {
+                SpTraceLog.Add("NOMOVE @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                    + "  sp " + _stackP + " (unchanged)  test=" + mi.StackTest
+                    + " push=" + (mi.Push ? 1 : 0) + " pop=" + (mi.Pop ? 1 : 0)
+                    + " fxPop=" + (mi.FxPop ? 1 : 0) + " fzPop=" + (mi.FzPop ? 1 : 0)
+                    + " dblPop=" + (mi.DoublePop ? 1 : 0)
+                    + " | " + mi.Disassemble(-1));
+            }
+            if (SpTraceLog != null && _stackP != _spBefore
+                && InstructionCount >= SpTraceFrom && InstructionCount < SpTraceTo
+                && SpTraceLog.Count < 3000)
+            {
+                string how = mi.LoadStackP ? "stackP<-" :
+                             (mi.Push ? "PUSH" : (mi.DoublePop ? "DOUBLEPOP" : (mi.Pop ? "POP" : "?")));
+                SpTraceLog.Add("uw @" + addr.ToString("X3") + " CPi=" + InstructionCount
+                    + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X2")
+                    + " op=" + _ibFront.ToString("X2")
+                    + "  sp " + _spBefore + " -> " + _stackP + "  [" + how + "]"
+                    + " stkOp=" + (mi.StackOperation ? 1 : 0) + " test=" + mi.StackTest
+                    + " push=" + (mi.Push ? 1 : 0) + " pop=" + (mi.Pop ? 1 : 0)
+                    + " fxPop=" + (mi.FxPop ? 1 : 0) + " fzPop=" + (mi.FzPop ? 1 : 0)
+                    + " dblPop=" + (mi.DoublePop ? 1 : 0) + " suW=" + (mi.SUWrite ? 1 : 0)
+                    + " | " + mi.Disassemble(-1));
+            }
+
             // ---- Next instruction address ----
             // The WCS stores INIA's low nibble COMPLEMENTED (TechRef Fig 2.6); the true
             // successor is (rawINIA XOR 0x00F).  How the modifier merges depends on the
@@ -1529,6 +1920,8 @@ namespace D.CP
             // (rInt bit 15) every TimerPeriod instructions.  This is the Pilot scheduler tick the
             // germ's waitForInterrupt idles on; without it MesaIntBr never fires and @666 spins.
             if (++_timerCounter >= TimerPeriod) { _timerCounter = 0; _timerInt = true; TimerFireCount++; }
+            // 8254 channels 1+2: ~12.8 CP instructions per count (62.5 kHz), counting DOWN.
+            if (Io8254Enabled) { _pitAccum += 10; if (_pitAccum >= 128) { _pitAccum -= 128; _pit32--; } }
 
             // Bank<- takes effect one instruction late: the write at N leaves N+1 still
             // fetching the old bank, N+2 the new one.

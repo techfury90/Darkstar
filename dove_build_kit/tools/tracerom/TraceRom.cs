@@ -91,6 +91,7 @@ namespace DoveTrace
         static System.Collections.Generic.List<string> _notifyLog = new System.Collections.Generic.List<string>();
         static System.Collections.Generic.Dictionary<int,long> _notifyIdHist = new System.Collections.Generic.Dictionary<int,long>();
         static int _notify6fMP = -1;
+        static System.IO.StreamWriter _ipw; static long _ipEvery = 1000;
         static System.Collections.Generic.Dictionary<int,int[]> _wnbTrack = new System.Collections.Generic.Dictionary<int,int[]>();
         // R5 (Mesa PC) histogram deep in the stall (CPi>50M) -- spin-loop vs. varied (blocked) detector.
         static System.Collections.Generic.Dictionary<int, long> _r5Hist = new System.Collections.Generic.Dictionary<int, long>();
@@ -102,6 +103,10 @@ namespace DoveTrace
         static System.Collections.Generic.Dictionary<int, long> _spinWr = new System.Collections.Generic.Dictionary<int, long>();
         static System.Collections.Generic.Dictionary<int, long> _spinPC = new System.Collections.Generic.Dictionary<int, long>();
         static long _spinFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_SPIN_FROM") ?? "55000000");
+        // MP-935 cCantTeledebug: catch WHO writes Boot.pRequest.action=teledebug.  pRequest @ mds0 vword 0x3A0
+        // -> action=vword 0x3A1 -> phys 0x90742 -> CP word 0x483A1 (map[vp0x003]=0x83C4->rp0x483, may shift; watch
+        // the block by phys since the germ struct is fixed).  Log every write to the request block with the frame.
+        static System.Collections.Generic.List<string> _preqWrites = new System.Collections.Generic.List<string>();
         // BLOCK-POINT hunt: last CP-instruction-count each Mesa macro-PC ((RH5<<16)|R5) was executed.
         // The boot process's PCs stop being seen at the block (~CPi 50M); the idle/scheduler PCs run
         // to end-of-run (~CPi 150M).  So the boot-process PC with the highest lastCPi below the idle
@@ -191,6 +196,62 @@ namespace DoveTrace
             _cp.IntStatSpinLog = new List<string>();   // <-IntStat cadence in the spin (timer-driven?)
             _cp.EscLog = new List<string>();
             _cp.WrmpLog = new List<string>();      // every @WRMP (zESC alpha 0x77) = THE MP-post chokepoint
+            _cp.KfcbLog = new List<string>();      // error-raise (zKFCB error alphas) capture -- the inner root error
+            _cp.KfcbLogFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_KFCB_FROM") ?? "45000000");
+            _cp.KfcbLogTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_KFCB_TO") ?? "9223372036854775807");
+            if (Environment.GetEnvironmentVariable("DOVE_DISPRING") == "1")
+            {
+                _cp.DispRingCPi = new int[64]; _cp.DispRingOp = new int[64]; _cp.DispRingIb = new int[64];
+                _cp.DispRingPtr = new int[64]; _cp.DispRingR5 = new int[64]; _cp.DispRingRH5 = new int[64];
+            }
+            { var wf = Environment.GetEnvironmentVariable("DOVE_WALKRD_FROM");
+              if (!string.IsNullOrEmpty(wf)) { _cp.WalkRdLog = new List<string>(); _cp.WalkRdFrom = long.Parse(wf);
+                  _cp.WalkRdTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_WALKRD_TO") ?? "9223372036854775807");
+                  _cp.WalkRdGfi = int.Parse(Environment.GetEnvironmentVariable("DOVE_WALKRD_GFI") ?? "109"); } }
+            { var mc = Environment.GetEnvironmentVariable("DOVE_MODCENS_FROM");
+              if (!string.IsNullOrEmpty(mc)) {
+                  _cp.ModCensCount = new long[256]; _cp.ModCensMin = new int[256]; _cp.ModCensMax = new int[256];
+                  _cp.ModCensSample = new string[256];
+                  for (int i = 0; i < 256; i++) { _cp.ModCensMin[i] = int.MaxValue; _cp.ModCensMax[i] = 0; }
+                  _cp.ModCensFrom = long.Parse(mc);
+                  _cp.ModCensTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_MODCENS_TO") ?? "9223372036854775807"); } }
+            { var dt = Environment.GetEnvironmentVariable("DOVE_DISPTR_FROM");
+              if (!string.IsNullOrEmpty(dt)) {
+                  int n = int.Parse(Environment.GetEnvironmentVariable("DOVE_DISPTR_N") ?? "20000");
+                  _cp.DispTrOp = new int[n]; _cp.DispTrR5 = new int[n]; _cp.DispTrRH5 = new int[n]; _cp.DispTrPc16 = new int[n];
+                  _cp.DispTrTOS = new int[n]; _cp.DispTrSp = new int[n]; _cp.DispTrU1 = new int[n]; _cp.DispTrU2 = new int[n];
+                  _cp.DispTrInt = new int[n]; _cp.DispTrMA = new int[n]; _cp.DispTrCPi = new int[n];
+                  _cp.DispTrFrom = long.Parse(dt);
+                  _cp.DispTrTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_DISPTR_TO") ?? "9223372036854775807"); } }
+            { var ol = Environment.GetEnvironmentVariable("DOVE_OPLEN_FROM");
+              if (!string.IsNullOrEmpty(ol)) { _cp.OpLenHist = new long[256,5]; _cp.OpLenFrom = long.Parse(ol);
+                  _cp.OpLenTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_OPLEN_TO") ?? "9223372036854775807"); } }
+            { var uh = Environment.GetEnvironmentVariable("DOVE_UADDR_FROM");
+              if (!string.IsNullOrEmpty(uh)) { _cp.UAddrHist = new long[256]; _cp.UAddrFrom = long.Parse(uh);
+                  _cp.UAddrTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_UADDR_TO") ?? "9223372036854775807"); } }
+            // Default ON (see DoveCentralProcessor); DOVE_NO_IO8254=1 restores the pre-fix behaviour for A/B.
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_NO_IO8254"))) _cp.Io8254Enabled = false;
+            { var ua = Environment.GetEnvironmentVariable("DOVE_UWDUMP");
+              if (!string.IsNullOrEmpty(ua)) { _cp.UwDumpLog = new List<string>();
+                  var parts = ua.Split(',');
+                  if (parts.Length > 0) _cp.UwDumpA = Convert.ToInt32(parts[0], 16);
+                  if (parts.Length > 1) _cp.UwDumpB = Convert.ToInt32(parts[1], 16);
+                  if (parts.Length > 2) _cp.UwDumpC = Convert.ToInt32(parts[2], 16); } }
+            { var ie = Environment.GetEnvironmentVariable("DOVE_IE_FROM");
+              if (!string.IsNullOrEmpty(ie)) { _cp.IeLog = new List<string>(); _cp.IeFrom = long.Parse(ie);
+                  _cp.IeTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_IE_TO") ?? "9223372036854775807"); } }
+            { var st = Environment.GetEnvironmentVariable("DOVE_SPTRACE_FROM");
+              if (!string.IsNullOrEmpty(st)) { _cp.SpTraceLog = new List<string>(); _cp.SpTraceFrom = long.Parse(st);
+                  _cp.SpTraceTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_SPTRACE_TO") ?? "9223372036854775807"); } }
+            { var ps = Environment.GetEnvironmentVariable("DOVE_PROCSW_FROM");
+              if (!string.IsNullOrEmpty(ps)) { _cp.ProcSwLog = new List<string>(); _cp.ProcSwFrom = long.Parse(ps);
+                  _cp.ProcSwTo = long.Parse(Environment.GetEnvironmentVariable("DOVE_PROCSW_TO") ?? "9223372036854775807"); } }
+            { var sw = Environment.GetEnvironmentVariable("DOVE_STASHWATCH");
+              if (!string.IsNullOrEmpty(sw)) { _cp.StashWatchLog = new List<string>();
+                  _cp.StashWatchAddr = Convert.ToInt32(Environment.GetEnvironmentVariable("DOVE_STASHWATCH_ADDR") ?? "0x788EB", 16);
+                  _cp.StashWatchVal  = Convert.ToInt32(Environment.GetEnvironmentVariable("DOVE_STASHWATCH_VAL")  ?? "0x5CA3", 16);
+                  _cp.StashWatchFrom = long.Parse(Environment.GetEnvironmentVariable("DOVE_STASHWATCH_FROM") ?? "0");
+                  _cp.StashWatchTo   = long.Parse(Environment.GetEnvironmentVariable("DOVE_STASHWATCH_TO") ?? "9223372036854775807"); } }
             _cp.LoopLog = new List<string>();
             _cp.AddrHist = new int[4096];
             _cp.HistFrom = int.Parse(Environment.GetEnvironmentVariable("DOVE_HIST_FROM") ?? "2147483647");
@@ -260,6 +321,16 @@ namespace DoveTrace
             _cp.WriteWord = (a, v) => { int b = (a << 1) & ramMask; sysRam[b] = (byte)(v >> 8); sysRam[(b + 1) & ramMask] = (byte)v;
                 // MP-940 SPIN CAPTURE (write side): the spin should write ~nothing; anything here is scheduler/other.
                 if (_cp.InstructionCount > _spinFrom) { long sc; _spinWr.TryGetValue(a, out sc); _spinWr[a] = sc + 1; }
+                // MP-935: writes to the Boot.pRequest block (phys 0x90740..0x90764 = CP words 0x483A0..0x483B2).
+                if (a >= 0x483A0 && a <= 0x483B2 && _preqWrites.Count < 80) {
+                    int Ld=((_cp._lastDispRH3&0x1F)<<16)|_cp._lastDispR3; int gl=0;
+                    if (Ld>=2){ int pb=((Ld-2)<<1)&ramMask; gl=(sysRam[pb]<<8)|sysRam[pb+1]; }
+                    int fld=a-0x483A0;
+                    string fn = fld==0?"basicVer":fld==1?"action":fld==0x0D?"extVer":fld==0x0E?"switches":(fld>=2&&fld<=0x0C)?"location":"?";
+                    _preqWrites.Add("@CPi " + _cp.InstructionCount + " word 0x" + a.ToString("X5") + " (pReq+0x" + fld.ToString("X2") + "=" + fn
+                        + ") <- 0x" + (v&0xFFFF).ToString("X4") + (a==0x483A1?(" ACTION=" + ((v&0xFFFF)==3?"teledebug":(v&0xFFFF)==4?"noOp":(v&0xFFFF)==0?"inLoad":(v&0xFFFF).ToString("X4"))):"")
+                        + "  writer GFI=" + (gl>>2) + " R5=0x" + _cp._lastDispR5.ToString("X4") + " RH5=0x" + _cp._lastDispRH5.ToString("X2"));
+                }
                 // BLOCK-POINT (write side): bucket CP writes by 256-byte page -> lastCPi + count.
                 // Boot-process structure writes stop when it blocks; scheduler PDA writes run to end.
                 // The highest-lastCPi page that STOPPED before end-of-run = the last structure written
@@ -440,9 +511,13 @@ namespace DoveTrace
                 0xFE4AD }); // Recalibrate loop
             var watchHit = new HashSet<int>();
 
+            { var itf = Environment.GetEnvironmentVariable("DOVE_IPTRACE");
+              if (!string.IsNullOrEmpty(itf)) { _ipw = new System.IO.StreamWriter(itf);
+                  _ipEvery = long.Parse(Environment.GetEnvironmentVariable("DOVE_IPTRACE_EVERY") ?? "1000"); } }
             while (instr < BUDGET)
             {
                 int addr = _cpu.InstructionAddress;
+                if (_ipw != null && (instr % _ipEvery) == 0) _ipw.WriteLine(instr + " " + addr.ToString("X5"));
                 _dbgInstr = instr;
                 _mem.HostClock = instr;
                 _mem.CurrentPC = addr;
@@ -830,6 +905,8 @@ namespace DoveTrace
               Console.WriteLine("   conditionWORD=0x" + cwR.ToString("X4") + "  -> wakeup(0x0001)=" + (cwR&1) + "  tail(0x1FF8)>>3=" + ((cwR>>3)&0x3FF) + "  abortable(0x0002)=" + ((cwR>>1)&1));
               Console.WriteLine("   UvQ1Hi(U42)=0x" + u[0x42].ToString("X4") + " UvQ1(U43)=0x" + u[0x43].ToString("X4") + "  (monitor lock VA)");
               Console.WriteLine("   uWP(U10)=0x" + u[0x10].ToString("X4") + " uWW(U14)=0x" + u[0x14].ToString("X4") + " uWDC(U18)=0x" + u[0x18].ToString("X4")); }
+            Console.WriteLine("=== MP-935 Boot.pRequest WRITES (who fills the teledebug request), " + _preqWrites.Count + " ===");
+            foreach (var l in _preqWrites) Console.WriteLine("   " + l);
             Console.Write("CP function hits: ");
             foreach (var kv in _cp.FuncHits) Console.Write(kv.Key + "=" + kv.Value + "  ");
             Console.WriteLine();
@@ -975,6 +1052,85 @@ namespace DoveTrace
             // ONLY place every MP post is visible, in order.  Probing the mp global is structurally blind.
             Console.WriteLine("=== @WRMP (zESC alpha 0x77) -- EVERY maintenance-panel post, ordered (" + _cp.WrmpLog.Count + ") ===");
             foreach (var l in _cp.WrmpLog) Console.WriteLine("   " + l);
+            if (_io.RdcLog != null)
+            {
+                Console.WriteLine("=== RDC ops (DOB completion lines; header-advance + not-found visible) (" + _io.RdcLog.Count + ") ===");
+                foreach (var l in _io.RdcLog) if (l.StartsWith("DOB ")) Console.WriteLine("   " + l);
+            }
+            Console.WriteLine("=== ERROR RAISES (zKFCB error alphas, CPi>=" + _cp.KfcbLogFrom + ") -- FIRST = inner root, then GFI120 re-raise (" + _cp.KfcbLog.Count + ") ===");
+            foreach (var l in _cp.KfcbLog) Console.WriteLine("   " + l);
+            if (_cp.WalkRdLog != null)
+            {
+                Console.WriteLine("=== SignalHandler-walk live <-MD reads (mar>=0x40000, CPi in window) (" + _cp.WalkRdLog.Count + ") ===");
+                foreach (var l in _cp.WalkRdLog) Console.WriteLine("   " + l);
+            }
+            if (_cp.UAddrHist != null)
+            {
+                Console.WriteLine("=== U-address census (Uaddr-mode accesses, addr -> count) ===");
+                for (int i = 0; i < 256; i++)
+                    if (_cp.UAddrHist[i] > 0)
+                        Console.WriteLine("   U" + i.ToString("X2") + " : " + _cp.UAddrHist[i]);
+            }
+            if (_cp.UwDumpLog != null)
+            {
+                Console.WriteLine("=== Raw microword dump (" + _cp.UwDumpLog.Count + ") ===");
+                foreach (var l in _cp.UwDumpLog) Console.WriteLine("   " + l);
+            }
+            if (_cp.IeLog != null)
+            {
+                Console.WriteLine("=== IE provenance (" + _cp.IeLog.Count + ") ===");
+                foreach (var l in _cp.IeLog) Console.WriteLine("   " + l);
+            }
+            if (_cp.SpTraceLog != null)
+            {
+                Console.WriteLine("=== Per-microword sp trace (" + _cp.SpTraceLog.Count + ") ===");
+                foreach (var l in _cp.SpTraceLog) Console.WriteLine("   " + l);
+            }
+            if (_cp.ProcSwLog != null)
+            {
+                Console.WriteLine("=== Process save/restore stkptr watch (" + _cp.ProcSwLog.Count + ") ===");
+                foreach (var l in _cp.ProcSwLog) Console.WriteLine("   " + l);
+            }
+            if (_cp.DispTrOp != null)
+            {
+                Console.WriteLine("=== Dispatch trace (op,R5,RH5,pc16) n=" + _cp.DispTrN + " ===");
+                for (int i = 0; i < _cp.DispTrN; i++)
+                    Console.WriteLine("   D " + _cp.DispTrOp[i].ToString("X2") + " " + _cp.DispTrR5[i].ToString("X4")
+                        + " " + _cp.DispTrRH5[i].ToString("X2") + " " + _cp.DispTrPc16[i]
+                        + " T=" + _cp.DispTrTOS[i].ToString("X4") + " sp=" + _cp.DispTrSp[i]
+                        + " u1=" + _cp.DispTrU1[i].ToString("X4") + " u2=" + _cp.DispTrU2[i].ToString("X4")
+                        + " I=" + _cp.DispTrInt[i] + " ma=" + _cp.DispTrMA[i] + " cpi=" + _cp.DispTrCPi[i]);
+            }
+            if (_cp.OpLenHist != null)
+            {
+                Console.WriteLine("=== Opcode-length census (op: len1/len2/len3/len4/branch) ===");
+                for (int op = 0; op < 256; op++)
+                {
+                    long tot = 0; for (int n = 0; n < 5; n++) tot += _cp.OpLenHist[op, n];
+                    if (tot == 0) continue;
+                    Console.WriteLine("   op " + op.ToString("X2")
+                        + " : 1B=" + _cp.OpLenHist[op,1] + " 2B=" + _cp.OpLenHist[op,2]
+                        + " 3B=" + _cp.OpLenHist[op,3] + " 4B=" + _cp.OpLenHist[op,4]
+                        + " branch=" + _cp.OpLenHist[op,0] + "  total=" + tot);
+                }
+            }
+            if (_cp.ModCensCount != null)
+            {
+                Console.WriteLine("=== Module code-region census (GFI -> live code addr range) ===");
+                for (int g = 0; g < 256; g++)
+                {
+                    if (_cp.ModCensCount[g] == 0) continue;
+                    Console.WriteLine("   GFI " + g + " reads=" + _cp.ModCensCount[g]
+                        + " codeRange=0x" + _cp.ModCensMin[g].ToString("X5") + "-0x" + _cp.ModCensMax[g].ToString("X5")
+                        + " samples:" + _cp.ModCensSample[g]);
+                }
+            }
+            if (_cp.StashWatchLog != null)
+            {
+                Console.WriteLine("=== StashPC watch: writes of val 0x" + _cp.StashWatchVal.ToString("X4")
+                    + " or to addr 0x" + _cp.StashWatchAddr.ToString("X5") + " (" + _cp.StashWatchLog.Count + ") ===");
+                foreach (var l in _cp.StashWatchLog) Console.WriteLine("   " + l);
+            }
             // TechRef Table 2.11 detector.  NOT vectored: microstore 0 is BootTrap (InitDaybreak.mc:19/41)
             // = the boot-button/INIT vector = a full machine re-init.  The FIRST underflow is the wound;
             // everything after it is silent-wrap noise (once one underflow wraps, every sp reading is fiction).

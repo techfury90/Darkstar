@@ -1,0 +1,79 @@
+﻿<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Doovke: the Dove/Daybreak (Xerox 6085) build target.
+  Darkstar.csproj remains the DLion (8010) target; the two share the low-level parts
+  (AM2901, Microinstruction, FloppyDisk) but diverge at the CP, IOP and display, so they
+  are separate executables rather than a runtime switch.
+
+  The compiled set below is exactly the set proven to boot the Offline Diagnostics system,
+  plus the Doovke entry point.  Output goes to bin\Doovke\ / obj\Doovke\ so the two targets
+  never collide in the same folder.
+-->
+<Project ToolsVersion="12.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{7C4F1E2A-9B33-4D51-AE60-2D9E5C71A4B8}</ProjectGuid>
+    <OutputType>Exe</OutputType>
+    <RootNamespace>D</RootNamespace>
+    <AssemblyName>Doovke</AssemblyName>
+    <TargetFrameworkVersion>v4.8</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <AutoGenerateBindingRedirects>true</AutoGenerateBindingRedirects>
+    <AllowUnsafeBlocks>False</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>False</TreatWarningsAsErrors>
+    <BaseIntermediateOutputPath>obj\Doovke\</BaseIntermediateOutputPath>
+    <IntermediateOutputPath>obj\Doovke\$(Configuration)\</IntermediateOutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Doovke\Debug\</OutputPath>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <PlatformTarget>AnyCPU</PlatformTarget>
+    <DebugType>PdbOnly</DebugType>
+    <Optimize>True</Optimize>
+    <OutputPath>bin\Doovke\Release\</OutputPath>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Drawing" />
+  </ItemGroup>
+  <ItemGroup>
+    <!-- Doovke entry point -->
+    <Compile Include="Doovke\DoovkeMachine.cs" />
+    <Compile Include="Doovke\Program.cs" />
+    <!-- CP: the Mesa microengine (shared 2901 + microword decode, Dove-specific engine) -->
+    <Compile Include="CP\AM2901.cs" />
+    <Compile Include="CP\Microinstruction.cs" />
+    <Compile Include="CP\DoveCentralProcessor.cs" />
+    <!-- IOP: 80186 + Dove support chips -->
+    <Compile Include="IOP\i80186.cs" />
+    <Compile Include="IOP\I80186Bus.cs" />
+    <Compile Include="IOP\I80186Pcb.cs" />
+    <Compile Include="IOP\I8251.cs" />
+    <Compile Include="IOP\I8254.cs" />
+    <Compile Include="IOP\I8259.cs" />
+    <Compile Include="IOP\I8272.cs" />
+    <Compile Include="IOP\I93C46.cs" />
+    <Compile Include="IOP\DoveIOPMemory.cs" />
+    <Compile Include="IOP\DoveIOPIO.cs" />
+    <Compile Include="IOP\DoveControlStore.cs" />
+    <Compile Include="IOP\DoveDisplayController.cs" />
+    <Compile Include="IOP\DoveDiskController.cs" />
+    <!-- Storage -->
+    <Compile Include="IO\FloppyDisk.cs" />
+    <Compile Include="IO\Micropolis1325.cs" />
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>
