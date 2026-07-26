@@ -35,6 +35,11 @@ namespace D.IO
 
         private string _dataPath, _labelPath;
 
+        /// <summary>Format/write activity, so a format in progress is visible.  Distinct counts
+        /// how much of the pack has been touched at least once -- a real format makes several
+        /// passes over the whole surface, so the raw count runs well past the pack size.</summary>
+        public long SectorsFormatted, DistinctSectorsFormatted, SectorsWritten;
+
         public Micropolis1325() { }
 
         /// <summary>page number = sector + spt*(head + heads*cyl); the linear sector index.</summary>
@@ -78,6 +83,7 @@ namespace D.IO
         /// <summary>Write only the 512-byte data (WriteData), leaving/creating the label.</summary>
         public void WriteData(int page, byte[] data)
         {
+            SectorsWritten++;
             if (page < 0 || page >= TotalSectors) return;
             var d = new byte[SectorBytes];
             if (data != null) Array.Copy(data, d, Math.Min(data.Length, SectorBytes));
@@ -89,6 +95,8 @@ namespace D.IO
         public void FormatSector(int page)
         {
             if (page < 0 || page >= TotalSectors) return;
+            SectorsFormatted++;
+            if (_data[page] == null) DistinctSectorsFormatted++;
             _data[page] = new byte[SectorBytes];
             _label[page] = new ushort[LabelWords];
         }

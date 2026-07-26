@@ -253,11 +253,23 @@ namespace D.Doovke
             // controller.  Attn climbing while cmds stays at 0 means the chip is not
             // answering; both climbing means the driver's requests are being completed.
             var enet = _machine.Io.Ethernet;
+            var rdc = _machine.Io.Rdc;
+            var pack = _machine.Io.Disk;
+
+            // Rigid disk: operations, where the head is, and how much of the pack has been
+            // formatted.  A real format makes several passes over the whole surface, so the
+            // percentage is of DISTINCT sectors touched -- it goes to 100% once, not 25 times.
+            string rdcText = rdc.DobOps == 0
+                ? "RDC idle"
+                : string.Format("RDC {0:N0} ops  C{1}/H{2}/S{3}  fmt {4:N0}/{5:N0} ({6:F1}%)",
+                    rdc.DobOps, rdc.LastCyl, rdc.LastHead, rdc.LastSector,
+                    pack.DistinctSectorsFormatted, D.IO.Micropolis1325.TotalSectors,
+                    100.0 * pack.DistinctSectorsFormatted / D.IO.Micropolis1325.TotalSectors);
+
             _statusLabel.Text = string.Format(
-                "IOP {0:N0}   CP {1:N0}   ENet attn {2:N0}/cmd {3:N0}{4}   floppy: {5}{6}{7}",
+                "IOP {0:N0}   CP {1:N0}   ENet {2:N0}/{3:N0}   {4}   floppy: {5}{6}{7}",
                 instr, _machine.Cp.InstructionCount,
-                _machine.Io.EnetAttnWrites, enet.CommandsExecuted,
-                enet.Initialised ? "" : " (uninit)",
+                _machine.Io.EnetAttnWrites, enet.CommandsExecuted, rdcText,
                 haveDisk ? System.IO.Path.GetFileName(_floppyPath ?? "(image)") : "(empty)",
                 changing ? "   [changing disk]" : string.Empty,
                 _paused ? "   [paused]" : string.Empty);

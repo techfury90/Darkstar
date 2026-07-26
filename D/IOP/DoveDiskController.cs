@@ -62,6 +62,10 @@ namespace D.IOP
         public System.Collections.Generic.List<string> Log;   // optional diagnostic
         public long HostClock;
 
+        /// <summary>Operations executed and where the head last was, for the status display.</summary>
+        public long DobOps;
+        public int LastCyl, LastHead, LastSector;
+
         // Bisect gate: DOVE_RDC_STUB=1 replicates the pre-session permissive stub EXACTLY
         // (fake done+ctlrInt on cc, DmaInt-once on StartDMA, NO memory access, NO DOB round-trip).
         // Used to isolate whether a boot regression comes from construction/fields vs behavior.
@@ -259,6 +263,7 @@ namespace D.IOP
             SetErr(W_DataError, ErrNone);   SetErr(W_LastError, ErrNone);
 
             int cyl = HdrCyl, head = HdrHead, sector = HdrSector;
+            DobOps++; LastCyl = cyl; LastHead = head; LastSector = sector;
             int op = Operation;
             bool error = false;
 
