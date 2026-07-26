@@ -82,6 +82,11 @@ namespace D.Doovke
             _pcb = new I80186Pcb();
             _iop = new i80186(_mem, _io, _pcb);
 
+            // The 80186's integrated interrupt controller drives master-8259 IR6.  Without this
+            // SyncInternalIrq() bails on a null _pcb and IR6 is never raised -- POST polls the
+            // master IRR at port 0x00 for exactly 0x40 (IR6) and hangs when it never appears.
+            _io.SetPcb(_pcb);
+
             // Straps read by the firmware, both already correct by default but called out
             // because the boot depends on them:
             //   _io.InputPortWord  bit 6 = 1  -> machine ID says Daybreak.  If this reads 0
