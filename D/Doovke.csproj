@@ -71,6 +71,7 @@
     <Compile Include="IOP\I8254.cs" />
     <Compile Include="IOP\I8259.cs" />
     <Compile Include="IOP\I8272.cs" />
+    <Compile Include="IOP\I82586.cs" />
     <Compile Include="IOP\I93C46.cs" />
     <Compile Include="IOP\DoveIOPMemory.cs" />
     <Compile Include="IOP\DoveIOPIO.cs" />

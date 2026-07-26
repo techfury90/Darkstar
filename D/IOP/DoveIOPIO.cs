@@ -128,6 +128,10 @@ namespace D.IOP
                 return n;
             };
             InitDefaultHostProm();
+
+            // The 82586 is a bus master: it reads its command structures straight out of
+            // memory and interrupts on slave IR1 when it has posted status.
+            _enet = new I82586(memory, RaiseEnetInterrupt);
         }
 
         public DoveDisplayController Display { get { return _display; } }
@@ -464,7 +468,13 @@ namespace D.IOP
 
                 // Other interrupt-latch clear-on-read ports.
                 case RingLatch:
+                    EnetLatchReads++;
+                    return 0x00;
+
                 case EnetIntrLatch:
+                    // ClrENetIntr: reading the latch is what drops the 82586's interrupt.
+                    EnetLatchReads++;
+                    _picSlave.LowerIrq(1);
                     return 0x00;
 
                 // Arbiter command read-strobes: the read *is* the command; no data (never tested by the
@@ -502,6 +512,16 @@ namespace D.IOP
             {
                 int bucket = port & 0xF000;
                 long c; HighPortWrites.TryGetValue(bucket, out c); HighPortWrites[bucket] = c + 1;
+            }
+
+            // ---- Ethernet control surface (82586 not implemented) ----
+            // ENetAttn is the 82586's Channel Attention line: the guest raises it to say a
+            // command block is waiting in shared memory.  Counting it separates "the guest
+            // never got as far as the hardware" from "it asked and nothing answered".
+            if (port == RingLatch || port == RingLatch + 1)
+            {
+                EnetAttnWrites++;
+                if (EnetEnabled) _enet.ChannelAttention();
             }
 
             // ---- Diagnostic: capture the CP microcode-load control sequence ----
@@ -679,6 +699,25 @@ namespace D.IOP
         }
 
         // ---- Instrumentation / configuration ----
+
+        /// <summary>The 82586 posts status and interrupts on slave IR1.</summary>
+        private void RaiseEnetInterrupt()
+        {
+            _picSlave.RaiseIrq(1);
+            SyncSlaveIrq();
+        }
+
+        /// <summary>The Ethernet controller (command completion only -- it moves no packets).</summary>
+        public I82586 Ethernet { get { return _enet; } }
+
+        /// <summary>Set false to go back to having no Ethernet controller at all.</summary>
+        public bool EnetEnabled = true;
+
+        private I82586 _enet;
+
+        /// <summary>82586 Channel Attention raises, and reads of the ring/interrupt latches.</summary>
+        public long EnetAttnWrites;
+        public long EnetLatchReads;
 
         /// <summary>Latest and full history of the 4-digit hex LED (WriteLED @ 0x90) = POST progress.</summary>
         public ushort Led { get { return _led; } }

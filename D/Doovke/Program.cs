@@ -101,6 +101,7 @@ namespace D.Doovke
             machine.Io.ConfigEeprom.ReadLog = new System.Collections.Generic.List<int>();
 
             Console.WriteLine("Running " + budget + " IOP instructions...");
+            var wallStart = System.Diagnostics.Stopwatch.StartNew();
             Console.WriteLine("  reset state: " + machine.Iop);
             // The boot-device selection needs the key pressed TWICE for the diagnostics disk:
             // the SelectionLoop consumes the first press to highlight the icon, the second to boot.
@@ -211,6 +212,15 @@ namespace D.Doovke
                               + " (CP executed " + machine.Cp.InstructionCount + ")"
                               + (machine.Halted ? " [IOP halted]" : string.Empty));
 
+            // Guest time vs wall time.  Software that waits on a timeout only appears to hang
+            // if the machine is running slower than the hardware did -- worth knowing before
+            // blaming a clock.
+            double guestSec = machine.ElapsedClocks / (double)DoovkeMachine.IopClockHz;
+            double wallSec = wallStart.Elapsed.TotalSeconds;
+            Console.WriteLine(String.Format(
+                "Speed: {0:F2}s of guest time in {1:F2}s wall = {2:F0}% of real speed"
+                + "   ({3:N0} IOP instr/s)",
+                guestSec, wallSec, 100.0 * guestSec / wallSec, machine.IopInstructions / wallSec));
             Console.WriteLine("  final state: " + machine.Iop);
             var cpLog = machine.Io.CpLoadLog;
             Console.WriteLine("CP load/control events: " + (cpLog == null ? 0 : cpLog.Count));

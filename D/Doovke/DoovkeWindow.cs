@@ -249,8 +249,15 @@ namespace D.Doovke
                 _statusLabel.Text = "MACHINE STOPPED -- " + _machineFault;
                 return;
             }
-            _statusLabel.Text = string.Format("IOP {0:N0}   CP {1:N0}   floppy: {2}{3}{4}",
+            // 82586: Channel Attention rings from the driver, and commands completed by the
+            // controller.  Attn climbing while cmds stays at 0 means the chip is not
+            // answering; both climbing means the driver's requests are being completed.
+            var enet = _machine.Io.Ethernet;
+            _statusLabel.Text = string.Format(
+                "IOP {0:N0}   CP {1:N0}   ENet attn {2:N0}/cmd {3:N0}{4}   floppy: {5}{6}{7}",
                 instr, _machine.Cp.InstructionCount,
+                _machine.Io.EnetAttnWrites, enet.CommandsExecuted,
+                enet.Initialised ? "" : " (uninit)",
                 haveDisk ? System.IO.Path.GetFileName(_floppyPath ?? "(image)") : "(empty)",
                 changing ? "   [changing disk]" : string.Empty,
                 _paused ? "   [paused]" : string.Empty);
