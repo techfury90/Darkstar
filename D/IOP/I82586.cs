@@ -32,6 +32,16 @@ namespace D.IOP
         /// <summary>Fixed SCP address the chip fetches on the first Channel Attention.</summary>
         public const int ScpAddress = 0xFFFF6;
 
+        /// <summary>
+        /// The 82586 drives a 24-bit address, but the board decodes it into the IOP's 20-bit
+        /// space -- so pointers out of the SCP/ISCP must be masked, not taken at face value.
+        /// The boot EPROM's SCP holds ISCP = 0xF000A0, which is nonsense as a 24-bit address
+        /// and is 0x000A0 -- local SRAM, where the IOP-TR says the ISCP lives -- once masked.
+        /// Getting this wrong is silent: the busy flag is written somewhere harmless, the
+        /// driver never sees initialisation complete, and it rings Channel Attention forever.
+        /// </summary>
+        private const int AddressMask = 0xFFFFF;
+
         // SCB status word.
         private const ushort StatCx = 0x8000;    // command executed
         private const ushort StatFr = 0x4000;    // frame received
@@ -53,6 +63,8 @@ namespace D.IOP
 
         private bool _initialised;
         private int _scbAddress;
+        private int _scbBase;
+        private int _iscpAddress;
 
         public I82586(IPhysicalMemory memory, Action raiseInterrupt)
         {
@@ -65,9 +77,13 @@ namespace D.IOP
         {
             _initialised = false;
             _scbAddress = 0;
+            _scbBase = 0;
+            _iscpAddress = 0;
             ChannelAttentions = 0;
             CommandsExecuted = 0;
             FramesDropped = 0;
+            InterruptsRaised = 0;
+            _interruptCountdown = -1;
         }
 
         // ---- Diagnostics ----
@@ -75,6 +91,8 @@ namespace D.IOP
         public long CommandsExecuted { get; private set; }
         public long FramesDropped { get; private set; }
         public int ScbAddress { get { return _scbAddress; } }
+        public int IscpAddress { get { return _iscpAddress; } }
+        public int ScbBase { get { return _scbBase; } }
         public bool Initialised { get { return _initialised; } }
 
         /// <summary>
@@ -86,7 +104,76 @@ namespace D.IOP
             ChannelAttentions++;
             if (!_initialised) Initialise();
             else ExecuteScb();
+            LogAttention();
         }
+
+        /// <summary>
+        /// Clocks the chip takes to respond to Channel Attention.  This delay is NOT padding:
+        /// the driver's sequence is "ring CA, then wait for the interrupt", and a real 82586
+        /// spends tens of microseconds fetching SCP/ISCP, so the interrupt always lands after
+        /// the driver is already waiting.  Answering instantly from inside the OUT instruction
+        /// makes the 80186 take the interrupt at the very next instruction boundary -- before
+        /// the wait is entered -- and a wait that arms rather than checking a latch then blocks
+        /// forever.  The classic "works on hardware, hangs under emulation" shape.
+        /// </summary>
+        public int InterruptDelayClocks = 2000;   // ~250us at 8 MHz
+
+        private int _interruptCountdown = -1;
+
+        private void ScheduleInterrupt()
+        {
+            _interruptCountdown = InterruptDelayClocks;
+        }
+
+        /// <summary>Advance the chip's own timing; called from the IOP's tick.</summary>
+        public void Tick(int clocks)
+        {
+            if (_interruptCountdown < 0) return;
+            _interruptCountdown -= clocks;
+            if (_interruptCountdown > 0) return;
+            _interruptCountdown = -1;
+            InterruptsRaised++;
+            _raiseInterrupt();
+        }
+
+        public long InterruptsRaised { get; private set; }
+
+        /// <summary>
+        /// Optional trace of the first attentions: what the chip resolved the pointers to and
+        /// what it found in the SCB.  Set DOVE_ENET_LOG to a path to collect it.  Guessing at
+        /// this from the datasheet alone is what put the address mask wrong, so make the real
+        /// values visible instead.
+        /// </summary>
+        private void LogAttention()
+        {
+            if (_log == null)
+            {
+                if (_logChecked) return;
+                _logChecked = true;
+                string path = Environment.GetEnvironmentVariable("DOVE_ENET_LOG");
+                if (string.IsNullOrEmpty(path)) return;
+                _log = new System.IO.StreamWriter(path) { AutoFlush = true };
+                _log.WriteLine("SCP@{0:X5}: sysbus={1:X2} iscpPtr={2:X4}{3:X4}",
+                    ScpAddress, _memory.ReadByte(ScpAddress),
+                    _memory.ReadWord(ScpAddress + 8), _memory.ReadWord(ScpAddress + 6));
+            }
+            if (ChannelAttentions > 60) return;
+
+            _log.WriteLine(
+                "CA#{0}  iscp={1:X5} busy={2:X2}  scb={3:X5}  AS-READ status={4:X4} "
+                + "command={5:X4} (cuc={6} ruc={7}) cbl={8:X4}   cmds={9}  int raised={11}/acked={10}",
+                ChannelAttentions, _iscpAddress, _memory.ReadByte(_iscpAddress),
+                _scbAddress, _lastStatusRead, _lastCommandRead,
+                (_lastCommandRead >> 8) & 7, (_lastCommandRead >> 4) & 7,
+                _lastCblRead, CommandsExecuted, InterruptAcknowledges, InterruptsRaised);
+        }
+
+        private System.IO.StreamWriter _log;
+        private bool _logChecked;
+        private ushort _lastStatusRead, _lastCommandRead, _lastCblRead;
+
+        /// <summary>Bumped when the driver reads ClrENetIntr -- i.e. its ISR actually ran.</summary>
+        public long InterruptAcknowledges;
 
         /// <summary>
         /// Read SCP -> ISCP -> SCB, then clear the ISCP busy flag and interrupt.  Drivers
@@ -95,28 +182,33 @@ namespace D.IOP
         private void Initialise()
         {
             // SCP: sysbus byte at +0, ISCP address at +6 (little-endian, 24 bits used).
-            int iscp = _memory.ReadWord(ScpAddress + 6)
-                     | (_memory.ReadWord(ScpAddress + 8) << 16);
-            iscp &= 0xFFFFFF;
+            int iscp = (_memory.ReadWord(ScpAddress + 6)
+                        | (_memory.ReadWord(ScpAddress + 8) << 16)) & AddressMask;
 
             // ISCP: busy byte at +0, SCB offset at +2, SCB base at +4.
             int scbOffset = _memory.ReadWord(iscp + 2);
-            int scbBase = (_memory.ReadWord(iscp + 4) | (_memory.ReadWord(iscp + 6) << 16))
-                          & 0xFFFFFF;
-            _scbAddress = (scbBase + scbOffset) & 0xFFFFF;
+            _scbBase = (_memory.ReadWord(iscp + 4) | (_memory.ReadWord(iscp + 6) << 16))
+                       & AddressMask;
+            _iscpAddress = iscp;
+            _scbAddress = (_scbBase + scbOffset) & AddressMask;
 
             _memory.WriteByte(iscp, 0);          // busy <- 0: initialisation done
             _initialised = true;
 
             // Report an idle command unit and interrupt, as the chip does after init.
             _memory.WriteWord(_scbAddress, StatCna);
-            _raiseInterrupt();
+            ScheduleInterrupt();
         }
 
         private void ExecuteScb()
         {
             ushort status = _memory.ReadWord(_scbAddress);
             ushort command = _memory.ReadWord(_scbAddress + 2);
+            // Keep what the driver actually wrote: the command word is cleared below, so
+            // reading it back for the trace would only ever show the zero we just stored.
+            _lastStatusRead = status;
+            _lastCommandRead = command;
+            _lastCblRead = _memory.ReadWord(_scbAddress + 4);
 
             // Acknowledge: the driver sets the ACK bits for the status bits it has seen.
             status &= (ushort)~(command & StatAckMask);
@@ -141,7 +233,7 @@ namespace D.IOP
             // Leaving it set is precisely what makes a driver spin forever.
             _memory.WriteWord(_scbAddress + 2, 0);
             _memory.WriteWord(_scbAddress, status);
-            _raiseInterrupt();
+            ScheduleInterrupt();
         }
 
         /// <summary>
@@ -150,12 +242,11 @@ namespace D.IOP
         /// </summary>
         private void RunCommandList(int firstOffset)
         {
-            int scbBase = _scbAddress - (_scbAddress & 0xFFFF);
             int offset = firstOffset;
 
             for (int guard = 0; guard < 256; guard++)
             {
-                int cb = (scbBase + offset) & 0xFFFFF;
+                int cb = (_scbBase + offset) & AddressMask;
                 ushort cmd = _memory.ReadWord(cb + 2);
 
                 if (((cmd & 0x07)) == 4) FramesDropped++;   // Transmit

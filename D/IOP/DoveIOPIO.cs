@@ -229,6 +229,7 @@ namespace D.IOP
         public void Tick(int clocks)
         {
             _pit.Tick(clocks);
+            if (_enet != null) _enet.Tick(clocks);
 
             _retraceCycles += clocks;
             while (_retraceCycles >= _retracePeriod)
@@ -473,7 +474,10 @@ namespace D.IOP
 
                 case EnetIntrLatch:
                     // ClrENetIntr: reading the latch is what drops the 82586's interrupt.
+                    // Counting it says whether the driver's ISR is running at all -- if this
+                    // stays at zero the interrupt is never being delivered.
                     EnetLatchReads++;
+                    if (_enet != null) _enet.InterruptAcknowledges++;
                     _picSlave.LowerIrq(1);
                     return 0x00;
 
