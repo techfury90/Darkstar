@@ -56,7 +56,6 @@ namespace D.Doovke
             _floppyPath = initialFloppy;
 
             Text = "Doovke - Xerox 6085 (Dove/Daybreak)";
-            ClientSize = new System.Drawing.Size(_displayWidth / 2, _displayHeight / 2 + 48);
             StartPosition = FormStartPosition.CenterScreen;
             KeyPreview = true;
 
@@ -82,6 +81,29 @@ namespace D.Doovke
 
             Load += OnWindowLoad;
             FormClosing += (s, e) => Shutdown();
+        }
+
+        /// <summary>
+        /// Size the window so the display panel is exactly the framebuffer's size, i.e. 1:1 with
+        /// no scaling.  SDL stretches the texture to the panel, so the panel has to be the exact
+        /// pixel size or the image is resampled.  The menu and status bars sit outside it.
+        /// </summary>
+        private void SizeToDisplay()
+        {
+            int chrome = 0;
+            if (MainMenuStrip != null) chrome += MainMenuStrip.Height;
+            if (_statusStrip != null) chrome += _statusStrip.Height;
+
+            ClientSize = new System.Drawing.Size(_displayWidth, _displayHeight + chrome);
+
+            // If that would not fit on the screen, fall back to the largest size that does --
+            // still 1:1 for as much of the display as is visible, and the window is resizable.
+            var wa = Screen.FromControl(this).WorkingArea;
+            if (Width > wa.Width || Height > wa.Height)
+            {
+                Width = Math.Min(Width, wa.Width);
+                Height = Math.Min(Height, wa.Height);
+            }
         }
 
         private MenuStrip BuildMenu()
@@ -153,6 +175,7 @@ namespace D.Doovke
             _sdlThread = new Thread(SDLMessageLoopThread) { IsBackground = true, Name = "Doovke SDL" };
             _sdlThread.Start();
 
+            SizeToDisplay();
             StartMachine();
             _refreshTimer.Start();
         }
@@ -207,6 +230,7 @@ namespace D.Doovke
                     _displayWidth = w; _displayHeight = h;
                     _32bppDisplayBuffer = new int[w * h];
                     CreateDisplayTexture();
+                    SizeToDisplay();
                 }
 
                 // Mono (1 byte per pixel, non-zero = lit) -> opaque black/white ARGB.
