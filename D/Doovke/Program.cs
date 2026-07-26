@@ -111,6 +111,11 @@ namespace D.Doovke
             // function of (bitmap, cursor); several of its codes invert, so a change here
             // between the boot screen and a later screen explains a whole-raster flip.
             int lastCtl = -1;
+            // The 4-digit hex LED at port 0x90 is the MP code -- the boot's own progress
+            // report, and the only thing that says where a failure happened rather than that
+            // one did.  Log every transition with the instruction count so a stall or an error
+            // code can be placed in time.
+            int lastLed = -1;
             // After each probed station, render and count set pixels.  A station the guest
             // acts on moves the screen; one it ignores leaves the count identical.  This finds
             // which stations do anything without having to read the glyphs.
@@ -166,6 +171,12 @@ namespace D.Doovke
                     lastCount = cnt;
                     watchStation++; nextWatch += probeGap;
                     if (watchStation > probeTo) { watchStation = -1; nextWatch = long.MaxValue; }
+                }
+                if ((machine.IopInstructions & 0x3F) == 0 && machine.Io.Led != lastLed)
+                {
+                    lastLed = machine.Io.Led;
+                    Console.WriteLine(String.Format("  MP {0:X4} @IOP {1} CP {2}",
+                        lastLed, machine.IopInstructions, machine.Cp.InstructionCount));
                 }
                 if ((machine.IopInstructions & 0xFF) == 0)
                 {
