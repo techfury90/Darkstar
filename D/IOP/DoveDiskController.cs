@@ -623,9 +623,14 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                // filePageHi doubles as pageZeroAttributes: the client's value belongs to
-                // page zero only, and is forced to zero in every other page of the run.
-                label[6] = filePage == 0 ? template[6] : (ushort)0;
+                // Word 6 is filePageHi, and pageZeroAttributes shares it.  Zeroing it
+                // wholesale threw away the top 16 bits of every page number above 65535 --
+                // and the volume is 122,880 pages, so everything past halfway carried a
+                // truncated page.  Carry the high word; page zero keeps the client's
+                // attributes, which is the only page they belong to.
+                label[6] = filePage == 0
+                         ? template[6]
+                         : Bswap((ushort)((filePage >> 16) & 0xFFFF));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
