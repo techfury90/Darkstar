@@ -153,7 +153,10 @@ namespace D.IOP
         {
             try
             {
-                var fs = new System.IO.FileStream(path, System.IO.FileMode.Create,
+                // APPEND, not Create: a power cycle builds a fresh machine and reopens the
+                // trace, so truncating here silently discards everything logged before the
+                // reset -- and the interesting run (partitioning) always follows one.
+                var fs = new System.IO.FileStream(path, System.IO.FileMode.Append,
                                                   System.IO.FileAccess.Write,
                                                   System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete);
                 return new System.IO.StreamWriter(fs) { AutoFlush = true };
