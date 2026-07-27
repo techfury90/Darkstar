@@ -322,6 +322,8 @@ namespace D.IOP
             int n = 0x10000 - neg;
             return (n >= 1 && n <= 256) ? n : 1;
         }
+        /// <summary>diskStartSec -- DOB byte +12, the high byte of word 6.</summary>
+        private int StartSec { get { return (_dob[6] >> 8) & 0xFF; } }
         private int HdrCyl { get { return Bswap(_dob[16]); } }
         private int HdrSector { get { return _dob[17] >> 8; } }
         private int HdrHead { get { return _dob[17] & 0xFF; } }
@@ -380,7 +382,16 @@ namespace D.IOP
                     // Writing only one sector here leaves the rest of the run holding their
                     // formatted labels, and Pilot's verify pass over the run then fails at
                     // the second sector and retries the write forever.
-                    error = WriteLabelRun(cyl, head, sector, wantSectors);
+                    // MEASURED, and it refutes "diskMinusSectorCount is this DOB's run
+                    // length": the guest issues ~64 write ops per cylinder, stepping the
+                    // header by 2 sectors, and EVERY one of them carries -128.  If -128 were
+                    // a per-DOB run, the first op would have covered the cylinder and the
+                    // other 63 would not exist.  Writing the run made every single-page write
+                    // stamp 128 sectors -- hundreds of overlapping whole-cylinder writes that
+                    // never left cylinder 2.  So -128 is context (the client's total run),
+                    // not an instruction to this operation.  One sector per DOB until the
+                    // meaning is established.
+                    error = WriteLabelRun(cyl, head, sector, 1);
                     break;
 
                 case 5:  // readLabel (skip data)
@@ -545,6 +556,7 @@ namespace D.IOP
         /// </summary>
         private bool WriteLabelRun(int cyl, int head, int sector, int sectors)
         {
+            int c0 = cyl, h0 = head, s0 = sector;
             var template = new ushort[Micropolis1325.LabelWords];
             for (int i = 0; i < template.Length; i++) template[i] = _dob[23 + i];
             int basePage = Bswap(template[5]) | (Bswap(template[6]) << 16);
@@ -571,7 +583,8 @@ namespace D.IOP
 
             if (LogWriter != null)
             {
-                try { LogWriter.WriteLine("    LABEL RUN " + sectors + " sectors, filePage from "
+                try { LogWriter.WriteLine("    LABEL RUN " + sectors + " sectors from CHS=["
+                        + c0 + "," + h0 + "," + s0 + "] filePage from "
                         + basePage + ", fileID=" + Bswap(template[0])); }
                 catch { LogWriter = null; }
             }
