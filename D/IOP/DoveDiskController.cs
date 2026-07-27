@@ -611,7 +611,12 @@ namespace D.IOP
             int c0 = cyl, h0 = head, s0 = sector;
             var template = new ushort[Micropolis1325.LabelWords];
             for (int i = 0; i < template.Length; i++) template[i] = _dob[23 + i];
-            int basePage = Bswap(template[5]) | (Bswap(template[6]) << 16);
+            // filePage is taken from word 5 alone.  Word 6 is NOT a page-number high word:
+            // measured, the guest expects 0x0002 there on a page whose high word would be
+            // 0x0001, and reading it as page bits produced base pages of 131072 and
+            // 33611647 which were then written into labels.  It is a client field -- copy it
+            // through untouched, which is exactly what the guest expects to read back.
+            int basePage = Bswap(template[5]);
 
             for (int k = 0; k < sectors; k++)
             {
@@ -623,14 +628,6 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                // Word 6 is filePageHi, and pageZeroAttributes shares it.  Zeroing it
-                // wholesale threw away the top 16 bits of every page number above 65535 --
-                // and the volume is 122,880 pages, so everything past halfway carried a
-                // truncated page.  Carry the high word; page zero keeps the client's
-                // attributes, which is the only page they belong to.
-                label[6] = filePage == 0
-                         ? template[6]
-                         : Bswap((ushort)((filePage >> 16) & 0xFFFF));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
