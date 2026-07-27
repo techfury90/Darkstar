@@ -366,8 +366,21 @@ namespace D.IOP
                     break;
 
                 case 3:  // writeData -- verify label, write data
-                case 4:  // writeLabelAndData -- store label + data
-                    error = WriteSector(cyl, head, sector, op == 4 /*storeLabel*/);
+                    error = WriteSector(cyl, head, sector, false);
+                    break;
+
+                case 4:  // writeLabelAndData -- store label + data, over a RUN of sectors
+                    // diskMinusSectorCount is the RUN LENGTH, and it is independent of
+                    // diskPageCount: one data page is supplied and replicated, while the
+                    // labels are the structured payload and are stamped across the whole run
+                    // with the file page number stepping per sector
+                    // (CompatibilityDiskFace.mesa: fileID, attributesInAllPages and dontCare
+                    // are the same in every page of a run; filePage is incremented in each
+                    // successive page; pageZeroAttributes is written only for page zero).
+                    // Writing only one sector here leaves the rest of the run holding their
+                    // formatted labels, and Pilot's verify pass over the run then fails at
+                    // the second sector and retries the write forever.
+                    error = WriteLabelRun(cyl, head, sector, wantSectors);
                     break;
 
                 case 5:  // readLabel (skip data)
@@ -523,6 +536,46 @@ namespace D.IOP
                 catch { LogWriter = null; }
             }
             ScheduleCtlrInt();
+        }
+
+        /// <summary>
+        /// writeLabelAndData over a run of sectors: the single supplied data page is written
+        /// to every sector, and each sector gets the DOB's label with filePage stepped by its
+        /// position in the run.
+        /// </summary>
+        private bool WriteLabelRun(int cyl, int head, int sector, int sectors)
+        {
+            var template = new ushort[Micropolis1325.LabelWords];
+            for (int i = 0; i < template.Length; i++) template[i] = _dob[23 + i];
+            int basePage = Bswap(template[5]) | (Bswap(template[6]) << 16);
+
+            for (int k = 0; k < sectors; k++)
+            {
+                if (cyl >= Micropolis1325.Cylinders) break;
+
+                var label = (ushort[])template.Clone();
+                int filePage = basePage + k;
+                label[5] = Bswap((ushort)(filePage & 0xFFFF));
+                // filePageHi doubles as pageZeroAttributes: the client's value belongs to
+                // page zero only, and is forced to zero in every other page of the run.
+                label[6] = filePage == 0 ? template[6] : (ushort)0;
+
+                _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
+
+                if (++sector < Micropolis1325.SectorsPerTrack) continue;
+                sector = 0;
+                if (++head < Micropolis1325.Heads) continue;
+                head = 0;
+                cyl++;
+            }
+
+            if (LogWriter != null)
+            {
+                try { LogWriter.WriteLine("    LABEL RUN " + sectors + " sectors, filePage from "
+                        + basePage + ", fileID=" + Bswap(template[0])); }
+                catch { LogWriter = null; }
+            }
+            return false;
         }
 
         private bool ReadSector(int cyl, int head, int sector, bool verifyLabel)
