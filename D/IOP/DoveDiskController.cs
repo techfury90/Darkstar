@@ -382,16 +382,17 @@ namespace D.IOP
                     // Writing only one sector here leaves the rest of the run holding their
                     // formatted labels, and Pilot's verify pass over the run then fails at
                     // the second sector and retries the write forever.
-                    // MEASURED, and it refutes "diskMinusSectorCount is this DOB's run
-                    // length": the guest issues ~64 write ops per cylinder, stepping the
-                    // header by 2 sectors, and EVERY one of them carries -128.  If -128 were
-                    // a per-DOB run, the first op would have covered the cylinder and the
-                    // other 63 would not exist.  Writing the run made every single-page write
-                    // stamp 128 sectors -- hundreds of overlapping whole-cylinder writes that
-                    // never left cylinder 2.  So -128 is context (the client's total run),
-                    // not an instruction to this operation.  One sector per DOB until the
-                    // meaning is established.
-                    error = WriteLabelRun(cyl, head, sector, 1);
+                    // The 8x305's WTLBDC loop runs diskMinusSectorCount sectors: NXTSC
+                    // counts SECNTH/SECNTL up toward zero and sets DTARG purely from that,
+                    // with no FIFO involvement -- so the run length really is the sector
+                    // count.  The loop starts at the DOB header (VFYHD searches for that
+                    // exact header image) and the FIRST sector takes the DOB label's filePage
+                    // unchanged; NXTSC then steps sector and filePage together.
+                    //
+                    // The earlier ~64-writes-per-cylinder measurement that seemed to refute
+                    // this was recovery traffic: the client re-issues the op after each
+                    // read-back fails label-verify, which our own incomplete write caused.
+                    error = WriteLabelRun(cyl, head, sector, wantSectors);
                     break;
 
                 case 5:  // readLabel (skip data)
@@ -566,6 +567,9 @@ namespace D.IOP
                 if (cyl >= Micropolis1325.Cylinders) break;
 
                 var label = (ushort[])template.Clone();
+                // First sector of the run takes the DOB's filePage verbatim; each subsequent
+                // one steps with the sector.  Seeding this one low is what left every page
+                // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
                 // filePageHi doubles as pageZeroAttributes: the client's value belongs to
