@@ -480,7 +480,11 @@ namespace D.IOP
                 // Returning one past it made every operation jump a whole cylinder plus a
                 // sector (+129), so the sector crept by one per op and the head only moved
                 // when it wrapped, sixteen cylinders later.
-                int advance = ((op == 4 || op == 7) ? wantSectors : 1) - 1;
+                // One PAST the last sector stepped.  This and the returned label filePage
+                // below are the same rule: Pilot derives pagesCompleted from the header delta
+                // and seeds the next run's label base from the returned filePage, so both must
+                // read base + sectorsTransferred or the next run starts one low.
+                int advance = (op == 4 || op == 7) ? wantSectors : 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
                 int ns = linear % Micropolis1325.SectorsPerTrack;
@@ -628,18 +632,21 @@ namespace D.IOP
             int c0 = cyl, h0 = head, s0 = sector;
             var template = new ushort[Micropolis1325.LabelWords];
             for (int i = 0; i < template.Length; i++) template[i] = _dob[23 + i];
-            // filePage is taken from word 5 alone.  Word 6 is NOT a page-number high word:
-            // measured, the guest expects 0x0002 there on a page whose high word would be
-            // 0x0001, and reading it as page bits produced base pages of 131072 and
-            // 33611647 which were then written into labels.  It is a client field -- copy it
-            // through untouched, which is exactly what the guest expects to read back.
-            // Word 6 is filePageHi SHIFTED LEFT ONE, with an attribute flag in bit 0 -- the
-            // 8x305's NXTSC carries into it by adding 2, not 1, precisely to step over that
-            // flag.  Measured both ways: a page whose high word is 0 wants word6 = 0x0000,
-            // and one whose high word is 1 wants 0x0002.  Zeroing word 6 satisfied the first
-            // and broke the second; copying it through did the reverse.
-            int basePage = Bswap(template[5]) | ((Bswap(template[6]) >> 1) << 16);
-            int attrFlag = Bswap(template[6]) & 1;
+            // filePage spans label bytes 10-12, and word 5 and word 6 are byte-ordered
+            // DIFFERENTLY -- this asymmetry is the trap I fell into twice:
+            //   byte 10 = filePage bits 8-15   byte 11 = bits 0-7   -> word 5, byte-SWAPPED
+            //   byte 12 = (filePageHi << 1) | attrFlag              -> word 6 LOW byte, RAW
+            //   byte 13 = pageZeroAttributes                        -> word 6 HIGH byte
+            // So word 6 must NOT be byte-swapped, filePageHi is only 7 bits, and byte 13 has
+            // nothing to do with the page number -- without the mask it leaks into it.
+            //
+            // Invisible on everything seen so far because every filePage has been under
+            // 65536, making filePageHi zero regardless of byte order or mask.  It bites in
+            // the upper half of a 122,880-page volume, where a byte-swapped read turns
+            // +65536 into +16M.
+            int basePage = Bswap(template[5]) | (((template[6] >> 1) & 0x7F) << 16);
+            int attrFlag = template[6] & 1;          // bit 0 of byte 12
+            int attrHigh = template[6] & 0xFF00;     // byte 13, carried through untouched
 
             for (int k = 0; k < sectors; k++)
             {
@@ -651,7 +658,7 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                label[6] = Bswap((ushort)((((filePage >> 16) & 0x7FFF) << 1) | attrFlag));
+                label[6] = (ushort)(attrHigh | (((filePage >> 16) & 0x7F) << 1) | attrFlag);
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
@@ -661,6 +668,14 @@ namespace D.IOP
                 head = 0;
                 cyl++;
             }
+
+            // Hand back filePage = base + sectors transferred.  Pilot copies the returned
+            // dob.label into op.labelPtr and uses it as the next run's base
+            // (CopyLabelWithByteSwap), so returning base + N-1 makes every subsequent run
+            // start one page low -- the 127 drift, which is exactly N-1.
+            int endPage = basePage + sectors;
+            _dob[23 + 5] = Bswap((ushort)(endPage & 0xFFFF));
+            _dob[23 + 6] = (ushort)(attrHigh | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
 
             if (LogWriter != null)
             {
