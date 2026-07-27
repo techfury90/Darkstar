@@ -653,7 +653,13 @@ namespace D.IOP
             // +65536 into +16M.
             int basePage = Bswap(template[5]) | (((template[6] >> 1) & 0x7F) << 16);
             int attrFlag = template[6] & 1;          // bit 0 of byte 12
-            int attrHigh = template[6] & 0xFF00;     // byte 13, carried through untouched
+            // byte 13 = pageZeroAttributes.  It is NOT carried through: the client supplies
+            // it, but the label the guest expects to read back always has it zero.  Every
+            // expected word 6 observed across the whole install is 0x0000 or 0x0002 -- high
+            // byte zero without exception -- while carrying the template's value through
+            // produced 0x0200 and 800 label rejections across 62 sectors, every one of them
+            // word 6 and nothing else.
+            int attrHigh = 0;
 
             for (int k = 0; k < sectors; k++)
             {
