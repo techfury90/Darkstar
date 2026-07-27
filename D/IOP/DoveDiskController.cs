@@ -673,8 +673,10 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                int attrHigh = (filePage == 0) ? attrTemplate : 0;
-                label[6] = (ushort)(attrHigh | (((filePage >> 16) & 0x7F) << 1) | attrFlag);
+                // WRITTEN labels carry no attribute byte.  The guest expects zero there --
+                // every expected word 6 observed across three full installs is 0x0000 or
+                // 0x0002, high byte zero without exception, including on file page 0.
+                label[6] = (ushort)((((filePage >> 16) & 0x7F) << 1) | attrFlag);
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
@@ -695,7 +697,12 @@ namespace D.IOP
             // says a page is consumed between here and the client.
             int endPage = basePage + sectors - 1;
             _dob[23 + 5] = Bswap((ushort)(endPage & 0xFFFF));
-            _dob[23 + 6] = (ushort)(((endPage == 0) ? attrTemplate : 0)
+            // The RETURNED label is different: Pilot copies it back into op.labelPtr and uses
+            // it as the next operation's template, so zeroing the attribute byte HERE wipes
+            // the client's own state.  That is what stopped the install dead at disk 9 -- on
+            // the boot-file disks, where the label carries file structure rather than just
+            // identity.  Preserve it on the way back, drop it on the way to the platter.
+            _dob[23 + 6] = (ushort)(attrTemplate
                                     | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
 
             if (LogWriter != null)
