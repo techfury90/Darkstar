@@ -300,8 +300,12 @@ namespace D.Doovke
                     pack.DistinctSectorsFormatted, D.IO.Micropolis1325.TotalSectors,
                     100.0 * pack.DistinctSectorsFormatted / D.IO.Micropolis1325.TotalSectors);
 
+            var fdc = _machine.Io.Fdc;
+            string fdcText = string.Format("FDC {0:N0}c/{1}s/{2}r",
+                                           fdc.CommandCount, fdc.NoMediaStalls, fdc.ResetCount);
+
             _statusLabel.Text = string.Format(
-                "IOP {0:N0}   CP {1:N0}   ENet {2:N0}/{3:N0}   {4}   floppy: {5}{6}{7}",
+                "IOP {0:N0}   CP {1:N0}   ENet {2:N0}/{3:N0}   {4}   " + fdcText + "   floppy: {5}{6}{7}",
                 instr, _machine.Cp.InstructionCount,
                 _machine.Io.EnetAttnWrites, enet.CommandsExecuted, rdcText,
                 haveDisk ? System.IO.Path.GetFileName(_floppyPath ?? "(image)") : "(empty)",
