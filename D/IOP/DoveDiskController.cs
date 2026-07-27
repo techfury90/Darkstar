@@ -104,9 +104,22 @@ namespace D.IOP
             if (_dmaIntDelay >= 0)
             {
                 _dmaIntDelay -= clocks;
-                if (_dmaIntDelay <= 0) { _dmaIntDelay = -1; DmaInt = true; }
+                if (_dmaIntDelay <= 0)
+                {
+                    _dmaIntDelay = -1;
+                    // If the previous DMA interrupt has not been acknowledged (read of
+                    // 0x0210), the edge-triggered raise produces NO new edge and this
+                    // completion is silently lost -- the DMA task then waits forever on its
+                    // no-timeout WaitForInterrupt and the page loop stops after one page.
+                    if (DmaInt) DmaIntLost++;
+                    DmaInt = true;
+                    DmaIntRaised++;
+                }
             }
         }
+
+        /// <summary>DMA-interrupt bookkeeping: raised, acknowledged, and lost to a missing edge.</summary>
+        public long DmaIntRaised, DmaIntAcked, DmaIntLost;
 
         /// <summary>Operations executed and where the head last was, for the status display.</summary>
         public long DobOps;
@@ -160,7 +173,7 @@ namespace D.IOP
             switch (port)
             {
                 case 0x0214: v = _status; CtlrInt = false; break;       // read-clears RDiskCtlrIntr
-                case 0x0210: v = DmaStatus(); DmaInt = false; break;    // AM2942 status; read-clears RDiskDmaIntr'
+                case 0x0210: v = DmaStatus(); DmaInt = false; DmaIntAcked++; break;   // read-clears RDiskDmaIntr'
                 case 0x0204: v = (byte)((-WordCount()) & 0xFF); break;  // 2's-comp count on bits 8-1... (poll rarely used)
                 case 0x0206: v = (byte)(_dmaAddr >> 1); break;          // addr bits 8-1
                 default:     v = 0x00; break;
@@ -439,6 +452,7 @@ namespace D.IOP
                     + " LblErr=" + (_dob[W_LabelError] >> 8).ToString("X2")
                     + " DatErr=" + (_dob[W_DataError] >> 8).ToString("X2")
                     + " -> hdr w16=" + _dob[16].ToString("X4") + " w17=" + _dob[17].ToString("X4")
+                    + " dmaInt r/a/lost=" + DmaIntRaised + "/" + DmaIntAcked + "/" + DmaIntLost
                     + " dmaCount=0x" + _dmaCount.ToString("X4") + " sectors=" + wantSectors
                     + " (w2=" + _dob[2].ToString("X4") + ")" + " @IOP" + HostClock);
                     // Full DOB + the IOCB words just below it.  The transfer's page count has
