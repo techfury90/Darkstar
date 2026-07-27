@@ -230,6 +230,7 @@ namespace D.IOP
         {
             _pit.Tick(clocks);
             if (_enet != null) _enet.Tick(clocks);
+            if (_rdc != null) _rdc.Tick(clocks);
 
             _retraceCycles += clocks;
             while (_retraceCycles >= _retracePeriod)

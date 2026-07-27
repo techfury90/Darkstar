@@ -62,6 +62,39 @@ namespace D.IOP
         public System.Collections.Generic.List<string> Log;   // optional diagnostic
         public long HostClock;
 
+        /// <summary>
+        /// Clocks between a command being accepted and its interrupt being asserted.
+        /// The controller must NOT complete inside the OUT that writes the command
+        /// register: the driver's sequence is "issue command, then wait for the
+        /// interrupt", so asserting it synchronously means the 80186 takes the interrupt
+        /// at the next instruction boundary -- before the wait is entered -- and a wait
+        /// that arms rather than checking a latch never sees it.  Reads as a missed
+        /// interrupt from the driver's side.  (Exactly the fault found in the 82586.)
+        /// Status is still updated immediately so the polling path -- which is what the
+        /// formatter uses, and which works -- is unaffected.
+        /// </summary>
+        public int InterruptDelayClocks = 400;      // ~50us at 8 MHz
+
+        private int _ctlrIntDelay = -1, _dmaIntDelay = -1;
+
+        private void ScheduleCtlrInt() { _ctlrIntDelay = InterruptDelayClocks; }
+        private void ScheduleDmaInt() { _dmaIntDelay = InterruptDelayClocks; }
+
+        /// <summary>Advance the controller's own timing; called from the IOP tick.</summary>
+        public void Tick(int clocks)
+        {
+            if (_ctlrIntDelay >= 0)
+            {
+                _ctlrIntDelay -= clocks;
+                if (_ctlrIntDelay <= 0) { _ctlrIntDelay = -1; CtlrInt = true; }
+            }
+            if (_dmaIntDelay >= 0)
+            {
+                _dmaIntDelay -= clocks;
+                if (_dmaIntDelay <= 0) { _dmaIntDelay = -1; DmaInt = true; }
+            }
+        }
+
         /// <summary>Operations executed and where the head last was, for the status display.</summary>
         public long DobOps;
         public int LastCyl, LastHead, LastSector;
@@ -136,13 +169,13 @@ namespace D.IOP
                     case 0x0214:
                         int scc = value & 0x3;
                         _status = (byte)scc;
-                        if (scc != 0) { _status |= 0x40; CtlrInt = true; }   // fake done + RDiskCtlrIntr
+                        if (scc != 0) { _status |= 0x40; ScheduleCtlrInt(); }   // fake done + RDiskCtlrIntr
                         break;
                     case 0x0208: _dmaAddr = (value & 0x7FFF) << 9; break;
                     case 0x020A: _dmaAddr = (_dmaAddr & ~0x1FE) | ((value & 0xFF) << 1); break;
                     case 0x020C: _dmaCount = value; break;
                     case 0x0210: _dmaDir = value & 1; break;
-                    case 0x0216: DmaInt = true; break;                       // StartDMA -> DmaInt (never cleared)
+                    case 0x0216: ScheduleDmaInt(); break;                    // StartDMA -> DmaInt
                     default: break;
                 }
                 return;
@@ -177,7 +210,7 @@ namespace D.IOP
                     break;
                 case 1:  // Fetch DOB into the controller (the DOB was DMA'd mem->FIFO by the prior StartDMA)
                     _status = 0x41;              // done + rr=01
-                    CtlrInt = true;
+                    ScheduleCtlrInt();
                     break;
                 case 2:  // Execute the DOB operation
                     ExecuteDob();                // sets _status 0x42 / 0xC2, fills DOB error fields + _dataBuf
@@ -187,12 +220,12 @@ namespace D.IOP
                             for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
                         _dataDmaArmed = false;
                     }
-                    CtlrInt = true;
+                    ScheduleCtlrInt();
                     break;
                 case 3:  // Store DOB back (the FIFO->mem StartDMA follows and writes it out)
                     _status = 0x43;
                     _storePending = true;
-                    CtlrInt = true;
+                    ScheduleCtlrInt();
                     break;
             }
         }
@@ -227,7 +260,7 @@ namespace D.IOP
                     _dataDmaAddr = _dmaAddr;
                 }
             }
-            DmaInt = true;                      // RDiskDmaIntr' (AM2942 end-of-transfer)
+            ScheduleDmaInt();                   // RDiskDmaIntr' (AM2942 end-of-transfer)
         }
 
         // ---- DOB decode helpers ----
