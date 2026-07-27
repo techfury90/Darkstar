@@ -44,6 +44,16 @@ namespace D.IOP
         // The 34-word DOB image (host-order words, exactly as they sit in DRAM, big-endian).
         private readonly ushort[] _dob = new ushort[34];
         private readonly byte[] _dataBuf = new byte[512];   // staging for one data page
+
+        // Multi-sector transfer, driven by diskMinusSectorCount.  One executeDOB covers N
+        // sectors, but the data moves as N SEPARATE page-DMAs (DiskDove.asm's DiskDMADataXfer
+        // loops DoDiskDMA, one 256-word page each, blocking on that page's interrupt).  So the
+        // controller cannot do the whole transfer at command time: it consumes one sector per
+        // page-DMA and only reports completion when the sector count reaches zero -- which is
+        // what produces N DMA interrupts and exactly ONE controller interrupt.
+        private bool _xferActive;
+        private int _xferOp, _xferCyl, _xferHead, _xferSector, _xferRemaining;
+        private bool _xferError;
         private int _dataDmaAddr; private bool _dataDmaArmed;   // read data-page DMA armed pre-Execute, emitted at cc=2
         private int _dobAddr = -1;   // physical address of the DOB (last <=34-word DMA target) -- IOCB is just below it
         // DIAGNOSTIC gate: DOVE_NO_DATA_DMA=1 suppresses the 512-byte data-page transfer (both directions)
@@ -223,7 +233,9 @@ namespace D.IOP
                             for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
                         _dataDmaArmed = false;
                     }
-                    ScheduleCtlrInt();
+                    // A multi-sector operation is still streaming: its completion interrupt
+                    // belongs at the end of the LAST sector, not here.
+                    if (!_xferActive) ScheduleCtlrInt();
                     break;
                 case 3:  // Store DOB back (the FIFO->mem StartDMA follows and writes it out)
                     _status = 0x43;
@@ -260,7 +272,10 @@ namespace D.IOP
             }
             else
             {
-                // Data page.
+                // Data page.  Once a multi-sector operation is running, each page-DMA moves
+                // exactly one more sector and steps the address.
+                if (_xferActive) { TransferNextSector(_dmaAddr); return; }
+
                 if (_dmaDir == 1)               // mem->disk: capture data from memory NOW (write ops feed
                     { if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask]; }
                 else                            // disk->mem (read): the firmware arms this StartDMA BEFORE
@@ -430,7 +445,83 @@ namespace D.IOP
                     + "  IOCB(off from DOB): " + iocb);
             }
 
+            // The first sector is done.  If diskMinusSectorCount asked for more, hand the rest
+            // to the streaming path: the IOP is about to issue one page-DMA per remaining
+            // sector, and each of those moves one.
+            if (!error && wantSectors > 1 && (op == 2 || op == 3 || op == 4 || op == 6))
+            {
+                _xferActive = true;
+                _xferOp = op;
+                _xferError = false;
+                _xferRemaining = wantSectors - 1;
+                _xferCyl = cyl; _xferHead = head; _xferSector = sector;
+                StepAddress();                                   // first sector already moved
+                _status = 0x42;
+                return;                                          // completion comes later
+            }
+
             _status = (byte)(error ? 0xC2 : 0x42);          // e+d on error, else done
+        }
+
+        /// <summary>Step the running transfer address, carrying sector -> head -> cylinder.</summary>
+        private void StepAddress()
+        {
+            if (++_xferSector < Micropolis1325.SectorsPerTrack) return;
+            _xferSector = 0;
+            if (++_xferHead < Micropolis1325.Heads) return;
+            _xferHead = 0;
+            _xferCyl++;
+        }
+
+        /// <summary>
+        /// Move one more sector of a multi-sector operation, called from each page-DMA.
+        /// </summary>
+        private void TransferNextSector(int addr)
+        {
+            int c = _xferCyl, h = _xferHead, sct = _xferSector;
+            bool err = false;
+
+            switch (_xferOp)
+            {
+                case 2:
+                case 6:
+                    err = ReadSector(c, h, sct, _xferOp == 2 /*verifyLabel*/);
+                    if (!err && !_noDataDma)
+                        for (int i = 0; i < 512; i++) Sys[(addr + i) & Mask] = _dataBuf[i];
+                    break;
+                case 3:
+                case 4:
+                    if (!_noDataDma)
+                        for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(addr + i) & Mask];
+                    err = WriteSector(c, h, sct, _xferOp == 4 /*storeLabel*/);
+                    break;
+            }
+
+            DobOps++; LastCyl = c; LastHead = h; LastSector = sct;
+            StepAddress();
+
+            if (err) { _xferError = true; FinishTransfer(); return; }
+            if (--_xferRemaining <= 0) FinishTransfer();
+        }
+
+        /// <summary>
+        /// End a multi-sector operation: leave the DOB header at the sector AFTER the last one
+        /// transferred (Pilot derives pagesCompleted from that advance, not from the error
+        /// bytes), set the status, and raise the single controller-completion interrupt.
+        /// </summary>
+        private void FinishTransfer()
+        {
+            _xferActive = false;
+            _dob[16] = Bswap((ushort)_xferCyl);
+            _dob[17] = (ushort)((_xferSector << 8) | _xferHead);
+            _status = (byte)(_xferError ? 0xC2 : 0x42);
+            if (LogWriter != null)
+            {
+                try { LogWriter.WriteLine("    XFER DONE op=" + _xferOp + " err=" + _xferError
+                        + " next CHS=[" + _xferCyl + "," + _xferHead + "," + _xferSector + "]"); }
+                catch { LogWriter = null; }
+            }
+            ScheduleCtlrInt();
         }
 
         private bool ReadSector(int cyl, int head, int sector, bool verifyLabel)
