@@ -626,7 +626,11 @@ namespace D.IOP
                 // First sector of the run takes the DOB's filePage verbatim; each subsequent
                 // one steps with the sector.  Seeding this one low is what left every page
                 // number in the run off by one.
-                int filePage = basePage + k;
+                // MEASURED: filePage advances once every TWO sectors, not once per sector.
+                // The run at [8,0,1] carries base 769 and the guest expects 770 at [8,0,3] --
+                // base+1 across two sectors.  A freshly formatted pack shows the same rule
+                // independently: 128,129,129,130,130,131 across sectors 0-5.
+                int filePage = basePage + (k / 2);
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
