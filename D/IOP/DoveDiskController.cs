@@ -238,6 +238,12 @@ namespace D.IOP
         private void StartDma()
         {
             int n = WordCount();
+            if (LogWriter != null)
+            {
+                try { LogWriter.WriteLine("    DMA words=" + n + " dir=" + (_dmaDir == 1 ? "mem->FIFO" : "FIFO->mem")
+                        + " addr=0x" + _dmaAddr.ToString("X5") + " (" + (n <= 34 ? "DOB" : "data page") + ")"); }
+                catch { LogWriter = null; }
+            }
             if (n <= 34)
             {
                 // DOB transfer.
@@ -280,6 +286,24 @@ namespace D.IOP
         // sector(w17:0..7)=HIGH byte; head(w17:8..15)=LOW byte.  (cylinder-0 hides a wrong cyl decode at
         // the probe but corrupts every non-zero-cylinder seek -- hence the explicit split below.)
         private int Operation { get { return _dob[21] >> 8; } }
+
+        /// <summary>
+        /// diskMinusSectorCount -- DOB byte +4, i.e. WORD 2.  A two's-complement negative
+        /// count of sectors, which the controller counts up to zero; it is the ONE transfer
+        /// length, reused for every operation type (the type is diskOperation at byte 42 =
+        /// word 21).  There is no separate format-track-count field.
+        ///
+        /// This was previously read from word 22, which is diskLabelError -- a status word.
+        /// It read as 0 and decoded as "1", so single-sector work looked correct and every
+        /// multi-sector transfer silently moved only its first sector.
+        /// </summary>
+        private int SectorCount()
+        {
+            int neg = Bswap(_dob[2]);
+            if (neg == 0) return 1;
+            int n = 0x10000 - neg;
+            return (n >= 1 && n <= 256) ? n : 1;
+        }
         private int HdrCyl { get { return Bswap(_dob[16]); } }
         private int HdrSector { get { return _dob[17] >> 8; } }
         private int HdrHead { get { return _dob[17] & 0xFF; } }
@@ -299,6 +323,7 @@ namespace D.IOP
             SetErr(W_DataError, ErrNone);   SetErr(W_LastError, ErrNone);
 
             int cyl = HdrCyl, head = HdrHead, sector = HdrSector;
+            int wantSectors = SectorCount();
             DobOps++; LastCyl = cyl; LastHead = head; LastSector = sector;
             int op = Operation;
             bool error = false;
@@ -371,7 +396,20 @@ namespace D.IOP
                     + " LblErr=" + (_dob[W_LabelError] >> 8).ToString("X2")
                     + " DatErr=" + (_dob[W_DataError] >> 8).ToString("X2")
                     + " -> hdr w16=" + _dob[16].ToString("X4") + " w17=" + _dob[17].ToString("X4")
-                    + " dmaCount=0x" + _dmaCount.ToString("X4") + " @IOP" + HostClock); }
+                    + " dmaCount=0x" + _dmaCount.ToString("X4") + " sectors=" + wantSectors
+                    + " (w2=" + _dob[2].ToString("X4") + ")" + " @IOP" + HostClock);
+                    // Full DOB + the IOCB words just below it.  The transfer's page count has
+                    // to be in one of the words we do not decode, and the firmware tracks
+                    // remaining pages in the IOCB (DiskDove.asm:1094-1104).
+                    var sb2 = new System.Text.StringBuilder("    DOB:");
+                    for (int k = 0; k < 34; k++) sb2.Append(' ').Append(k).Append('=').Append(_dob[k].ToString("X4"));
+                    if (_dobAddr >= 0)
+                    {
+                        sb2.Append("   IOCB:");
+                        for (int off = -0x14; off <= 0; off += 2)
+                            sb2.Append(' ').Append(off).Append('=').Append(RdWord(_dobAddr + off).ToString("X4"));
+                    }
+                    LogWriter.WriteLine(sb2.ToString()); }
                 catch { LogWriter = null; }   // never let logging take the machine down
             }
             if (Log != null)   // DOB completion lines are rare (one per op) -- bypass the 800 register-log cap
@@ -425,7 +463,24 @@ namespace D.IOP
             {
                 // compare the on-disk label (words 0-7 significant) against the DOB label (w23-30)
                 for (int i = 0; i < 8; i++)
-                    if (label[i] != _dob[23 + i]) { SetErr(W_LabelError, ErrLabelVerify); return true; }
+                    if (label[i] != _dob[23 + i])
+                    {
+                        // Record both sides: a verify failure is only meaningful next to the
+                        // label the software expected and the one actually on the platter.
+                        if (LogWriter != null)
+                        {
+                            var sb = new System.Text.StringBuilder();
+                            sb.Append("  LABEL MISMATCH page=").Append(page)
+                              .Append(" CHS=[").Append(cyl).Append(',').Append(head).Append(',').Append(sector)
+                              .Append("] word").Append(i).Append("  disk=");
+                            for (int k = 0; k < 10; k++) sb.Append(label[k].ToString("X4")).Append(' ');
+                            sb.Append(" expected=");
+                            for (int k = 0; k < 10; k++) sb.Append(_dob[23 + k].ToString("X4")).Append(' ');
+                            try { LogWriter.WriteLine(sb.ToString()); } catch { LogWriter = null; }
+                        }
+                        SetErr(W_LabelError, ErrLabelVerify);
+                        return true;
+                    }
             }
             else if (!verifyLabel)
             {
