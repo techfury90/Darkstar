@@ -676,11 +676,15 @@ namespace D.IOP
                 cyl++;
             }
 
-            // Hand back filePage = base + sectors transferred.  Pilot copies the returned
-            // dob.label into op.labelPtr and uses it as the next run's base
-            // (CopyLabelWithByteSwap), so returning base + N-1 makes every subsequent run
-            // start one page low -- the 127 drift, which is exactly N-1.
-            int endPage = basePage + sectors;
+            // Hand back the LAST page written, not one past it -- the same rule the header
+            // follows, and for the same reason: the client adds one itself.
+            //
+            // Measured: with base + N, a rewrite of [0,0,1] came back with base 2 where the
+            // guest wanted 1, and it looped writing volume structures.  With base + N - 1 the
+            // rewrite lands on the page it was already on.  The source reads as though the
+            // returned label seeds the next base verbatim; as with the header, the machine
+            // says a page is consumed between here and the client.
+            int endPage = basePage + sectors - 1;
             _dob[23 + 5] = Bswap((ushort)(endPage & 0xFFFF));
             _dob[23 + 6] = (ushort)(attrHigh | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
 
