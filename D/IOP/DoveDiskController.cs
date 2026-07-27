@@ -633,7 +633,13 @@ namespace D.IOP
             // 0x0001, and reading it as page bits produced base pages of 131072 and
             // 33611647 which were then written into labels.  It is a client field -- copy it
             // through untouched, which is exactly what the guest expects to read back.
-            int basePage = Bswap(template[5]);
+            // Word 6 is filePageHi SHIFTED LEFT ONE, with an attribute flag in bit 0 -- the
+            // 8x305's NXTSC carries into it by adding 2, not 1, precisely to step over that
+            // flag.  Measured both ways: a page whose high word is 0 wants word6 = 0x0000,
+            // and one whose high word is 1 wants 0x0002.  Zeroing word 6 satisfied the first
+            // and broke the second; copying it through did the reverse.
+            int basePage = Bswap(template[5]) | ((Bswap(template[6]) >> 1) << 16);
+            int attrFlag = Bswap(template[6]) & 1;
 
             for (int k = 0; k < sectors; k++)
             {
@@ -645,6 +651,7 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
+                label[6] = Bswap((ushort)((((filePage >> 16) & 0x7FFF) << 1) | attrFlag));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
