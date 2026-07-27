@@ -77,7 +77,7 @@ namespace D.Doovke
             _32bppDisplayBuffer = new int[_displayWidth * _displayHeight];
 
             _refreshTimer = new System.Windows.Forms.Timer { Interval = RefreshIntervalMs };
-            _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); };
+            _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); AutoSaveRigidDisk(); };
 
             Load += OnWindowLoad;
             FormClosing += (s, e) => { SaveRigidDisk(); Shutdown(); };
@@ -107,10 +107,26 @@ namespace D.Doovke
         }
 
         /// <summary>
-        /// Flush the rigid pack.  Long operations (a format is many passes over the whole
-        /// surface) represent a lot of wall-clock time, so this runs on exit as well as on
-        /// demand -- and quietly does nothing if no pack file was attached.
+        /// Flush the pack if it has been written since the last save and enough time has
+        /// passed.  A format or an install represents a great deal of wall-clock time and
+        /// lives only in memory until written out; losing it to a crash or a mis-click is
+        /// far more expensive than a periodic 60 MB write.
         /// </summary>
+        private void AutoSaveRigidDisk()
+        {
+            if (string.IsNullOrEmpty(_machine.RigidDiskPath)) return;
+            long ops = _machine.Io.Rdc.DobOps;
+            if (ops == _lastSavedRdcOps) return;                       // nothing written since
+            if (_sinceSave.ElapsedMilliseconds < AutoSaveIntervalMs) return;
+            _lastSavedRdcOps = ops;
+            _sinceSave.Reset(); _sinceSave.Start();
+            SaveRigidDisk();
+        }
+
+        private const int AutoSaveIntervalMs = 120000;   // 2 minutes
+        private long _lastSavedRdcOps = -1;
+        private readonly System.Diagnostics.Stopwatch _sinceSave = System.Diagnostics.Stopwatch.StartNew();
+
         private void SaveRigidDisk()
         {
             if (string.IsNullOrEmpty(_machine.RigidDiskPath)) return;
@@ -356,8 +372,16 @@ namespace D.Doovke
 
             lock (_machineLock)
             {
+                // Flush the pack before tearing the machine down: a power cycle throws away
+                // all of memory, and the rigid disk lives there until it is written out.
+                string rigidPath = _machine.RigidDiskPath;
+                if (!string.IsNullOrEmpty(rigidPath)) _machine.SaveRigidDisk();
+
                 var fresh = new DoovkeMachine(_machine.BootRomPath, _machine.ConfigEepromPath);
                 if (!string.IsNullOrEmpty(_floppyPath)) fresh.LoadFloppy(0, _floppyPath);
+                // Re-attach the pack, or the new machine comes up blank AND with no path --
+                // which would also make every later Save silently do nothing.
+                if (!string.IsNullOrEmpty(rigidPath)) fresh.LoadRigidDisk(rigidPath);
                 if (bootKey.HasValue) fresh.ScheduleBootDeviceKey(bootKey.Value);
                 _machine = fresh;
             }
