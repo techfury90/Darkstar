@@ -399,8 +399,8 @@ namespace D.IOP
                     error = ReadSector(cyl, head, sector, op == 2 /*verifyLabel*/);
                     break;
 
-                case 3:  // writeData -- verify label, write data
-                    error = WriteSector(cyl, head, sector, false);
+                case 3:  // writeData -- tag "vvw": verify header, VERIFY label, write data
+                    error = WriteSector(cyl, head, sector, false, true /*verifyLabel*/);
                     break;
 
                 case 4:  // writeLabelAndData -- store label + data, over a RUN of sectors
@@ -431,8 +431,23 @@ namespace D.IOP
                     error = ReadLabelOnly(cyl, head, sector);
                     break;
 
-                case 7:  // verifyData
-                    error = !_disk.IsFormatted(Micropolis1325.Page(cyl, head, sector));
+                case 7:  // verifyData -- over the whole run, like writeLabelAndData
+                    // The count applies here too: the client asks to verify N sectors and we
+                    // were checking one and reporting one page of progress, so it walked the
+                    // disk a sector at a time -- 128 operations where the firmware expects
+                    // one.  No data moves for a verify, so the run needs no DMA coupling.
+                    {
+                        int vc = cyl, vh = head, vs = sector;
+                        for (int k = 0; k < wantSectors && !error; k++)
+                        {
+                            if (vc >= Micropolis1325.Cylinders) break;
+                            error = !_disk.IsFormatted(Micropolis1325.Page(vc, vh, vs));
+                            if (++vs < Micropolis1325.SectorsPerTrack) continue;
+                            vs = 0;
+                            if (++vh < Micropolis1325.Heads) continue;
+                            vh = 0; vc++;
+                        }
+                    }
                     if (error) SetErr(W_DataError, ErrSectorNotFound);
                     break;
 
@@ -454,7 +469,7 @@ namespace D.IOP
             // (CHS words 16-17) to the sector AFTER the last one transferred, so pageNumber advances
             // by the N sectors done (N=1 per DOB in this model).  The request CHS is still in
             // (cyl,head,sector); the label/currentCyl/status fields already reflect completion.
-            if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6))
+            if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6 || op == 7))
             {
                 // Advance the returned header by the sectors ACTUALLY TRANSFERRED, not by one.
                 // For a write, Pilot takes pagesCompleted straight from this header --
@@ -463,7 +478,7 @@ namespace D.IOP
                 // reporting +1 after a 128-sector run claims one page of progress out of 128,
                 // and the client re-issues against a header that never catches up.  That is
                 // the writer-strides-2 / reader-strides-1 split.
-                int advance = (op == 4) ? wantSectors : 1;
+                int advance = (op == 4 || op == 7) ? wantSectors : 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
                 int ns = linear % Micropolis1325.SectorsPerTrack;
@@ -707,6 +722,18 @@ namespace D.IOP
 
         private bool WriteSector(int cyl, int head, int sector, bool storeLabel)
         {
+            return WriteSector(cyl, head, sector, storeLabel, false);
+        }
+
+        private bool WriteSector(int cyl, int head, int sector, bool storeLabel, bool verifyLabel)
+        {
+            if (verifyLabel)
+            {
+                var onDisk = _disk.ReadLabel(Micropolis1325.Page(cyl, head, sector));
+                if (onDisk != null)
+                    for (int i = 0; i < 8; i++)
+                        if (onDisk[i] != _dob[23 + i]) { SetErr(W_LabelError, ErrLabelVerify); return true; }
+            }
             int page = Micropolis1325.Page(cyl, head, sector);
             var label = new ushort[10];
             for (int i = 0; i < 10; i++) label[i] = _dob[23 + i];
