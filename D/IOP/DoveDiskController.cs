@@ -653,13 +653,15 @@ namespace D.IOP
             // +65536 into +16M.
             int basePage = Bswap(template[5]) | (((template[6] >> 1) & 0x7F) << 16);
             int attrFlag = template[6] & 1;          // bit 0 of byte 12
-            // byte 13 = pageZeroAttributes.  It is NOT carried through: the client supplies
-            // it, but the label the guest expects to read back always has it zero.  Every
-            // expected word 6 observed across the whole install is 0x0000 or 0x0002 -- high
-            // byte zero without exception -- while carrying the template's value through
-            // produced 0x0200 and 800 label rejections across 62 sectors, every one of them
-            // word 6 and nothing else.
-            int attrHigh = 0;
+            // byte 13 = pageZeroAttributes.  It belongs to FILE PAGE ZERO ONLY: the client's
+            // value is written there and forced to zero on every other page of the run.
+            //
+            // Both extremes have now been tried and both are wrong.  Carrying it through to
+            // every sector produced 0x0200 where the guest wanted 0x0000 -- 800 label
+            // rejections, all recoverable, and the install still reached disk 18 of 20.
+            // Zeroing it everywhere stopped the install dead at disk 9.  The rule is per
+            // page, and it is applied at the point of use below.
+            int attrTemplate = template[6] & 0xFF00;
 
             for (int k = 0; k < sectors; k++)
             {
@@ -671,6 +673,7 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
+                int attrHigh = (filePage == 0) ? attrTemplate : 0;
                 label[6] = (ushort)(attrHigh | (((filePage >> 16) & 0x7F) << 1) | attrFlag);
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
@@ -692,10 +695,22 @@ namespace D.IOP
             // says a page is consumed between here and the client.
             int endPage = basePage + sectors - 1;
             _dob[23 + 5] = Bswap((ushort)(endPage & 0xFFFF));
-            _dob[23 + 6] = (ushort)(attrHigh | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
+            _dob[23 + 6] = (ushort)(((endPage == 0) ? attrTemplate : 0)
+                                    | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
 
             if (LogWriter != null)
             {
+                // incrementDataPtr lives in the IOCB flag word 9 words below the DOB (bit 8,
+                // Mesa MSB-0 = 0x0080).  When it is CLEAR the client is filling -- every page
+                // DMA re-reads one source page, so replicating that page across the run is
+                // right.  When it is SET each sector should get DISTINCT data, and replicating
+                // silently writes the same page 128 times.  We do not model ECC, so wrong data
+                // raises no error at all: the controller stays clean and the guest dies later.
+                int iocbFlags = _dobAddr >= 0 ? RdWord(_dobAddr - 18) : 0;
+                try { LogWriter.WriteLine("    RUN FLAGS iocb-9=" + iocbFlags.ToString("X4")
+                        + " incrementDataPtr=" + (((iocbFlags & 0x0080) != 0) ? "SET(distinct)" : "clear(fill)")
+                        + "  bswapped=" + Bswap((ushort)iocbFlags).ToString("X4")); }
+                catch { LogWriter = null; }
                 try { LogWriter.WriteLine("    LABEL RUN " + sectors + " sectors from CHS=["
                         + c0 + "," + h0 + "," + s0 + "] filePage from "
                         + basePage + ", fileID=" + Bswap(template[0])); }
