@@ -471,14 +471,16 @@ namespace D.IOP
             // (cyl,head,sector); the label/currentCyl/status fields already reflect completion.
             if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6 || op == 7))
             {
-                // Advance the returned header by the sectors ACTUALLY TRANSFERRED, not by one.
-                // For a write, Pilot takes pagesCompleted straight from this header --
-                // PageNumber(returned) - PageNumber(start) -- and then assigns
-                // op.clientHeader <- the returned header, with no increment of its own.  So
-                // reporting +1 after a 128-sector run claims one page of progress out of 128,
-                // and the client re-issues against a header that never catches up.  That is
-                // the writer-strides-2 / reader-strides-1 split.
-                int advance = (op == 4 || op == 7) ? wantSectors : 1;
+                // The returned header ends ON the last sector processed, not one past it.
+                // Measured three times over: with an advance of 0 the client's next request
+                // arrived one page on, with 1 it arrived two on, with 128 it arrived 129 on.
+                // client_next = our_returned + 1 consistently, so for consecutive operations
+                // to abut exactly the header must end on the last sector stepped.
+                //
+                // Returning one past it made every operation jump a whole cylinder plus a
+                // sector (+129), so the sector crept by one per op and the head only moved
+                // when it wrapped, sixteen cylinders later.
+                int advance = ((op == 4 || op == 7) ? wantSectors : 1) - 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
                 int ns = linear % Micropolis1325.SectorsPerTrack;
