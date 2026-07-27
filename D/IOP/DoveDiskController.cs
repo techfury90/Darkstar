@@ -673,8 +673,17 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                int attrHigh = (filePage == 0) ? attrTemplate : 0;
-                label[6] = (ushort)(attrHigh | (((filePage >> 16) & 0x7F) << 1) | attrFlag);
+                // Copy word 6 and touch ONLY the file-page bits (byte 12 bits 1-7).  The
+                // attribute half -- byte 13 and byte 12's flag in bit 0 -- is the client's and
+                // is preserved byte-for-byte.
+                //
+                // The controller does not synthesize, vary or zero attributes; Pilot has
+                // already done it.  NextLabel zeroes pageZeroAttributes when it steps the file
+                // page, and DiskHeadLabeledDukeA forces runLength to 1 whenever a run's base
+                // file page is 0 -- so page 0 always arrives alone carrying the client value,
+                // and every other DOB arrives with the attributes already zero.  Decoding and
+                // rebuilding this half is what put the client's value on non-page-0 sectors.
+                label[6] = (ushort)((template[6] & 0xFF01) | (((filePage >> 16) & 0x7F) << 1));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
 
@@ -695,8 +704,7 @@ namespace D.IOP
             // says a page is consumed between here and the client.
             int endPage = basePage + sectors - 1;
             _dob[23 + 5] = Bswap((ushort)(endPage & 0xFFFF));
-            _dob[23 + 6] = (ushort)(((endPage == 0) ? attrTemplate : 0)
-                                    | (((endPage >> 16) & 0x7F) << 1) | attrFlag);
+            _dob[23 + 6] = (ushort)((template[6] & 0xFF01) | (((endPage >> 16) & 0x7F) << 1));
 
             if (LogWriter != null)
             {
