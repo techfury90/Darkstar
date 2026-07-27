@@ -208,7 +208,10 @@ namespace D.IOP
             }
             switch (port)
             {
-                case 0x0200: break;                                     // AM2942 control (mode 3) -- no state needed
+                case 0x0200:                                            // AM2942 control register
+                    // %ResetDiskDMA writes mode 3 here right after pulsing the reset line.
+                    _dmaWasReset = (value & 0xFF) == 0x06;
+                    break;
                 case 0x0214: Command((byte)value); break;
                 // AM2942 address halves are order-independent: the firmware writes 0x020A BEFORE 0x0208,
                 // so 0x0208 must set ONLY addr[23:9] and preserve addr[8:1] (the "auto-reinit" is the DMA
@@ -224,7 +227,22 @@ namespace D.IOP
 
         // AM2942 DMA status (0x0210): idle after each transfer.  We complete synchronously, so
         // RunSM=0 and EndOfXfer' asserts "done"; report a benign idle byte.
-        private byte DmaStatus() { return 0x00; }
+        private byte DmaStatus()
+        {
+            // Active-low ("Bar") signals: 0 = the good/quiescent condition.  0x00 therefore
+            // reads as "no error, FIFO empty, transfer ended", which is what every one of the
+            // firmware's tests needs to proceed (DoDiskCommand entry, CheckFIFOEmpty, and the
+            // per-page check in DoDiskDMA all require their bits to be 0).
+            //
+            // The exception is the reset signature: TestForDiskDMAReset does
+            // AND AL,0x33 / CMP AL,0x20 (diskDMAFIFOFullBar), so immediately after a
+            // %ResetDiskDMA the status must read 0x20 or the firmware concludes the reset did
+            // not take.  Only the recovery choreography looks at this, which is why a static
+            // 0x00 has been survivable so far.
+            return _dmaWasReset ? (byte)0x20 : (byte)0x00;
+        }
+
+        private bool _dmaWasReset;
 
         private void Command(byte cmd)
         {
@@ -265,6 +283,7 @@ namespace D.IOP
         // discriminating DOB (count <= 34) from a 512-byte data page (count 256) by the count.
         private void StartDma()
         {
+            _dmaWasReset = false;          // a transfer means we are out of the reset state
             int n = WordCount();
             if (LogWriter != null)
             {
