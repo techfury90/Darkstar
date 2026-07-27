@@ -67,6 +67,12 @@ namespace D.IOP
             _disk = new Micropolis1325();
             _rdc = new DoveDiskController(_memory, _disk);
 
+            // Per-DOB trace.  0935 on a disk operation means a non-goodCompletion status
+            // reached Pilot (ioError -> Space.IOError -> uncaught), so the failing op and its
+            // error bytes are the whole question.
+            string rdcLogPath = Environment.GetEnvironmentVariable("DOVE_RDC_LOG");
+            if (!string.IsNullOrEmpty(rdcLogPath)) _rdc.LogWriter = OpenTrace(rdcLogPath);
+
             // Floppy Read Data → 80186 DMA channel 0 → main memory.  DMA0 destination
             // is FFC4 (low 16) + FFC6 (upper 4 bits); FFC8 = transfer count.
             _fdc.DmaOut = data =>
@@ -138,6 +144,23 @@ namespace D.IOP
         public I93C46 ConfigEeprom { get { return _configEeprom; } }
 
         /// <summary>Load the 93C46 config EEPROM (U128) image (128 bytes).</summary>
+        /// <summary>
+        /// Open a trace file that can be READ while the machine runs.  Without FileShare.Read
+        /// the obvious thing to do with a trace -- open it and watch -- either fails or makes
+        /// the writer fail, and a diagnostic must never be able to disturb the machine.
+        /// </summary>
+        public static System.IO.StreamWriter OpenTrace(string path)
+        {
+            try
+            {
+                var fs = new System.IO.FileStream(path, System.IO.FileMode.Create,
+                                                  System.IO.FileAccess.Write,
+                                                  System.IO.FileShare.ReadWrite | System.IO.FileShare.Delete);
+                return new System.IO.StreamWriter(fs) { AutoFlush = true };
+            }
+            catch { return null; }      // tracing is never worth failing the run for
+        }
+
         public void LoadConfigEeprom(byte[] image) { _configEeprom.Load(image); }
 
         /// <summary>

@@ -62,6 +62,9 @@ namespace D.IOP
         public System.Collections.Generic.List<string> Log;   // optional diagnostic
         public long HostClock;
 
+        /// <summary>Optional per-operation trace sink (see DOVE_RDC_LOG).</summary>
+        public System.IO.TextWriter LogWriter;
+
         /// <summary>
         /// Clocks between a command being accepted and its interrupt being asserted.
         /// The controller must NOT complete inside the OUT that writes the command
@@ -357,6 +360,19 @@ namespace D.IOP
                 if (ns >= Micropolis1325.SectorsPerTrack) { ns = 0; nh++; if (nh >= Micropolis1325.Heads) { nh = 0; nc++; } }
                 _dob[16] = Bswap((ushort)nc);                 // cylinder  (ByteSwappedWord)
                 _dob[17] = (ushort)((ns << 8) | nh);          // sector(hi) : head(lo)
+            }
+            if (Log == null && LogWriter == null) { /* no logging */ }
+            else if (Log == null)
+            {
+                // File-only path: keep the same content without growing an in-memory list.
+                try { LogWriter.WriteLine("DOB op=" + op + " req CHS=[" + cyl + "," + head + "," + sector + "]"
+                    + " err=" + error
+                    + " HdrErr=" + (_dob[W_HeaderError] >> 8).ToString("X2")
+                    + " LblErr=" + (_dob[W_LabelError] >> 8).ToString("X2")
+                    + " DatErr=" + (_dob[W_DataError] >> 8).ToString("X2")
+                    + " -> hdr w16=" + _dob[16].ToString("X4") + " w17=" + _dob[17].ToString("X4")
+                    + " dmaCount=0x" + _dmaCount.ToString("X4") + " @IOP" + HostClock); }
+                catch { LogWriter = null; }   // never let logging take the machine down
             }
             if (Log != null)   // DOB completion lines are rare (one per op) -- bypass the 800 register-log cap
             {

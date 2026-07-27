@@ -152,20 +152,22 @@ namespace D.IOP
                 _logChecked = true;
                 string path = Environment.GetEnvironmentVariable("DOVE_ENET_LOG");
                 if (string.IsNullOrEmpty(path)) return;
-                _log = new System.IO.StreamWriter(path) { AutoFlush = true };
+                _log = DoveIOPIO.OpenTrace(path);
+                if (_log == null) return;
                 _log.WriteLine("SCP@{0:X5}: sysbus={1:X2} iscpPtr={2:X4}{3:X4}",
                     ScpAddress, _memory.ReadByte(ScpAddress),
                     _memory.ReadWord(ScpAddress + 8), _memory.ReadWord(ScpAddress + 6));
             }
             if (ChannelAttentions > 60) return;
 
-            _log.WriteLine(
+            try { _log.WriteLine(
                 "CA#{0}  iscp={1:X5} busy={2:X2}  scb={3:X5}  AS-READ status={4:X4} "
                 + "command={5:X4} (cuc={6} ruc={7}) cbl={8:X4}   cmds={9}  int raised={11}/acked={10}",
                 ChannelAttentions, _iscpAddress, _memory.ReadByte(_iscpAddress),
                 _scbAddress, _lastStatusRead, _lastCommandRead,
                 (_lastCommandRead >> 8) & 7, (_lastCommandRead >> 4) & 7,
-                _lastCblRead, CommandsExecuted, InterruptAcknowledges, InterruptsRaised);
+                _lastCblRead, CommandsExecuted, InterruptAcknowledges, InterruptsRaised); }
+            catch { _log = null; }
         }
 
         private System.IO.StreamWriter _log;
