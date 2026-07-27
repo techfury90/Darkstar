@@ -216,6 +216,11 @@ namespace D.IOP
         private void Command(byte cmd)
         {
             _lastCc = cmd & 0x3;
+            // A new command supersedes any transfer still in flight.  Leaving one latched
+            // would suppress every later completion interrupt -- which is exactly what turned
+            // a stalled multi-sector write into an endless retry of a operation that
+            // otherwise succeeded.
+            if (_lastCc == 1 || _lastCc == 2) _xferActive = false;
             switch (_lastCc)
             {
                 case 0:  // go to idle
@@ -233,9 +238,7 @@ namespace D.IOP
                             for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
                         _dataDmaArmed = false;
                     }
-                    // A multi-sector operation is still streaming: its completion interrupt
-                    // belongs at the end of the LAST sector, not here.
-                    if (!_xferActive) ScheduleCtlrInt();
+                    ScheduleCtlrInt();
                     break;
                 case 3:  // Store DOB back (the FIFO->mem StartDMA follows and writes it out)
                     _status = 0x43;
@@ -445,19 +448,17 @@ namespace D.IOP
                     + "  IOCB(off from DOB): " + iocb);
             }
 
-            // The first sector is done.  If diskMinusSectorCount asked for more, hand the rest
-            // to the streaming path: the IOP is about to issue one page-DMA per remaining
-            // sector, and each of those moves one.
-            if (!error && wantSectors > 1 && (op == 2 || op == 3 || op == 4 || op == 6))
+            // MEASURED, and it refutes the assumed invariant: for an op whose
+            // diskMinusSectorCount is -128, the IOP issues exactly ONE page-DMA, not 128.
+            // So diskPageCount and diskMinusSectorCount are NOT simply negatives of each
+            // other on this path, and a model that waits for one page per sector waits
+            // forever.  Until the relationship is known, complete on the pages actually
+            // supplied rather than inventing transfers.
+            if (wantSectors > 1 && LogWriter != null)
             {
-                _xferActive = true;
-                _xferOp = op;
-                _xferError = false;
-                _xferRemaining = wantSectors - 1;
-                _xferCyl = cyl; _xferHead = head; _xferSector = sector;
-                StepAddress();                                   // first sector already moved
-                _status = 0x42;
-                return;                                          // completion comes later
+                try { LogWriter.WriteLine("    NOTE op=" + op + " asked for " + wantSectors
+                        + " sectors; only the DMA'd page(s) were moved"); }
+                catch { LogWriter = null; }
             }
 
             _status = (byte)(error ? 0xC2 : 0x42);          // e+d on error, else done
