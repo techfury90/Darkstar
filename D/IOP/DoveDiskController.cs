@@ -394,15 +394,9 @@ namespace D.IOP
                     _dob[W_DriveCtlrStatus] = 0x0000;       // ready, at track 0
                     break;
 
-                case 2:  // readData -- data only
-                case 6:  // readLabelAndData -- copy the label into the DOB
-                    // Reads do NOT verify the label.  In the 8x305 that check lives in WTDC
-                    // (writeData): VFYHD then VFYLBL.  We were verifying on op 2 and turning
-                    // a page-number difference into a hard labelVerify error on a read, which
-                    // manufactured every LblErr=23 in the trace and sent the client into a
-                    // rewrite cascade.  Only word 5 ever differed; the rest of the label
-                    // matched exactly.
-                    error = ReadSector(cyl, head, sector, false);
+                case 2:  // readData  -- verify label, DMA data->mem
+                case 6:  // readLabelAndData -- copy label, DMA data->mem
+                    error = ReadSector(cyl, head, sector, op == 2 /*verifyLabel*/);
                     break;
 
                 case 3:  // writeData -- verify label, write data
