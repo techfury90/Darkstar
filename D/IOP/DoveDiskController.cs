@@ -480,11 +480,18 @@ namespace D.IOP
                 // Returning one past it made every operation jump a whole cylinder plus a
                 // sector (+129), so the sector crept by one per op and the head only moved
                 // when it wrapped, sixteen cylinders later.
-                // One PAST the last sector stepped.  This and the returned label filePage
-                // below are the same rule: Pilot derives pagesCompleted from the header delta
-                // and seeds the next run's label base from the returned filePage, so both must
-                // read base + sectorsTransferred or the next run starts one low.
-                int advance = (op == 4 || op == 7) ? wantSectors : 1;
+                // The HEADER ends ON the last sector stepped; the returned LABEL filePage
+                // (below) ends one past.  They are not the same rule, however much they look
+                // like they should be -- controlled measurement, same build, one variable:
+                //
+                //   advance N-1  ->  client's next request lands +N   (correct, abutting)
+                //   advance N    ->  client's next request lands +N+1 (marches a cylinder)
+                //
+                // Measured in both directions.  The source reads as though the client takes
+                // the returned header verbatim, which would make advance N correct; the
+                // machine disagrees, so something between the head and the controller
+                // consumes a page.  Going with the machine.
+                int advance = ((op == 4 || op == 7) ? wantSectors : 1) - 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
                 int ns = linear % Micropolis1325.SectorsPerTrack;
