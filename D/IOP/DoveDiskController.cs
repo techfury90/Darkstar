@@ -456,10 +456,28 @@ namespace D.IOP
             // (cyl,head,sector); the label/currentCyl/status fields already reflect completion.
             if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6))
             {
-                int ns = sector + 1, nh = head, nc = cyl;
-                if (ns >= Micropolis1325.SectorsPerTrack) { ns = 0; nh++; if (nh >= Micropolis1325.Heads) { nh = 0; nc++; } }
+                // Advance the returned header by the sectors ACTUALLY TRANSFERRED, not by one.
+                // For a write, Pilot takes pagesCompleted straight from this header --
+                // PageNumber(returned) - PageNumber(start) -- and then assigns
+                // op.clientHeader <- the returned header, with no increment of its own.  So
+                // reporting +1 after a 128-sector run claims one page of progress out of 128,
+                // and the client re-issues against a header that never catches up.  That is
+                // the writer-strides-2 / reader-strides-1 split.
+                int advance = (op == 4) ? wantSectors : 1;
+                int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
+                             + sector + advance;
+                int ns = linear % Micropolis1325.SectorsPerTrack;
+                int track = linear / Micropolis1325.SectorsPerTrack;
+                int nh = track % Micropolis1325.Heads;
+                int nc = track / Micropolis1325.Heads;
                 _dob[16] = Bswap((ushort)nc);                 // cylinder  (ByteSwappedWord)
                 _dob[17] = (ushort)((ns << 8) | nh);          // sector(hi) : head(lo)
+                if (LogWriter != null && advance > 1)
+                {
+                    try { LogWriter.WriteLine("    HEADER ADVANCE +" + advance + " -> CHS=["
+                            + nc + "," + nh + "," + ns + "]"); }
+                    catch { LogWriter = null; }
+                }
             }
             if (Log == null && LogWriter == null) { /* no logging */ }
             else if (Log == null)
