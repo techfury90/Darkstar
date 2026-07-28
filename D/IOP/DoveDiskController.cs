@@ -161,13 +161,22 @@ namespace D.IOP
         // execution that continued with corrupted state.
         private long _idleClocks;
         private bool _parkedDumped;
+        private int _parkedCount;
 
         public void Tick(int clocks)
         {
             if (!_parkedDumped && LogWriter != null && DobOps > 0)
             {
                 _idleClocks += clocks;
-                if (_idleClocks > 40000000) { _parkedDumped = true; DumpFcb("PARKED (no RDC activity)"); }
+                // Sample repeatedly: SystemIdle is a BUSY LOOP (STI / poke the arbiter /
+                // JMP SystemLoop), so an Opie that is merely idle still moves.  A CS:IP that is
+                // identical across samples means the IOP is genuinely stuck, not idling.
+                if (_idleClocks > 40000000)
+                {
+                    _idleClocks = 0;
+                    if (++_parkedCount >= 4) _parkedDumped = true;
+                    DumpFcb("PARKED sample " + _parkedCount);
+                }
             }
             if (_ctlrIntDelay >= 0)
             {
@@ -279,6 +288,11 @@ namespace D.IOP
         private void DumpFcb(string why)
         {
             if (LogWriter == null || (_fcbDumps >= 8 && !why.StartsWith("PARKED"))) return;
+            if (why.StartsWith("PARKED") && _parkedCount > 1 && CpuState != null)
+            {
+                try { LogWriter.WriteLine("  " + why + "  CPU " + CpuState()); } catch { LogWriter = null; }
+                return;
+            }
             _fcbDumps++;
             try
             {
@@ -347,6 +361,37 @@ namespace D.IOP
                     }
                     LogWriter.WriteLine(hits.ToString());
                 }
+                // THE DI DIFFERENTIAL.  DiskReadLabelAndData does three stores, and only the
+                // middle one goes through DI:
+                //     MOV bootDeviceIORSpace...diskPageCount, 1            (direct)
+                //     MOV [DI].diskOperation, ReadDiskLabelAndData         (via DI)  <-- 6
+                //     MOV bootDeviceIORSpace...diskDataXferDirection, read (direct)
+                // DI must survive %WaitForCondition on the bootstrap stack.  operation still 0
+                // (restore) WHILE the direct-addressed direction reads "read" proves the direct
+                // stores landed and the DI-relative one did not -- i.e. DI was not preserved
+                // across the blocking wait.  That also explains the second "restore": it is not
+                // a retry, it is the READ executing with a stale operation byte.
+                sb.Append("    DI-DIFF: DOB.diskOperation[0x03EB8]=").Append(RdB(0x03EB8).ToString("X2"))
+                  .Append(RdB(0x03EB8) == 6 ? " (6 = ReadDiskLabelAndData, ok)"
+                          : RdB(0x03EB8) == 0 ? "  <<< 0 = still Recalibrate: DI store LOST" : " (?)")
+                  .Append("  IOCB.dataXferDirection[0x03E7C]=").Append(RdB(0x03E7C).ToString("X2"))
+                  .Append("  pageCount[0x03E7A]=").Append(RdLE(0x03E7A).ToString("X4")).AppendLine();
+                // OPIE SCHEDULING.  %ContinueAtSystemLevel is a plain round-robin yield --
+                // InsertInSystemQueue then dispatch -- so the disk handler should come back
+                // within one trip through systemQueue.  Three readings split the failure:
+                //   queue head 0xFF (empty)        -> InsertInSystemQueue never linked it
+                //   head=2, task waitForSystemState -> enqueued, dispatcher never ran it
+                //   task systemState, not running   -> dispatched, IRET went to a bad address
+                //                                      (the [mapImage][ES][IP][CS][FLAGS] frame
+                //                                       misaligned by a missing map-image push)
+                sb.Append("    OPIE: diskTask.taskState[0x03A7E]=").Append(RdLE(0x03A7E).ToString("X4"))
+                  .Append("  taskSP[0x03A78]=").Append(RdLE(0x03A78).ToString("X4"))
+                  .Append("  taskCondition[0x03A74]=").Append(RdLE(0x03A74).ToString("X4"))
+                  .Append("  taskQueue[0x03A70]=").Append(RdLE(0x03A70).ToString("X4")).Append('/')
+                  .Append(RdLE(0x03A72).ToString("X4")).AppendLine();
+                sb.Append("    OPIE: systemQueue.head[0x03B30]=").Append(RdLE(0x03B30).ToString("X4"))
+                  .Append((RdB(0x03B30) == 0xFF || RdB(0x03B31) == 0xFF) ? "  <<< EMPTY (nilHandlerID)" : "")
+                  .Append("  dmaTask.taskState[0x03A90]=").Append(RdLE(0x03A90).ToString("X4")).AppendLine();
                 sb.Append("    raw:");
                 for (int i = 0; i < FcbLen; i++)
                 {

@@ -984,8 +984,37 @@ namespace D.IOP
 
         // -------- Interrupts --------
 
+        /// <summary>
+        /// Ring of the last 32 vectors serviced, with the CS:IP each one interrupted.  The B2
+        /// ROM points every vector it does not use at Bindweed's UnsupportedIntHandler, which
+        /// CLIs and spins in DebPutOutByte waiting on a debugger umbilical that is not there --
+        /// so ONE stray vector freezes the IOP permanently and strands every Opie task in
+        /// whatever state it held.  This names the culprit instead of inferring it.
+        /// </summary>
+        private readonly int[] _vecRing = new int[32 * 3];
+        private int _vecRingPos, _vecRingCount;
+
+        public string RecentVectors()
+        {
+            var sb = new System.Text.StringBuilder();
+            int n = _vecRingCount < 32 ? _vecRingCount : 32;
+            int start = (_vecRingPos / 3 - n + 32) % 32;
+            for (int i = 0; i < n; i++)
+            {
+                int k = ((start + i) % 32) * 3;
+                sb.Append(' ').Append(_vecRing[k].ToString("X2")).Append('@')
+                  .Append(_vecRing[k + 1].ToString("X4")).Append(':').Append(_vecRing[k + 2].ToString("X4"));
+            }
+            return sb.Length == 0 ? " (none)" : sb.ToString();
+        }
+
         private void ServiceInterrupt(int vector)
         {
+            _vecRing[_vecRingPos] = vector & 0xFF;
+            _vecRing[_vecRingPos + 1] = _seg[CS];
+            _vecRing[_vecRingPos + 2] = _ip;
+            _vecRingPos = (_vecRingPos + 3) % (32 * 3);
+            _vecRingCount++;
             Push16((ushort)(_flags | 0xF002));
             SetFlag(IF, false);
             SetFlag(TF, false);

@@ -138,7 +138,8 @@ namespace D.Doovke
                     "CS:IP={0:X4}:{1:X4} AX={2:X4} BX={3:X4} CX={4:X4} DX={5:X4} SI={6:X4} DI={7:X4} BP={8:X4} SP={9:X4} DS={10:X4} ES={11:X4} SS={12:X4} F={13:X4}{14}",
                     _iop.GetCS, _iop.IP, _iop.GetAX, _iop.GetBX, _iop.GetCX, _iop.GetDX,
                     _iop.GetSI, _iop.GetDI, _iop.GetBP, _iop.GetSP, _iop.GetDS, _iop.GetES,
-                    _iop.GetSS, _iop.Flags, _iop.Halted ? " HALTED" : "");
+                    _iop.GetSS, _iop.Flags, _iop.Halted ? " HALTED" : "")
+                    + "  VECTORS(last32 vec@CS:IP):" + _iop.RecentVectors();
 
             // The 80186's integrated interrupt controller drives master-8259 IR6.  Without this
             // SyncInternalIrq() bails on a null _pcb and IR6 is never raised -- POST polls the
