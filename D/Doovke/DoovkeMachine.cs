@@ -141,6 +141,36 @@ namespace D.Doovke
                     _iop.GetSS, _iop.Flags, _iop.Halted ? " HALTED" : "")
                     + "  VECTORS(last32 vec@CS:IP):" + _iop.RecentVectors();
 
+            // Watch the ROM's client-condition word (BOOTSTRAPIOR + 0x30) and diskConditionWork.
+            // A completed operation should notify the ROM exactly ONCE.  A second notify latches
+            // preNotifyFlag, so the ROM's NEXT %WaitForCondition returns immediately without
+            // blocking -- it then tests diskError (still 0 from the restore), falls through
+            // JNC GoToRAM, and jumps into a boot buffer nothing ever filled.  That is consistent
+            // with everything observed: two op-0 restores, no op 6 ever issued, and the IOP
+            // wandering 12KB of zeros from 00A0:0000 to the undefined opcode at 00A0:30AE.
+            if (_mem != null && _io != null && _io.Rdc != null)
+            {
+                int prevCond = -1;
+                _mem.OnSramWrite = (addr, val) =>
+                {
+                    if (addr != 0x03E30 && addr != 0x03E31 && addr != 0x03A98 && addr != 0x03A99) return;
+                    var w = _io.Rdc.LogWriter;
+                    if (w == null) return;
+                    int cur = _mem.ReadByte(0x03E30) | (_mem.ReadByte(0x03E31) << 8);
+                    if (cur == prevCond && addr >= 0x03A98) return;
+                    prevCond = cur;
+                    try
+                    {
+                        w.WriteLine(string.Format(
+                            "  COND W [{0:X5}]<-{1:X2}  ROMcond={2:X4} diskCondWork={3:X4}  from CS:IP={4:X4}:{5:X4}",
+                            addr, val, cur,
+                            _mem.ReadByte(0x03A98) | (_mem.ReadByte(0x03A99) << 8),
+                            _iop.GetCS, _iop.IP));
+                    }
+                    catch { }
+                };
+            }
+
             // The 80186's integrated interrupt controller drives master-8259 IR6.  Without this
             // SyncInternalIrq() bails on a null _pcb and IR6 is never raised -- POST polls the
             // master IRR at port 0x00 for exactly 0x40 (IR6) and hangs when it never appears.

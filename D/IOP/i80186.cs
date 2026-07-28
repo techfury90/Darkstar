@@ -188,10 +188,32 @@ namespace D.IOP
             return cycles;
         }
 
+        /// <summary>
+        /// Set by a load of SS (MOV SS,rm / POP SS).  The 8086/80186 suppresses interrupt
+        /// RECOGNITION -- maskable and NMI alike -- for the one instruction that follows, so a
+        /// "MOV SS,x / MOV SP,y" pair is atomic and can never be interrupted with the new stack
+        /// segment paired against the old stack pointer.
+        ///
+        /// Without it, an interrupt landing in that two-instruction window pushes onto SS:(stale
+        /// SP), scribbles over whatever lives there, and builds a malformed frame whose IRET
+        /// transfers to a garbage address.  Opie's task-resume path is exactly that pair, twice:
+        ///     FromInterruptState:  MOV SS,[SI].returnSPSS.segmentValue / MOV SP,...offsetValue
+        ///     FromSystemState:     MOV SS,[BX].stackSegment            / MOV SP,OFFSET SystemStack
+        /// so on this machine the window is hit during disk task switches, where the RDC's DMA
+        /// (slave IR2) and controller (IR3) lines are both live.
+        /// </summary>
+        private bool _ssLoadInhibit;
+
         private int ExecuteOne()
         {
+            // One-instruction interrupt shadow after a stack-segment load: consume it here and
+            // skip sampling entirely, so the instruction that follows MOV SS / POP SS runs with
+            // interrupts unrecognised, exactly as the hardware does.
+            bool ssShadow = _ssLoadInhibit;
+            _ssLoadInhibit = false;
+
             // Hardware interrupts are sampled at instruction boundaries.
-            if (_nmiPending)
+            if (!ssShadow && _nmiPending)
             {
                 _nmiPending = false;
                 _halted = false;
@@ -200,7 +222,7 @@ namespace D.IOP
                 return 45;
             }
 
-            if (GetFlag(IF) && InterruptAcknowledge != null)
+            if (!ssShadow && GetFlag(IF) && InterruptAcknowledge != null)
             {
                 int vector = InterruptAcknowledge();
                 if (vector >= 0)
@@ -259,7 +281,7 @@ namespace D.IOP
                 case 0x07: _seg[ES] = Pop16(); break;
                 case 0x0E: Push16(_seg[CS]); break;
                 case 0x16: Push16(_seg[SS]); break;
-                case 0x17: _seg[SS] = Pop16(); break;
+                case 0x17: _seg[SS] = Pop16(); _ssLoadInhibit = true; break;   // POP SS -- shadows the next instruction
                 case 0x1E: Push16(_seg[DS]); break;
                 case 0x1F: _seg[DS] = Pop16(); break;
 
@@ -329,7 +351,11 @@ namespace D.IOP
                 case 0x8B: ReadModRM(); SetReg16(_modrmReg, (ushort)ReadRM16()); break;
                 case 0x8C: ReadModRM(); WriteRM16(_seg[_modrmReg & 3]); break;         // MOV rm16, sreg
                 case 0x8D: ReadModRM(); SetReg16(_modrmReg, (ushort)_modrmOff); break; // LEA
-                case 0x8E: ReadModRM(); _seg[_modrmReg & 3] = (ushort)ReadRM16(); break; // MOV sreg, rm16
+                case 0x8E:                                                  // MOV sreg, rm16
+                    ReadModRM();
+                    _seg[_modrmReg & 3] = (ushort)ReadRM16();
+                    if ((_modrmReg & 3) == SS) _ssLoadInhibit = true;        // shadows the next instruction
+                    break;
                 case 0x8F: ReadModRM(); WriteRM16(Pop16()); break;                    // POP rm16
 
                 // ---- XCHG AX,r16 / NOP ----
