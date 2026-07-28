@@ -101,9 +101,19 @@ namespace D.IOP
         // controller cannot do the whole transfer at command time: it consumes one sector per
         // page-DMA and only reports completion when the sector count reaches zero -- which is
         // what produces N DMA interrupts and exactly ONE controller interrupt.
+        // Multi-sector streaming state.  DiskDove.asm:1101-1130 (DiskDMADataXfer) issues ONE
+        // StartDMA per 512-byte page, blocks on %WaitForInterrupt() with no timeout, then
+        // re-arms the AM2942 and goes round again until diskPageCount hits zero.  So the
+        // controller transfers a single sector per StartDMA, must raise the DMA interrupt after
+        // EVERY one, and raises the controller-completion interrupt only when the run ends.
+        // The FIRMWARE advances the source pointer (gated by incrementDataPtr), so each
+        // StartDMA already carries the right address -- the controller must not compute one.
         private bool _xferActive;
         private int _xferOp, _xferCyl, _xferHead, _xferSector, _xferRemaining;
         private bool _xferError;
+        private int _xferLastCyl, _xferLastHead, _xferLastSector;   // ends ON the last sector
+        private ushort _xferL5, _xferL6;                            // run's base label words
+        private int _xferIndex;                                     // sector number within the run
         private int _dataDmaAddr; private bool _dataDmaArmed;   // read data-page DMA armed pre-Execute, emitted at cc=2
         private int _dobAddr = -1;   // physical address of the DOB (last <=34-word DMA target) -- IOCB is just below it
         // DIAGNOSTIC gate: DOVE_NO_DATA_DMA=1 suppresses the 512-byte data-page transfer (both directions)
@@ -202,6 +212,26 @@ namespace D.IOP
         }
 
         // ---- port interface (called from DoveIOPIO) ----
+        /// <summary>
+        /// Port-level trace to the log FILE (the in-memory Log is capped at 800 and is a
+        /// different facility).  Bounded, because a full install issues millions of port
+        /// operations -- but a boot attempt issues few, so the cap is generous enough to cover
+        /// the ROM's entire rigid-disk sequence from reset.  Set DOVE_RDC_PORTLOG to change it;
+        /// 0 disables.  This exists because the DOB trace shows only EXECUTED DOBs, and the boot
+        /// ROM stalls at MP 0149 after two restores without ever issuing a read -- whatever it
+        /// checks is a register poll, invisible at the DOB level.
+        /// </summary>
+        private int _portLogged;
+        private readonly int _portLogLimit =
+            int.TryParse(System.Environment.GetEnvironmentVariable("DOVE_RDC_PORTLOG"), out var _pl) ? _pl : 4000;
+
+        private void LogPort(string s)
+        {
+            if (LogWriter == null || _portLogged >= _portLogLimit) return;
+            _portLogged++;
+            try { LogWriter.WriteLine(s); } catch { LogWriter = null; }
+        }
+
         public byte ReadReg(ushort port)
         {
             if (_stub)
@@ -230,6 +260,9 @@ namespace D.IOP
             }
             if (Log != null && Log.Count < 800)
                 Log.Add("R  0x" + port.ToString("X4") + " -> 0x" + v.ToString("X2") + " @IOP" + HostClock);
+            LogPort("  PORT R 0x" + port.ToString("X4") + " -> 0x" + v.ToString("X2")
+                    + (port == 0x0214 ? "  (status)" : port == 0x0210 ? "  (dma status)" : "")
+                    + " @IOP" + HostClock);
             return v;
         }
 
@@ -238,6 +271,9 @@ namespace D.IOP
             if (Log != null && Log.Count < 800)
                 Log.Add("W  0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4") + " @IOP" + HostClock
                     + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : ""));
+            LogPort("  PORT W 0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4")
+                    + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : "")
+                    + " @IOP" + HostClock);
             if (_stub)
             {
                 switch (port)
@@ -319,7 +355,9 @@ namespace D.IOP
                             for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
                         _dataDmaArmed = false;
                     }
-                    ScheduleCtlrInt();
+                    // A streaming run is NOT complete yet -- FinishTransfer raises the single
+                    // controller-completion interrupt once the last sector has gone.
+                    if (!_xferActive) ScheduleCtlrInt();
                     break;
                 case 3:  // Store DOB back (the FIFO->mem StartDMA follows and writes it out)
                     _status = 0x43;
@@ -359,10 +397,18 @@ namespace D.IOP
             {
                 // Data page.  Once a multi-sector operation is running, each page-DMA moves
                 // exactly one more sector and steps the address.
-                if (_xferActive) { TransferNextSector(_dmaAddr); return; }
-
-                if (_dmaDir == 1)               // mem->disk: capture data from memory NOW (write ops feed
-                    { if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask]; }
+                // NOTE the fall-through to ScheduleDmaInt below: the firmware blocks on
+                // %WaitForInterrupt() after every page, so returning early here would hang it
+                // on page 2 of every run.  That is the defect that made the earlier attempt at
+                // this look like "a succeeding read retried 194 times".
+                if (_xferActive)
+                {
+                    TransferNextSector(_dmaAddr);
+                }
+                else if (_dmaDir == 1)          // mem->disk: capture data from memory NOW (write ops feed
+                {
+                    if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask];
+                }
                 else                            // disk->mem (read): the firmware arms this StartDMA BEFORE
                 {                               // cc=2, so DON'T emit yet -- _dataBuf isn't filled until
                     _dataDmaArmed = true;       // Execute runs ReadSector.  Record the target; emit at cc=2.
@@ -416,6 +462,23 @@ namespace D.IOP
         // Error type bytes (§7.1).  The "not found" family is what an UNFORMATTED platter returns
         // (no address marks/headers to find) -- see DiskHeadLabeledDukeA:880-892.
         private const int ErrNone = 0x00, ErrLabelVerify = 0x23, ErrSectorNotFound = 0x81;
+
+        /// <summary>
+        /// The healthy half of DriveAndControllerStatus: dskNotWriteFault + dskNotStoredIndxMrk
+        /// both TRUE.  Active-low, so these must be SET to mean "no write fault, index mark
+        /// present".  dskNotTrack0 is ORed in separately by the caller (clear at cylinder 0).
+        /// </summary>
+        /// UNVERIFIED, so it is OFF by default: set DOVE_DRIVE_HEALTHY=1 to enable.
+        ///
+        /// The field ORDER is known (Disk.def, above) but the bit POSITIONS and which half of
+        /// word 20 holds DiskDriveStatusRec are NOT -- 0x0A00 is inferred from an older comment
+        /// in this file, not from the source.  Enabling it changed the boot ROM's behaviour not
+        /// at all (2 restores then idle, identical), and if the drive status actually lives in
+        /// the LOW byte then 0x0A00 is writing into the CONTROLLER-status half instead, which
+        /// could break the install path that currently works.  Flat zero is what produced a
+        /// complete 20-disk install, so that stays the default until the layout is confirmed.
+        private static readonly ushort DriveHealthy =
+            System.Environment.GetEnvironmentVariable("DOVE_DRIVE_HEALTHY") == "1" ? (ushort)0x0A00 : (ushort)0x0000;
         private const int ErrLabelAddrMark = 0x21, ErrDataAddrMark = 0x31;
 
         private void ExecuteDob()
@@ -431,26 +494,57 @@ namespace D.IOP
             bool error = false;
 
             // Default completion drive state (overwrites the firmware's request placeholder, e.g. the
-            // 0xCE58 notReady / 0xFFFF currentCylinder it pre-fills): heads at the addressed cylinder,
-            // drive READY, no fault.  DriveAndControllerStatus is MSB-first active-low --
-            // notReady(0x8000)/notTrack0(0x0400) = FALSE (0) for the good state; notTrack0 set iff cyl!=0.
+            // 0xCE58 notReady / 0xFFFF currentCylinder it pre-fills): heads at the addressed
+            // cylinder, drive READY, no fault.
+            //
+            // DiskDriveStatusRec (Disk.def), Mesa MSB-first, in the HIGH byte of the word:
+            //   0x8000 dskDriveNotReady    0x4000 dskSeekNotComplete   0x2000 dskUnu0
+            //   0x1000 dskAddrMark         0x0800 dskNotStoredIndxMrk  0x0400 dskNotTrack0
+            //   0x0200 dskNotWriteFault    0x0100 dskLock
+            //
+            // SIX OF EIGHT ARE ACTIVE-LOW, so flat zero is NOT the healthy state -- it asserts a
+            // write fault and a missing index mark.  Pilot's NeedsRecalibrate returns TRUE on
+            // writeFault, and the 8x305's OPEND branches on WriteFault being NONZERO for the OK
+            // path (zero falls through to WRSTAT/WriteFaultError).  That is what made the boot
+            // ROM restore the drive over and over instead of issuing its first read.
             _dob[W_CurrentCyl] = Bswap((ushort)cyl);
-            _dob[W_DriveCtlrStatus] = (ushort)(cyl != 0 ? 0x0400 : 0x0000);
+            _dob[W_DriveCtlrStatus] = (ushort)(DriveHealthy | (cyl != 0 ? 0x0400 : 0x0000));
 
             switch (op)
             {
                 case 0:  // restore / recalibrate -- seek to track 0, no data
                     _dob[W_CurrentCyl] = Bswap(0x0000);     // currentCylinder = 0 (recalibrated)
-                    _dob[W_DriveCtlrStatus] = 0x0000;       // ready, at track 0
+                    // At track 0, so dskNotTrack0 stays clear -- but the active-low health bits
+                    // must still be SET, or the restore reports a write fault and the boot ROM
+                    // recalibrates forever instead of issuing its first read.
+                    _dob[W_DriveCtlrStatus] = DriveHealthy;
                     break;
 
+                // MULTI-SECTOR ops 2/3/6.  The firmware programs ONE page-sized StartDMA and
+                // expects the controller to walk the buffer itself, a page per sector: measured,
+                // successive multi-sector ops advance their buffer by exactly wantSectors*512.
+                //
+                // Transferring only the first sector and reporting SUCCESS is what emptied the
+                // boot files.  op 3 arrives as 32-sector runs; we wrote 1 and dropped 31, so
+                // file 0103 ended up with data at file pages 1, 33, 65, 97 ... -- one page per
+                // run -- 91 of 2803 pages, 96.8% zeros, while every label landed correctly
+                // (op 4 does loop).  Structurally perfect, functionally empty, and silent
+                // because the guest was told the whole run succeeded and never retried.
+                // The controller logged it 16,940 times as "NOTE op=N asked for M".
+                // Ops 2/3/6 do sector 0 here, from the page StartDMA already moved, and then hand
+                // the rest of the run to the streaming path: one sector per subsequent StartDMA,
+                // at whatever address the firmware programs.  Do NOT compute addr + k*512 -- the
+                // firmware owns the pointer and advances it itself (incrementDataPtr), and
+                // delivering a whole run into a one-page buffer froze the machine twice.
                 case 2:  // readData  -- verify label, DMA data->mem
                 case 6:  // readLabelAndData -- copy label, DMA data->mem
                     error = ReadSector(cyl, head, sector, op == 2 /*verifyLabel*/);
+                    if (!error && wantSectors > 1) StartStream(op, cyl, head, sector, wantSectors);
                     break;
 
                 case 3:  // writeData -- tag "vvw": verify header, VERIFY label, write data
                     error = WriteSector(cyl, head, sector, false, true /*verifyLabel*/);
+                    if (!error && wantSectors > 1) StartStream(op, cyl, head, sector, wantSectors);
                     break;
 
                 case 4:  // writeLabelAndData -- store label + data, over a RUN of sectors
@@ -541,7 +635,8 @@ namespace D.IOP
             // the sectors it did complete.  Correct for the 1-sector failures we actually see
             // (all 776 label rejections are single-sector), wrong in principle for a partial
             // multi-sector run -- Pilot would be told nothing happened.
-            if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6 || op == 7))
+            // Streaming runs set their own header in FinishTransfer, once the run really ends.
+            if (!error && !_xferActive && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6 || op == 7))
             {
                 // The returned header ends ON the last sector processed, not one past it.
                 // Measured three times over: with an advance of 0 the client's next request
@@ -564,7 +659,11 @@ namespace D.IOP
                 // the next start, so Pilot supplies the +1 itself.  Ending one past would apply
                 // it twice.  This is not the controller disagreeing with the software; ends-on
                 // is the contract.
-                int advance = ((op == 4 || op == 7) ? wantSectors : 1) - 1;
+                // Only the ops that actually walk their run may advance by it.  op 3 now does;
+                // ops 2/6 deliberately still transfer one sector (see the case above), so they
+                // must keep reporting one page of progress or the client's next request skips
+                // the 127 pages we never gave it.
+                int advance = ((op == 3 || op == 4 || op == 7) ? wantSectors : 1) - 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
                 int ns = linear % Micropolis1325.SectorsPerTrack;
@@ -654,10 +753,36 @@ namespace D.IOP
         /// <summary>
         /// Move one more sector of a multi-sector operation, called from each page-DMA.
         /// </summary>
+        /// <summary>
+        /// Arm the streaming path after sector 0 of a multi-sector op has been done inline.
+        /// Positions at the NEXT sector; each subsequent StartDMA moves one more.
+        /// </summary>
+        private void StartStream(int op, int cyl, int head, int sector, int sectors)
+        {
+            int lin = Micropolis1325.Page(cyl, head, sector) + 1;
+            _xferSector = lin % Micropolis1325.SectorsPerTrack;
+            int tr = lin / Micropolis1325.SectorsPerTrack;
+            _xferHead = tr % Micropolis1325.Heads;
+            _xferCyl = tr / Micropolis1325.Heads;
+            _xferLastCyl = cyl; _xferLastHead = head; _xferLastSector = sector;
+            _xferOp = op;
+            _xferRemaining = sectors - 1;
+            _xferError = false;
+            _xferIndex = 0;
+            _xferL5 = _dob[23 + 5]; _xferL6 = _dob[23 + 6];
+            _xferActive = true;
+        }
+
         private void TransferNextSector(int addr)
         {
             int c = _xferCyl, h = _xferHead, sct = _xferSector;
             bool err = false;
+
+            // Each sector of the run carries its own file page, so the expected label has to
+            // step with it -- verifying the whole run against its first label matches sector 0
+            // and rejects sector 1.
+            _xferIndex++;
+            StepExpectedFilePage(_xferL5, _xferL6, _xferIndex);
 
             switch (_xferOp)
             {
@@ -671,11 +796,14 @@ namespace D.IOP
                 case 4:
                     if (!_noDataDma)
                         for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(addr + i) & Mask];
-                    err = WriteSector(c, h, sct, _xferOp == 4 /*storeLabel*/);
+                    // op 3 is vvw: the label verify applies to every sector of the run, not
+                    // just the first.  The 4-argument overload skips it.
+                    err = WriteSector(c, h, sct, _xferOp == 4 /*storeLabel*/, _xferOp == 3 /*verifyLabel*/);
                     break;
             }
 
             DobOps++; LastCyl = c; LastHead = h; LastSector = sct;
+            _xferLastCyl = c; _xferLastHead = h; _xferLastSector = sct;
             StepAddress();
 
             if (err) { _xferError = true; FinishTransfer(); return; }
@@ -683,15 +811,23 @@ namespace D.IOP
         }
 
         /// <summary>
-        /// End a multi-sector operation: leave the DOB header at the sector AFTER the last one
-        /// transferred (Pilot derives pagesCompleted from that advance, not from the error
-        /// bytes), set the status, and raise the single controller-completion interrupt.
+        /// End a multi-sector operation: leave the DOB header ON the last sector transferred --
+        /// NOT one past it.  DiskHeadDove runs the returned header through IncrementClientHeader
+        /// to derive the next start, so Pilot supplies the +1 itself and ending one past applies
+        /// it twice (measured: every operation then marches a cylinder plus a sector).  Restore
+        /// the run's base label, set the status, and raise the single completion interrupt.
         /// </summary>
         private void FinishTransfer()
         {
             _xferActive = false;
-            _dob[16] = Bswap((ushort)_xferCyl);
-            _dob[17] = (ushort)((_xferSector << 8) | _xferHead);
+            // LEAVE the label stepped to the last sector -- do NOT restore the run's base.
+            // The label follows the same contract as the CHS header: end on the last, and Pilot
+            // supplies the +1.  Measured: a 128-sector run over disk 6584..6711 = filePage
+            // 227..354; restoring the base made the client's next request expect 227+1=228 while
+            // the disk at 6712 holds 355, and the mismatch never converged.  Returning 354 makes
+            // it expect 355 and match.  WriteLabelRun already returns its end page this way.
+            _dob[16] = Bswap((ushort)_xferLastCyl);
+            _dob[17] = (ushort)((_xferLastSector << 8) | _xferLastHead);
             _status = (byte)(_xferError ? 0xC2 : 0x42);
             if (LogWriter != null)
             {
@@ -707,6 +843,22 @@ namespace D.IOP
         /// to every sector, and each sector gets the DOB's label with filePage stepped by its
         /// position in the run.
         /// </summary>
+        /// <summary>
+        /// Point the DOB's expected label at file page base+k, for sector k of a run.
+        ///
+        /// The on-disk label's file page steps with the sector -- WriteLabelRun does exactly this
+        /// when it WRITES a run -- so verifying a run against its first label would match sector 0
+        /// and reject sector 1, aborting one page in.  Only FPLow/FPHi move; every other word,
+        /// including the flag half of word 6, is the client's and is left alone.
+        /// </summary>
+        private void StepExpectedFilePage(ushort w5, ushort w6, int k)
+        {
+            if (k == 0) { _dob[23 + 5] = w5; _dob[23 + 6] = w6; return; }
+            int fp = (Bswap(w5) | (((w6 >> 1) & 0x7F) << 16)) + k;
+            _dob[23 + 5] = Bswap((ushort)(fp & 0xFFFF));
+            _dob[23 + 6] = (ushort)((w6 & 0xFF01) | (((fp >> 16) & 0x7F) << 1));
+        }
+
         private bool WriteLabelRun(int cyl, int head, int sector, int sectors)
         {
             int c0 = cyl, h0 = head, s0 = sector;
@@ -956,7 +1108,7 @@ namespace D.IOP
                     _disk.FormatSector(Micropolis1325.Page(c, h, s));
             }
             _dob[W_CurrentCyl] = Bswap((ushort)cyl);
-            _dob[W_DriveCtlrStatus] = 0x0000;
+            _dob[W_DriveCtlrStatus] = (ushort)(DriveHealthy | (cyl != 0 ? 0x0400 : 0x0000));
         }
     }
 }
