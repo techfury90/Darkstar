@@ -17,6 +17,56 @@ namespace D.IOP
     ///   program AM2942 + StartDMA to move the updated DOB back to memory.
     ///
     /// The DOB is a 34-word block; multi-byte CHS/count/geometry fields are Mesa ByteSwapped.
+    ///
+    /// FIELD MAP (field-engineer manual, every entry cross-checked against a full install trace
+    /// of 33,933 DOBs -- the values in brackets are what this machine actually sends):
+    ///    0  CRC syndrome                                  [0000 always]
+    ///    1  reserved, must be zero                        [0000 always]
+    ///    2  number of sectors to transfer, NEGATIVE       [-1 -2 -3 -16 -19 -32 -128]
+    ///    3  max sector number                             [16]
+    ///    4  microcode revision level + heads              [rev 0, 8 heads]
+    ///    5  cylinders                                     [960]
+    ///    6  inv/non-inv flag + first sector number/track
+    ///    7  reduce write current cylinder                 [FFFF = never]
+    ///    8  precomp cylinder                              [32767 = never]
+    ///    9  SECTOR LENGTH: -1 normal, -2 long block       [-1 in every DOB of the install]
+    ///       (rest of the word is 0x00).  -2 is for DISK RECOVERY UTILITIES: the longer block
+    ///       exposes the sector's CRC/ECC bytes so the utility can inspect and correct them.
+    ///       It pairs with word 0 -- read the syndrome to find a bad sector, then re-read at
+    ///       -2 to see the check bytes.  WE DO NOT DECODE THIS, and supporting it means
+    ///       modelling ECC bytes we do not store, not just honouring the field.  Harmless
+    ///       while it stays -1; a recovery utility would be served a plain 512 bytes with no
+    ///       check bytes and told it succeeded.  We are at least self-consistent on the other
+    ///       half: word 0 is passed through untouched, so the syndrome reads back as the 0 the
+    ///       guest sent -- "no CRC error", which is true of a platter that cannot bit-rot.
+    ///   10  header error type      11  label error type   12  data error type
+    ///   13  (see below)            14  current cylinder   15  always 1  [0001 always]
+    ///   16  header cylinder        17  header head/sector PACKED into one word
+    ///   18  reserved 1  [0000]     19  reserved 2  [0000]
+    ///   20  drive/controller status                       21  operation to be done
+    ///   22  number of tracks to format, 2's complement    [-1 on all 7,680 op-1 formats]
+    ///   23-32  the 10-word label image                    33  padding
+    ///
+    /// Word 22 is meaningful ONLY for op 1 and carries leftover buffer content otherwise --
+    /// 0x8900 on every op 2/3, co-occurring exactly with word 33 = 0x4F58 across 19,270 DOBs.
+    /// Read it anywhere but FormatTracks and you are reading somebody else's stale field.
+    ///
+    /// The manual's table shows a padding BYTE before the label image and another after it,
+    /// which would put the label at byte 47 rather than word 23 (byte 46).  Ours is at word 23
+    /// and the machine agrees: FPLow/FPHi decode to the correct page for all 122,880 pages,
+    /// including across the 65,536 boundary, which a one-byte shift could not survive.  The
+    /// leftover 0x4F in word 33 would also have to be part of bootCLHi, which is nonsense as a
+    /// chain link and unremarkable as padding.  Treat the table as drawn loosely there.
+    ///
+    /// Word 13 is absent from the manual table as transcribed, which would put current cylinder
+    /// at 13 and always-1 at 14.  The machine says otherwise and the code follows the machine:
+    /// word 13 takes two values (one of them an error byte), word 14 takes 960 -- a cylinder --
+    /// and word 15 is a constant 1.  So a fourth error word sits at 13; we call it LastError.
+    ///
+    /// Words 3/4/5 mean the GUEST tells us the geometry and we ignore it in favour of the
+    /// compile-time Micropolis1325 constants.  They agree only because the drive is configured
+    /// to match; comparing them would be a cheap assertion, and is the natural place to drive
+    /// the other supported drive types from.
     /// StartDMA performs the actual byte movement between the physical DRAM (bypasses the IOP map)
     /// and either the DOB image (word-count &le; 34) or a 512-byte data page (word-count 256).
     /// The two RDC interrupts (RDiskCtlrIntr, RDiskDmaIntr') are surfaced to DoveIOPIO which edges
@@ -408,9 +458,10 @@ namespace D.IOP
                     // diskPageCount: one data page is supplied and replicated, while the
                     // labels are the structured payload and are stamped across the whole run
                     // with the file page number stepping per sector
-                    // (CompatibilityDiskFace.mesa: fileID, attributesInAllPages and dontCare
-                    // are the same in every page of a run; filePage is incremented in each
-                    // successive page; pageZeroAttributes is written only for page zero).
+                    // (FID, FT and the boot chain link are the same in every page of a run;
+                    // FPLow/FPHi step per sector).  The older wording here cited
+                    // CompatibilityDiskFace.mesa, which is Pilot 15 -- the release that
+                    // deprecated labels.  We are Pilot 14; do not reason from that source.
                     // Writing only one sector here leaves the rest of the run holding their
                     // formatted labels, and Pilot's verify pass over the run then fails at
                     // the second sector and retries the write forever.
@@ -460,15 +511,36 @@ namespace D.IOP
                     break;
             }
 
-            // COMPLETION BOOKKEEPING (root cause of cStorage/AsynchronousVMIOError->cGermAllocFault):
-            // Pilot's DataTransferImpl.Poll judges op success by pagesCompleted, NOT by the error bytes:
-            //   dobPagesCompleted = pageNumber(dob.header) - pageNumber(op.clientHeader)
-            //   pagesCompleted    = read ? MIN[dob, dma] : dob   (must be > 0 or the op is "no progress")
-            // A non-goodCompletion status -> DiskStatusToDataStatus -> ioError -> Space.IOError[page]
-            // -> uncaught -> 0935.  So on a SUCCESSFUL sector transfer we must advance dob.header
-            // (CHS words 16-17) to the sector AFTER the last one transferred, so pageNumber advances
-            // by the N sectors done (N=1 per DOB in this model).  The request CHS is still in
-            // (cyl,head,sector); the label/currentCyl/status fields already reflect completion.
+            // COMPLETION BOOKKEEPING.  The Pilot-14 authority is DiskHeadDove, and it uses TWO
+            // DIFFERENT paths -- conflating them is what made this block contradict itself for
+            // months:
+            //
+            //   SUCCESS -> progress comes from iocb.runLength.  The next request's start comes
+            //              from dob.header put through IncrementClientHeader -- i.e. PILOT
+            //              OWNS THE +1, which is why we end ON the last sector (below).
+            //   ERROR   -> only here is progress the header delta:
+            //                dobPagesCompleted = pageNumber(dob.header) - pageNumber(clientHeader)
+            //                pagesCompleted    = read ? MIN[dob, dma] : dob
+            //              with the dma half fed by the IOP DMA decrementing iocb.pageCount as
+            //              it transfers (DiskDove.asm:1094-1104).  A non-goodCompletion status
+            //              -> DiskStatusToDataStatus -> ioError -> Space.IOError[page] -> 0935.
+            //
+            // The earlier wording here cited "DataTransferImpl.Poll" and presented the ERROR
+            // formula as the success criterion.  There is no DataTransferImpl.Poll in Pilot 14
+            // -- that is a Pilot 15 layer name, and Pilot 15 is the release that deprecated
+            // labels.  Taken literally it also could not have been true: it demands a header
+            // delta > 0, yet single-sector ops (9,215 op-2s, 7,412 op-3s) return a delta of 0
+            // by design and the install completed all 20 disks.
+            //
+            // The IOP passes the header through UNTOUCHED; it only decrements the page count.
+            // The request CHS is still in (cyl,head,sector); label/currentCyl/status already
+            // reflect completion.
+            //
+            // NOTE the error path is asymmetric with what we do: we skip the advance entirely
+            // when error is set, so a run that fails partway reports a delta of 0 rather than
+            // the sectors it did complete.  Correct for the 1-sector failures we actually see
+            // (all 776 label rejections are single-sector), wrong in principle for a partial
+            // multi-sector run -- Pilot would be told nothing happened.
             if (!error && (op == 2 || op == 3 || op == 4 || op == 5 || op == 6 || op == 7))
             {
                 // The returned header ends ON the last sector processed, not one past it.
@@ -487,10 +559,11 @@ namespace D.IOP
                 //   advance N-1  ->  client's next request lands +N   (correct, abutting)
                 //   advance N    ->  client's next request lands +N+1 (marches a cylinder)
                 //
-                // Measured in both directions.  The source reads as though the client takes
-                // the returned header verbatim, which would make advance N correct; the
-                // machine disagrees, so something between the head and the controller
-                // consumes a page.  Going with the machine.
+                // Measured in both directions -- and now EXPLAINED rather than merely observed:
+                // DiskHeadDove runs the returned header through IncrementClientHeader to get
+                // the next start, so Pilot supplies the +1 itself.  Ending one past would apply
+                // it twice.  This is not the controller disagreeing with the software; ends-on
+                // is the contract.
                 int advance = ((op == 4 || op == 7) ? wantSectors : 1) - 1;
                 int linear = (cyl * Micropolis1325.Heads + head) * Micropolis1325.SectorsPerTrack
                              + sector + advance;
@@ -642,26 +715,31 @@ namespace D.IOP
             // filePage spans label bytes 10-12, and word 5 and word 6 are byte-ordered
             // DIFFERENTLY -- this asymmetry is the trap I fell into twice:
             //   byte 10 = filePage bits 8-15   byte 11 = bits 0-7   -> word 5, byte-SWAPPED
-            //   byte 12 = (filePageHi << 1) | attrFlag              -> word 6 LOW byte, RAW
-            //   byte 13 = pageZeroAttributes                        -> word 6 HIGH byte
+            //   byte 12 = (filePageHi << 1) | flag                  -> word 6 LOW byte, RAW
+            //   byte 13 = more flags                                -> word 6 HIGH byte
             // So word 6 must NOT be byte-swapped, filePageHi is only 7 bits, and byte 13 has
             // nothing to do with the page number -- without the mask it leaks into it.
+            //
+            // FIELD NAMES, from the field-engineer manual -- the label is
+            //   0-4 FID0..FID4   5 FPLow   6 FPHi&Flags   7 FT   8 bootCLLo   9 bootCLHi
+            // Word 6's high byte is FLAGS, not "pageZeroAttributes", and word 7 is FT (file
+            // type), not "attributesInAllPages".  Both of those older names came from Pilot 15
+            // source, which deprecated labels -- we run Pilot 14, where they are load-bearing.
+            // Measured on a full pack and consistent with the manual: word 6's high byte takes
+            // exactly two values in 122,880 pages (0x00 on all but two), which no attributes
+            // byte would; word 7 takes 12 values dominated by 0x0600 free extent, which is a
+            // type field.  Words 8-9 are the boot chain link, previously called dontCare.
             //
             // Invisible on everything seen so far because every filePage has been under
             // 65536, making filePageHi zero regardless of byte order or mask.  It bites in
             // the upper half of a 122,880-page volume, where a byte-swapped read turns
             // +65536 into +16M.
             int basePage = Bswap(template[5]) | (((template[6] >> 1) & 0x7F) << 16);
-            int attrFlag = template[6] & 1;          // bit 0 of byte 12
-            // byte 13 = pageZeroAttributes.  It belongs to FILE PAGE ZERO ONLY: the client's
-            // value is written there and forced to zero on every other page of the run.
-            //
-            // Both extremes have now been tried and both are wrong.  Carrying it through to
-            // every sector produced 0x0200 where the guest wanted 0x0000 -- 800 label
-            // rejections, all recoverable, and the install still reached disk 18 of 20.
-            // Zeroing it everywhere stopped the install dead at disk 9.  The rule is per
-            // page, and it is applied at the point of use below.
-            int attrTemplate = template[6] & 0xFF00;
+            // The flag half of word 6 is the CLIENT'S and is copied byte-for-byte (below).
+            // Do not synthesize it: carrying a decoded value through a run put 0x0200 on
+            // sectors that wanted 0x0000, and zeroing it everywhere stopped the install dead
+            // at disk 9.  Measured on a full pack, nothing is mis-stamped -- zero pages carry
+            // a flag at filePage != 0 -- so verbatim copy is correct and stays.
 
             for (int k = 0; k < sectors; k++)
             {
@@ -673,16 +751,9 @@ namespace D.IOP
                 // number in the run off by one.
                 int filePage = basePage + k;
                 label[5] = Bswap((ushort)(filePage & 0xFFFF));
-                // Copy word 6 and touch ONLY the file-page bits (byte 12 bits 1-7).  The
-                // attribute half -- byte 13 and byte 12's flag in bit 0 -- is the client's and
-                // is preserved byte-for-byte.
-                //
-                // The controller does not synthesize, vary or zero attributes; Pilot has
-                // already done it.  NextLabel zeroes pageZeroAttributes when it steps the file
-                // page, and DiskHeadLabeledDukeA forces runLength to 1 whenever a run's base
-                // file page is 0 -- so page 0 always arrives alone carrying the client value,
-                // and every other DOB arrives with the attributes already zero.  Decoding and
-                // rebuilding this half is what put the client's value on non-page-0 sectors.
+                // Copy word 6 and touch ONLY the file-page bits (byte 12 bits 1-7).  The flag
+                // half -- byte 13 and byte 12's bit 0 -- is the client's and is preserved
+                // byte-for-byte.  The controller does not synthesize, vary or zero flags.
                 label[6] = (ushort)((template[6] & 0xFF01) | (((filePage >> 16) & 0x7F) << 1));
 
                 _disk.WriteSector(Micropolis1325.Page(cyl, head, sector), _dataBuf, label);
@@ -756,7 +827,13 @@ namespace D.IOP
             if (verifyLabel && label != null)
             {
                 // compare the on-disk label (words 0-7 significant) against the DOB label (w23-30)
+                // Word 6 (FPHi&Flags) IS significant here -- do not be tempted to mask it
+                // to make mismatches go away.  Errors on this path are survivable in any case:
+                // op 2 is vvr and RDSK transfers the data before it tests ERRTYP, so the client
+                // reads the true label back and retries.  It is the WRITE side (vvw) that loses
+                // pages.
                 for (int i = 0; i < 8; i++)
+                {
                     if (label[i] != _dob[23 + i])
                     {
                         // Record both sides: a verify failure is only meaningful next to the
@@ -775,6 +852,7 @@ namespace D.IOP
                         SetErr(W_LabelError, ErrLabelVerify);
                         return true;
                     }
+                }
             }
             else if (!verifyLabel)
             {
@@ -793,10 +871,49 @@ namespace D.IOP
         {
             if (verifyLabel)
             {
+                // REJECTING HERE IS CORRECT AND LOAD-BEARING -- do not soften it.  op 3 is vvw:
+                // WTDC verifies the label and jumps to ERENDD before WTDTA, so a mismatch does
+                // not write the page (unlike the read side, where RDSK transfers first and only
+                // then tests ERRTYP).  That rejection is how Pilot learns its guess was wrong.
+                //
+                // Word 6 bit 0x0200 is `temporary` (PilotDisk.Label: filePageHi bits 0-6,
+                // pad1 7-13, temporary 14, pad2 15 -- Mesa bit order, so 0x0002 logical =
+                // 0x0200 in the DOB).  DiskBackingStore.mesa:47 marks it "HINT: if wrong, a
+                // retry will be performed": Pilot writes its best guess of temporary, and a
+                // wrong guess is REJECTED BY DESIGN, then re-issued with the corrected value.
+                //
+                // Measured over a full 20-disk install: 776 rejections across 62 pages, every
+                // one of them filePage 0, and ALL 62 converge to a successful write afterwards.
+                // Zero pages were lost.  They were read as "dropped writes" for a long time --
+                // they are the hint-miss protocol working.  Count converging retries before
+                // calling a rejection a defect.  Pad audit over the same pack: zero violations
+                // (bit0, 0x0100 and 0xFC00 all clear on all 122,880 pages), so the encoder puts
+                // temporary exactly at 0x0200 and the corrected retry verifies.
                 var onDisk = _disk.ReadLabel(Micropolis1325.Page(cyl, head, sector));
                 if (onDisk != null)
                     for (int i = 0; i < 8; i++)
-                        if (onDisk[i] != _dob[23 + i]) { SetErr(W_LabelError, ErrLabelVerify); return true; }
+                        if (onDisk[i] != _dob[23 + i])
+                        {
+                            if (LogWriter != null)
+                            {
+                                var sb = new System.Text.StringBuilder();
+                                sb.Append("  WRITE LABEL MISMATCH page=").Append(Micropolis1325.Page(cyl, head, sector))
+                                  .Append(" CHS=[").Append(cyl).Append(',').Append(head).Append(',').Append(sector)
+                                  .Append("] word").Append(i).Append("  disk=");
+                                for (int k = 0; k < 10; k++) sb.Append(onDisk[k].ToString("X4")).Append(' ');
+                                sb.Append(" expected=");
+                                for (int k = 0; k < 10; k++) sb.Append(_dob[23 + k].ToString("X4")).Append(' ');
+                                // Whole DOB as well: we only decode 12 of its 34 words, and the
+                                // fields we ignore (0,1,3,4,5,7,8,9,15,18,19,33) include Sector
+                                // Length -- normally -1, but -2 for the longer data blocks some
+                                // diagnostics use, which we would silently serve as 512 bytes.
+                                sb.Append(" DOB=");
+                                for (int k = 0; k < _dob.Length; k++) sb.Append(_dob[k].ToString("X4")).Append(' ');
+                                try { LogWriter.WriteLine(sb.ToString()); } catch { LogWriter = null; }
+                            }
+                            SetErr(W_LabelError, ErrLabelVerify);
+                            return true;
+                        }
             }
             int page = Micropolis1325.Page(cyl, head, sector);
             var label = new ushort[10];
