@@ -509,6 +509,53 @@ namespace D.IOP
                     if (runFrom >= 0) ok.Append(' ').Append(runFrom).Append("-...");
                     LogWriter.WriteLine(ok.ToString());
                 }
+                {
+                    // INTERVAL PROBE: one distinctive 16-byte run per sampled master page.
+                    // Finds exactly where inload data stops landing.  p200 is known to land and
+                    // p405/406 are known not to, so the boundary lies between -- and which
+                    // transfer it falls in tells us whether this is an address ceiling, a
+                    // large-run effect, or a tail effect.
+                    int[] probePages = { 100, 200, 250, 300, 357, 366, 380, 390, 405, 425 };
+                    byte[][] probeSig = { new byte[]{0xD8,0x13,0xC0,0x63,0x00,0xC0,0xD8,0x13,0xC0,0x63,0x01,0xF8,0x10,0xD2,0xF9,0x1E}, new byte[]{0x27,0xCD,0xFF,0xC0,0x10,0xBE,0xC0,0x92,0x06,0xCD,0xFF,0xC0,0x81,0x10,0xA4,0x3B}, new byte[]{0x7A,0x06,0x26,0x0F,0xF1,0x9A,0xFE,0x59,0xED,0x00,0x96,0x9D,0x0A,0x0F,0xF2,0xC8}, new byte[]{0x03,0x12,0x00,0x00,0x6E,0x00,0x14,0x08,0x00,0x2D,0xF8,0x10,0x79,0x0F,0xEE,0xEF}, new byte[]{0x00,0x19,0x37,0x05,0x9D,0x67,0xC1,0x3B,0x05,0xD3,0x79,0x03,0xEE,0x8F,0x03,0x18}, new byte[]{0x11,0x09,0x1B,0x1B,0x00,0x7A,0x02,0x26,0x58,0x10,0xF8,0x87,0x5F,0x10,0xEF,0x01}, new byte[]{0x1D,0x0E,0x44,0x18,0x0E,0x44,0x21,0xB5,0x6B,0x09,0x3C,0xAF,0xF8,0x1C,0xA2,0xAA}, new byte[]{0x29,0xC0,0x82,0xA2,0xAC,0x30,0xED,0x1C,0xBB,0x04,0xC3,0x94,0xF8,0xC1,0x38,0xC0}, new byte[]{0x18,0x9F,0xAA,0x00,0x00,0x0D,0x10,0x34,0x00,0x96,0x03,0x00,0x00,0x00,0x00,0x08}, new byte[]{0x0A,0x22,0x00,0x00,0x07,0x5C,0x00,0x00,0x00,0x2E,0x00,0x00,0x20,0x03,0x4B,0x78} };
+                    var pr = new System.Text.StringBuilder("    PROBE master page -> resident?");
+                    var raw2 = Sys;
+                    for (int q = 0; q < probePages.Length; q++)
+                    {
+                        var sig = probeSig[q];
+                        int at = -1;
+                        for (int a = 0; a + sig.Length < raw2.Length && at < 0; a += 2)
+                        {
+                            bool ok = true;
+                            for (int k = 0; k < sig.Length; k++) if (raw2[a + k] != sig[k]) { ok = false; break; }
+                            if (ok) at = a;
+                        }
+                        pr.Append(' ').Append(probePages[q]).Append(at >= 0 ? "=YES" : "=no");
+                    }
+                    LogWriter.WriteLine(pr.ToString());
+                }
+                {
+                    // The StartList page (master p405 / filePage 406) was DMA-programmed to
+                    // 0x23DE00 -- inside our 4 MB array.  Everything the germ wrote BELOW 0x200000
+                    // is resident; everything above is not.  Dump the target and its neighbours to
+                    // separate "never written" from "written then lost".
+                    var d2 = new System.Text.StringBuilder("    TARGET dump:");
+                    int[] addrs = { 0x1D2C00, 0x1D2E00, 0x23C800, 0x23DC00, 0x23F200 };  // sector0 of fp390 run, master p390, sector0 of fp396 run, THE STARTLIST (master p405), master p425
+                    foreach (int a in addrs)
+                    {
+                        d2.AppendLine().Append("      0x").Append(a.ToString("X6")).Append(": ");
+                        bool anyNZ = false;
+                        for (int k = 0; k < 24; k++)
+                        {
+                            byte v = Sys[(a + k) & Mask];
+                            if (v != 0) anyNZ = true;
+                            d2.Append(v.ToString("X2")).Append(' ');
+                        }
+                        d2.Append(anyNZ ? "" : " (all zero)");
+                    }
+                    d2.AppendLine().Append("      array length 0x").Append(Sys.Length.ToString("X6"))
+                      .Append("  Mask 0x").Append(Mask.ToString("X6"));
+                    LogWriter.WriteLine(d2.ToString());
+                }
                 sb.Append("    raw:");
                 for (int i = 0; i < FcbLen; i++)
                 {
