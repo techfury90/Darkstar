@@ -412,6 +412,103 @@ namespace D.IOP
                 sb.Append("    OPIE: systemQueue.head[0x03B30]=").Append(RdLE(0x03B30).ToString("X4"))
                   .Append((RdB(0x03B30) == 0xFF || RdB(0x03B31) == 0xFF) ? "  <<< EMPTY (nilHandlerID)" : "")
                   .Append("  dmaTask.taskState[0x03A90]=").Append(RdLE(0x03A90).ToString("X4")).AppendLine();
+                // Is the StartList Header resident?  It lives at virtual page 3498, which the
+                // master says is INSIDE the boot-loaded range (run 3488-3517, lastBootLoadedPage
+                // = lastVMPage = 3517), so the germ should have loaded it and Pilot need never
+                // fault -- which is why no read past filePage 412 is correct behaviour.
+                // Signature = boot-file page 405: version 6303 (0x189F) then table 0x000DAA00.
+                // Scan both byte orders, since CP words and IOP bytes share one array.
+                {
+                    var hits = new System.Text.StringBuilder("    STARTLIST scan2 (p405 wordswapped / p404 off-by-one):");
+                    int found = 0;
+                    var s1 = new byte[] { 0x9F, 0x18, 0x00, 0xAA, 0x0D, 0x00, 0x34, 0x10, 0x96, 0x00, 0x00, 0x03 };  // master p405 WORD-SWAPPED -- arrived mangled?
+                    var s2 = new byte[] { 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x40, 0x02, 0x11, 0x6C, 0x00, 0x00, 0x00, 0x00 };  // master p406 -- the NEXT page of the same run  // master p404 -- landed one page EARLY?  // 16 bytes from an ordinary boot-loaded page
+                    var raw = Sys;
+                    for (int a = 0; a + 6 < raw.Length && found < 10; a += 2)
+                    {
+                        bool m1 = true, m2 = true;
+                        for (int k = 0; k < 16; k++)
+                        {
+                            if (k < s1.Length && raw[a + k] != s1[k]) m1 = false;
+                            if (k < s2.Length && raw[a + k] != s2[k]) m2 = false;
+                            if (!m1 && !m2) break;
+                        }
+                        if (m1 || m2)
+                        {
+                            hits.Append(" 0x").Append(a.ToString("X6")).Append(m1 ? "(p405 WORDSWAPPED)" : "(p406 next-in-run)")
+                                .Append(" pg").Append(a / 512).Append(a % 512 == 0 ? "[aligned]" : "[MID-PAGE]")
+                                .Append(" bytes:");
+                            for (int k = 0; k < 32; k++) hits.Append(' ').Append(raw[a + k].ToString("X2"));
+                            hits.AppendLine();
+                            found++;
+                        }
+                    }
+                    if (found == 0) hits.Append(" neither word-swapped p405 nor p406 found");
+                    LogWriter.WriteLine(hits.ToString());
+                }
+                // CP VM MAP for the failing range.  Map base = CP word 0x40000 = byte 0x80000;
+                // entry for vpage V at byte 0x80000+2V, big-endian; realPage = ((w&0x1F)<<8)|(w>>8);
+                // flags referenced=0x0080 dirty=0x0040 writeProtect=0x0020; vacant stamp = 0x0060.
+                // The last run targets virtual 3488-3517 and its pages never reach memory, while
+                // everything at/below ~2601 does -- and 887 shuffle-branch map mutations sit
+                // between them.  If 3488-3517 are unmapped/vacant here, the germ handed the boot
+                // channel a destination that does not resolve.
+                {
+                    // LOCATE the map empirically -- the remembered base (CP word 0x40000 =
+                    // byte 0x80000) reads as all zeros here, including a control range that
+                    // must be valid.  The map is a 128KB table whose unused entries carry the
+                    // vacant stamp 0x0060, so find the longest run of them.
+                    var loc = new System.Text.StringBuilder("    CPMAP locate: ");
+                    int bestStart = -1, bestLen = 0, curStart = -1, curLen = 0;
+                    for (int b = 0; b + 1 < Sys.Length; b += 2)
+                    {
+                        int w = (Sys[b] << 8) | Sys[b + 1];
+                        if (w == 0x0060) { if (curStart < 0) curStart = b; curLen++; }
+                        else { if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; } curStart = -1; curLen = 0; }
+                    }
+                    if (curLen > bestLen) { bestLen = curLen; bestStart = curStart; }
+                    loc.Append("longest 0x0060 run: ").Append(bestLen).Append(" entries at byte 0x")
+                       .Append(bestStart.ToString("X6")).Append(" (CP word 0x").Append((bestStart / 2).ToString("X5")).Append(')');
+                    LogWriter.WriteLine(loc.ToString());
+                    var mp = new System.Text.StringBuilder("    CPMAP vpage->realPage(flags):");
+                    for (int v = 3484; v <= 3520; v++)
+                    {
+                        int b = 0x80000 + 2 * v;
+                        int w = (Sys[b & Mask] << 8) | Sys[(b + 1) & Mask];
+                        int real = ((w & 0x1F) << 8) | (w >> 8);
+                        mp.Append(' ').Append(v).Append('=').Append(w.ToString("X4"));
+                        if (w == 0x0060) mp.Append("[VACANT]");
+                        else if (w == 0x0000) mp.Append("[UNSTAMPED]");
+                        else mp.Append("[r").Append(real.ToString("X3")).Append(']');
+                        if ((v - 3484) % 6 == 5) mp.AppendLine().Append("        ");
+                    }
+                    LogWriter.WriteLine(mp.ToString());
+                    // and a healthy control: vpages around 452 (where master p200 landed fine)
+                    // Real control: report the CONTIGUOUS RANGES of vpages that are actually
+                    // mapped (entry non-zero and not the 0x0060 vacant stamp).  Picking a control
+                    // range by guessing where a page ought to map is how the previous reading went
+                    // wrong -- this asks the map what it holds instead.
+                    var ok = new System.Text.StringBuilder("    CPMAP mapped vpage ranges:");
+                    int runFrom = -1, prev = -1, shownRanges = 0;
+                    for (int v = 0; v <= 8192 && shownRanges < 14; v++)
+                    {
+                        int b = 0x80000 + 2 * v;
+                        int w = (Sys[b & Mask] << 8) | Sys[(b + 1) & Mask];
+                        bool live = (w != 0x0000 && w != 0x0060);
+                        if (live && runFrom < 0) runFrom = v;
+                        if (!live && runFrom >= 0)
+                        {
+                            ok.Append(' ').Append(runFrom).Append('-').Append(v - 1);
+                            int fb = 0x80000 + 2 * runFrom;
+                            int fw = (Sys[fb & Mask] << 8) | Sys[(fb + 1) & Mask];
+                            ok.Append("(r").Append((((fw & 0x1F) << 8) | (fw >> 8)).ToString("X3")).Append("..)");
+                            runFrom = -1; shownRanges++;
+                        }
+                        prev = v;
+                    }
+                    if (runFrom >= 0) ok.Append(' ').Append(runFrom).Append("-...");
+                    LogWriter.WriteLine(ok.ToString());
+                }
                 sb.Append("    raw:");
                 for (int i = 0; i < FcbLen; i++)
                 {
@@ -1176,7 +1273,14 @@ namespace D.IOP
                 // op 2 is vvr and RDSK transfers the data before it tests ERRTYP, so the client
                 // reads the true label back and retries.  It is the WRITE side (vvw) that loses
                 // pages.
-                for (int i = 0; i < 8; i++)
+                // ALL TEN WORDS.  Hardware VFYLBL compares the full 20-byte label, and
+                // BootChannelDisk depends on it: SubmitRequest zeroes bootChainLink (words 8-9)
+                // in the expected label and sets tries to the minimum, with the source comment
+                // "we expect labelVerifyError".  Every boot-file read is meant to fail the verify
+                // and recover via labelFixupType readLabel -> MatchLabels -> FixUpLabel, which
+                // reconciles exactly that one field.  Comparing only words 0-7 made all 43 of the
+                // germ's reads succeed first time, so that state machine never ran once.
+                for (int i = 0; i < 10; i++)
                 {
                     if (label[i] != _dob[23 + i])
                     {
@@ -1202,7 +1306,15 @@ namespace D.IOP
             {
                 for (int i = 0; i < 10; i++) _dob[23 + i] = label != null ? label[i] : (ushort)0;   // copy label into DOB
             }
-            Array.Copy(data, _dataBuf, 512);
+            // Defensive only: with a .formatted sidecar present this cannot be null, because
+            // Micropolis1325.Load re-allocates a zero array for every page the bitmap marks
+            // (the all-zero-means-blank heuristic runs first, the bitmap restore undoes it).
+            // It CAN be null for an older pack image saved without the sidecar, where the
+            // heuristic is the only authority -- and there, copying from null would throw and
+            // leaving _dataBuf alone would hand the guest the PREVIOUS sector's contents.
+            // Return the zeros the page actually holds.
+            if (data != null) Array.Copy(data, _dataBuf, 512);
+            else Array.Clear(_dataBuf, 0, 512);
             return false;
         }
 
@@ -1235,7 +1347,8 @@ namespace D.IOP
                 // temporary exactly at 0x0200 and the corrected retry verifies.
                 var onDisk = _disk.ReadLabel(Micropolis1325.Page(cyl, head, sector));
                 if (onDisk != null)
-                    for (int i = 0; i < 8; i++)
+                    // All ten words -- see the read-side note; bootChainLink (8-9) is load-bearing.
+                    for (int i = 0; i < 10; i++)
                         if (onDisk[i] != _dob[23 + i])
                         {
                             if (LogWriter != null)
