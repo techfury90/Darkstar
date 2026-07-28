@@ -22,19 +22,26 @@
 param(
     [Parameter(Mandatory = $true)][ValidateSet('save', 'restore', 'list')][string]$Action,
     [string]$Name,
-    [string]$Pack = "$PSScriptRoot\..\..\..\..\..\dove_rigid.img",
+    [string]$Pack,
     [switch]$Force
 )
 
 $ErrorActionPreference = 'Stop'
 $suffixes = @('', '.labels', '.formatted')
 
-# Resolve the pack path even when it does not exist yet (restore into a fresh location).
+# Locate the pack HERE, not as a parameter default: $PSScriptRoot is not reliably
+# populated at parameter-bind time under `powershell -File`, where it collapsed to
+# an empty string and produced 'C:\..\..\..\dove_rigid.img'.
+if (-not $Pack) {
+    $here = $PSScriptRoot
+    if (-not $here) { $here = Split-Path -Parent $MyInvocation.MyCommand.Path }
+    $Pack = Join-Path $here '..\..\..\..\..\dove_rigid.img'
+}
+# GetFullPath collapses the .. chain without requiring the target to exist.
+# Resolve-Path and Split-Path both fail on a relative path that walks above the root.
+$Pack = [System.IO.Path]::GetFullPath($Pack)
 $packDir = Split-Path -Parent $Pack
 if (-not (Test-Path $packDir)) { throw "Pack directory not found: $packDir" }
-$packDir = (Resolve-Path $packDir).Path
-$packName = Split-Path -Leaf $Pack
-$Pack = Join-Path $packDir $packName
 $store = Join-Path $packDir 'packs'
 
 if ($Action -eq 'list') {

@@ -154,8 +154,21 @@ namespace D.IOP
         private void ScheduleDmaInt() { _dmaIntDelay = InterruptDelayClocks; }
 
         /// <summary>Advance the controller's own timing; called from the IOP tick.</summary>
+        // One-shot "parked" sample.  The go-idle dump fires at OUT 0214h -- BEFORE the window
+        // that fails -- and every register is correct there (BX=0050, BP=0002, ES:DI=03E3:0002 =
+        // the IOCB).  To see what the handler did INSIDE the window we need a sample after the
+        // machine goes quiet, which is the only moment that distinguishes an aborted core from
+        // execution that continued with corrupted state.
+        private long _idleClocks;
+        private bool _parkedDumped;
+
         public void Tick(int clocks)
         {
+            if (!_parkedDumped && LogWriter != null && DobOps > 0)
+            {
+                _idleClocks += clocks;
+                if (_idleClocks > 40000000) { _parkedDumped = true; DumpFcb("PARKED (no RDC activity)"); }
+            }
             if (_ctlrIntDelay >= 0)
             {
                 _ctlrIntDelay -= clocks;
@@ -227,9 +240,122 @@ namespace D.IOP
 
         private void LogPort(string s)
         {
+            _idleClocks = 0;
             if (LogWriter == null || _portLogged >= _portLogLimit) return;
             _portLogged++;
             try { LogWriter.WriteLine(s); } catch { LogWriter = null; }
+        }
+
+        /// <summary>
+        /// Dump the disk FCB (segment DISKIOR, located at 0x03A70, 0xB8 bytes -- ROMSysB2.mp2).
+        /// Called on the go-idle command, which is exactly where the boot ROM parks at MP 0149.
+        ///
+        /// NOTE the little-endian reader: RdWord is big-endian because the DOB sits in DRAM that
+        /// way, but the FCB is an ordinary 80186 structure written by IOP code.
+        ///
+        /// The decisive field is diskCurrentClient (0x03AB0): 0 = Mesa branch, 2 = IOP branch.
+        /// The ROM registers as the IOP client, so a 0 here means the handler took the Mesa path
+        /// and notified diskMesaClientCondition -- which the ROM never initialised, so the notify
+        /// is discarded at the nonNilPtr test and the ROM sleeps in its noTimeout wait forever.
+        /// </summary>
+        /// <summary>
+        /// Supplied by the machine so the FCB dump can record IOP register state.  Real-mode
+        /// 80186 has no memory faults, so a bad ES:DI reads garbage and runs on -- "stopped at
+        /// the instruction" is impossible on hardware.  The write evidence points at register
+        /// corruption instead: the DIRECT-addressed store landed, both REGISTER-INDIRECT stores
+        /// did not.  Expected at the stall: BX = 0x0050 (OFFSET diskFCB.rd0).
+        /// </summary>
+        public Func<string> CpuState;
+
+        private const int FcbBase = 0x03A70, FcbLen = 0xB8;
+        private int _fcbDumps;
+
+        /// Route through DoveIOPMemory, NOT the Sys/DRAM array: IOP 0x00000-0x03FFF is the 16 KB
+        /// LOCAL SRAM, a different array entirely, and the FCB at 0x03A70 lives there.  Reading it
+        /// out of Sys returns DRAM fill (0xEE/0xBB) and looks exactly like an uninitialised FCB.
+        private ushort RdLE(int a) { return (ushort)(_mem.ReadByte(a) | (_mem.ReadByte(a + 1) << 8)); }
+        private byte RdB(int a) { return _mem.ReadByte(a); }
+
+        private void DumpFcb(string why)
+        {
+            if (LogWriter == null || (_fcbDumps >= 8 && !why.StartsWith("PARKED"))) return;
+            _fcbDumps++;
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                sb.Append("  FCB (").Append(why).Append(") @IOP").Append(HostClock).AppendLine();
+                if (CpuState != null) sb.Append("    CPU ").Append(CpuState()).AppendLine();
+                sb.Append("    diskCurrentClient=").Append(RdLE(0x03AB0).ToString("X4"))
+                  .Append(RdLE(0x03AB0) == 2 ? " (IOP branch)" : RdLE(0x03AB0) == 0 ? " (MESA BRANCH <<<)" : " (?)")
+                  .Append("  handlerState=").Append(RdLE(0x03AAE).ToString("X4"))
+                  .Append("  startMesa=").Append(RdLE(0x03AAA).ToString("X4"))
+                  .Append("  startIOP=").Append(RdLE(0x03AAC).ToString("X4")).AppendLine();
+                sb.Append("    rd0.diskMesaNext=").Append(RdLE(0x03AC2).ToString("X4"))
+                  .Append(RdLE(0x03AC2) != 0 ? "  <<< NON-ZERO (a)" : "  (0, ok)")
+                  .Append("  IOPNextLow/High=").Append(RdLE(0x03ACC).ToString("X4")).Append('/')
+                  .Append(RdLE(0x03ACE).ToString("X4")).AppendLine();
+                sb.Append("    IOPcond.handlerID=").Append(RdB(0x03ADE).ToString("X2"))
+                  .Append("  conditionPtr=").Append(RdLE(0x03AE0).ToString("X4"))
+                  .Append((RdLE(0x03AE0) & 0x8000) == 0 ? "  <<< no nonNilPtr (d)" : "  (nonNilPtr set, ok)")
+                  .Append("  clientMask=").Append(RdLE(0x03AE2).ToString("X4")).AppendLine();
+                sb.Append("    cond work/DMADone/DMAWork=").Append(RdLE(0x03A98).ToString("X4")).Append('/')
+                  .Append(RdLE(0x03A96).ToString("X4")).Append('/').Append(RdLE(0x03A94).ToString("X4"))
+                  .Append("  shadow status/cmd=").Append(RdB(0x03AB6).ToString("X2")).Append('/')
+                  .Append(RdB(0x03AB7).ToString("X2"))
+                  .Append("  dmaStatus=").Append(RdLE(0x03ABA).ToString("X4")).AppendLine();
+                sb.Append("    unexpected ctlrInt=").Append(RdLE(0x03ABC))
+                  .Append("  unexpected dmaInt=").Append(RdLE(0x03ABE)).AppendLine();
+                // BOOTSTRAPIOR = 0x03E00.  diskComplete is set TRUE immediately after the
+                // notify, so FALSE here while the command visibly completed proves the handler
+                // died between the two-way error test and NotifyClientCondition -- the window
+                // where BP must still hold 0 or 2 for the indexed jumps.
+                sb.Append("    BOOT: diskComplete=").Append(RdB(0x03E86).ToString("X2"))
+                  .Append(RdB(0x03E86) == 0 ? "  <<< FALSE: notify never ran" : "  (TRUE, notify ran)")
+                  .Append("  diskInProgress=").Append(RdB(0x03E87).ToString("X2"))
+                  .Append("  diskError=").Append(RdB(0x03E82).ToString("X2")).AppendLine();
+                sb.Append("    BOOT: ctlrErrType=").Append(RdB(0x03E84).ToString("X2"))
+                  .Append("  dmaErrType=").Append(RdB(0x03E85).ToString("X2"))
+                  .Append("  ROMcondition[0x03E30]=").Append(RdLE(0x03E30).ToString("X4"))
+                  .Append((RdLE(0x03E30) & 0x8000) != 0 ? " (ROM PARKED, waiting)"
+                          : RdLE(0x03E30) == 1 ? " (notified, nobody waiting)" : " (neither)")
+                  .AppendLine();
+                // The locator's 0x03A70 is image-relative; the runtime address differs (that
+                // region reads as 0xBB fill).  Find the FCB empirically: the ROM writes
+                // diskIOPNextHigh = (0x51<<8)|8 into it, so scan for that signature.
+                if (_fcbDumps == 1)
+                {
+                    var hits = new System.Text.StringBuilder("    SCAN for 0x5108 (diskIOPNextHigh):");
+                    int found = 0;
+                    for (int a = 0; a < 0x40000 && found < 12; a += 2)
+                    {
+                        if (RdLE(a) == 0x5108) { hits.Append(" 0x").Append(a.ToString("X5")); found++; }
+                    }
+                    if (found == 0) hits.Append(" none");
+                    // Also report where low memory is actually populated.
+                    hits.AppendLine().Append("    non-0xBB spans in 0x00000-0x08000:");
+                    int runStart = -1;
+                    for (int a = 0; a <= 0x8000; a++)
+                    {
+                        bool live = a < 0x8000 && RdB(a) != 0xBB;
+                        if (live && runStart < 0) runStart = a;
+                        else if (!live && runStart >= 0)
+                        {
+                            if (a - runStart >= 16) hits.Append(" 0x").Append(runStart.ToString("X5"))
+                                                        .Append("-0x").Append((a - 1).ToString("X5"));
+                            runStart = -1;
+                        }
+                    }
+                    LogWriter.WriteLine(hits.ToString());
+                }
+                sb.Append("    raw:");
+                for (int i = 0; i < FcbLen; i++)
+                {
+                    if ((i % 16) == 0) sb.AppendLine().Append("      +").Append(i.ToString("X2")).Append(' ');
+                    sb.Append(RdB(FcbBase + i).ToString("X2")).Append(' ');
+                }
+                LogWriter.WriteLine(sb.ToString());
+            }
+            catch { LogWriter = null; }
         }
 
         public byte ReadReg(ushort port)
@@ -274,6 +400,7 @@ namespace D.IOP
             LogPort("  PORT W 0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4")
                     + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : "")
                     + " @IOP" + HostClock);
+            if (port == 0x0214 && (value & 3) == 0) DumpFcb("go-idle");
             if (_stub)
             {
                 switch (port)
