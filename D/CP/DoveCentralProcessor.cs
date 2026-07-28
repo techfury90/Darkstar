@@ -329,10 +329,34 @@ namespace D.CP
         /// Daybreak the translation is done by the microcode itself (MAR&lt;- never translates), so
         /// the value returned here IS the address the guest ends up reading.
         /// </summary>
+        /// <summary>
+        /// After a Map&lt;- of a watched virtual page, log the next few &lt;-MD reads with their address
+        /// and VALUE.  This is the last unmeasured link in a translated access: the map entry tells
+        /// you which real page the microcode will splice, and the DRAM dump tells you what that page
+        /// held when the machine stopped, but neither tells you the word the guest actually got.
+        ///
+        /// Reads come in a fixed order: the Map&lt;- reference itself reads the map ENTRY at c3, then
+        /// the microcode splices the real page and issues a MAR&lt;- whose c3 reads the DATA.  So the
+        /// entry read and the data read both appear here; identify the data read by its address
+        /// (realPage &lt;&lt; 8 | offset) rather than by position, since the microcode may interleave.
+        /// </summary>
+        private int _mapReadArm;
+        private void MapWatchFollowRead()
+        {
+            if (_mapReadArm <= 0 || MapWatchLog == null || MapWatchLog.Count >= 12000) return;
+            _mapReadArm--;
+            MapWatchLog.Add("  RD  addr=" + _mar.ToString("X5")
+                + " (realPage 0x" + (_mar >> 8).ToString("X4") + " word " + (_mar & 0xFF) + ")"
+                + "  value=" + _xBus.ToString("X4")
+                + (_xBus == 6303 ? "  == 6303 StartList.VersionID" : "")
+                + "  CPi=" + InstructionCount);
+        }
+
         private void MapWatchRead(int vpage, int addr)
         {
             if (_mapWatchLeft <= 0 || _mapWatch == null || !_mapWatch.Contains(vpage)) return;
             if (MapWatchLog.Count >= 12000) return;
+            _mapReadArm = 6;          // entry read + the spliced data read(s) that follow
             int w = ReadWord != null ? ReadWord(_mar) : -1;
             MapWatchLog.Add("MAPR vp=" + vpage + " (0x" + vpage.ToString("X4") + ")"
                 + "  entry=" + (w < 0 ? "????" : w.ToString("X4"))
@@ -860,6 +884,7 @@ namespace D.CP
                 // GetMapFlags LRot12's out the flag bits.  A pre-decoded <-MD re-mangles it -> R5=EEEE / MP-0200.
                 if (_ioRefPending) { _xBus = Pit8254Read(); _ioRefPending = false; }
                 else _xBus = ReadWord(_mar);
+                MapWatchFollowRead();
                 if (WalkRdLog != null && InstructionCount >= WalkRdFrom && InstructionCount < WalkRdTo
                     && _mar >= 0x40000 && WalkRdLog.Count < 4000)
                 {
@@ -1130,7 +1155,21 @@ namespace D.CP
                                 ? (ushort)(_bOld & 0xff00)
                                 : (ushort)((~_bOld) & 0xff00);
                             _marLowSplice = (ushort)((_yBus & 0x00ff) | hi);
-                            _mar = ((_rh[mi.rB] & 0xf) << 16) | _marLowSplice;
+                            // rpHigh is FIVE bits, not four.  The map entry is |rp[5-12]|r|d|w|rp[0-4]|,
+                            // decoding as realPage = ((w & 0x1F) << 8) | (w >> 8) -- 13 bits, which is
+                            // exactly the 8192 pages of a 4 MB machine.  Masking RH to 0xF here built a
+                            // 12-bit page number, so every real page >= 0x1000 aliased 4096 pages down:
+                            // 0x11EE was read as 0x01EE.  MAR is a 21-bit WORD address (2M words = 4 MB),
+                            // so bits 16-20 are all available and nothing else needs widening.
+                            //
+                            // Nothing hit it until now because every earlier boot lived in low memory.
+                            // The germ, and a fully boot-loaded image like the Utility Pilot, sit well
+                            // under real page 0x1000; only once full Pilot came up with demand paging did
+                            // allocation push pages above 4096.  BWSDove's StartList landed at real
+                            // 0x11EE holding 6303, the map entry correctly said 0x11EE, and the splice
+                            // fetched 0x01EE -- zeros -- so PilotControl:192 compared 0 against
+                            // StartList.VersionID and died with MP 0934 (cBadBootFile).
+                            _mar = ((_rh[mi.rB] & 0x1f) << 16) | _marLowSplice;
                             // ---- RefillE->RefillNE two-word gap fix ----
                             // The empty-buffer refill fetches TWO words: RefillE (@400) fetches word[PC], then falls
                             // through to RefillNE (@500) for word[PC+1].  RefillE's aD=2 register-capture is the
