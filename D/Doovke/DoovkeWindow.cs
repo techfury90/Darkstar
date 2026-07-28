@@ -80,13 +80,20 @@ namespace D.Doovke
             _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); AutoSaveRigidDisk(); };
 
             Load += OnWindowLoad;
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
+                _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
+
             // DOVE_DRAM_DUMP=<path> dumps shared DRAM on the way out, so a state reached
             // interactively (a wedge, an MP code) can be analysed without having to hit the menu
             // before closing -- closing is the thing you were going to do anyway.
             FormClosing += (s, e) =>
             {
-                // Never let the diagnostic block the shutdown that saves the pack.
+                // Never let the diagnostics block the shutdown that saves the pack.
                 try { DumpSharedDramTo(Environment.GetEnvironmentVariable("DOVE_DRAM_DUMP")); }
+                catch { }
+                try { FlushMapWatch(Environment.GetEnvironmentVariable("DOVE_MAP_WATCH_LOG")); }
+                catch { }
+                try { FlushMpLog(Environment.GetEnvironmentVariable("DOVE_MP_LOG")); }
                 catch { }
                 SaveRigidDisk();
                 Shutdown();
@@ -189,6 +196,35 @@ namespace D.Doovke
                                     "Dump shared DRAM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
             }
+        }
+
+        /// <summary>
+        /// Write the CP's map-write watch log (DOVE_MAP_WATCH) out on the way down.  Pairs with the
+        /// DRAM dump: the dump gives the map's final state, this gives every change to the watched
+        /// entries along the way, which is what a post-mortem snapshot cannot show once demand
+        /// paging is remapping pages underneath the guest.
+        /// </summary>
+        private void FlushMapWatch(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            System.Collections.Generic.List<string> log;
+            lock (_machineLock) log = _machine.Cp.MapWatchLog;
+            if (log == null) return;
+            System.IO.File.WriteAllLines(path, log.ToArray());
+        }
+
+        /// <summary>
+        /// Write out every maintenance-panel post (DOVE_MP_LOG).  See DoveCentralProcessor.WrmpLog:
+        /// the MP code is a cursor sprite on this machine, so this is the only way to read it as a
+        /// number, in order, rather than decoding a bitmap by eye.
+        /// </summary>
+        private void FlushMpLog(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            System.Collections.Generic.List<string> log;
+            lock (_machineLock) log = _machine.Cp.WrmpLog;
+            if (log == null) return;
+            System.IO.File.WriteAllLines(path, log.ToArray());
         }
 
         /// <summary>Returns bytes written; a null or empty path is a no-op returning 0.</summary>

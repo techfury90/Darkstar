@@ -216,7 +216,19 @@ namespace D.CP
         public List<string> XWtLog;    // TEMP: microword-field decode + XWtOKDisp(fY=0xB) branch at the net-0 zSGB faulting store (CPi 1300-1400)
         public List<string> MapReadLog; // TEMP: Map<- references near the IORegion end (aGMF / FindStartOfIORegion)
         public List<string> EscLog;    // TEMP: @ESC (F8) alpha-dispatch trace (aGMF F8 09 vs aNOTIFYIOP F8 89)
-        public List<string> WrmpLog;   // TEMP: every @WRMP (zESC alpha 0x77) = THE maintenance-panel post chokepoint
+        /// <summary>
+        /// Every @WRMP (zESC alpha 0x77) -- THE maintenance-panel post chokepoint.  Enabled by
+        /// DOVE_MP_LOG=&lt;path&gt;, written out on close.
+        ///
+        /// This is the authoritative answer to "which MP code are we at".  On Daybreak the code is
+        /// rendered as the mouse cursor sprite, so the only other way to read it is to look at the
+        /// screen and decode a bitmap by eye -- fine for 0900 vs 0935, but the difference between
+        /// 0934 and 0935 is one glyph, and an entire line of enquiry can hang off which one it is.
+        /// The log also gives the ORDER and the count, which a display cannot: it shows whether a
+        /// code was the first failure or overwrote an earlier one, and whether it was posted once
+        /// or is being re-posted in a loop.
+        /// </summary>
+        public List<string> WrmpLog;
         public List<string> KfcbLog;   // error-raise capture: every zKFCB (0xF0) in [KfcbLogFrom,KfcbLogTo] -- logs
         public long KfcbLogFrom;       // the signal descriptor + arg on the stack so the INNER (root) raise is readable
         public long KfcbLogTo = long.MaxValue;
@@ -288,6 +300,91 @@ namespace D.CP
         // If that count is large, the germ is executing Map<- at the wrong click phase (or running
         // code it should never have reached), and no map fix-up downstream of it can ever converge.
         public readonly long[] LoadMapByCycle = new long[4];
+
+        /// <summary>
+        /// DOVE_MAP_WATCH=&lt;vpage&gt;[,&lt;vpage&gt;...] -- log every write to those virtual pages' map
+        /// entries, as it happens, with the CP instruction count.
+        ///
+        /// WHY: a post-mortem DRAM dump only shows the map as it stood when the machine stopped.
+        /// That is sound while nothing remaps -- and it was, for the germ and for a fully
+        /// boot-loaded image like the Utility Pilot (lastVMPage = lastBootLoadedPage, no faults).
+        /// It stops being sound the moment demand paging runs: "virtual V resolves correctly now"
+        /// no longer establishes "virtual V resolved correctly when the guest read it".  BWSDove
+        /// boot-loads 426 pages of a 2803-page file, so the remaining 2377 arrive through the fault
+        /// path, and this is the first image on this emulator that exercises it.
+        ///
+        /// The map array is real words [mapBase, mapBase+0x10000) where mapBase = (MAPA &amp; 0xF) &lt;&lt; 16;
+        /// the entry for virtual page V is at mapBase+V, decoding as
+        /// realPage = ((w &amp; 0x1F) &lt;&lt; 8) | (w &gt;&gt; 8) with flags in w &amp; 0xE0.
+        /// </summary>
+        private HashSet<int> _mapWatch;
+        private int _mapWatchLeft = -1;
+        public List<string> MapWatchLog;
+
+        /// <summary>
+        /// The companion to MapWatch: every Map&lt;- REFERENCE to a watched virtual page, logged with
+        /// the entry the microcode is about to read back at c3.  Writes alone cannot answer the
+        /// question that matters -- "what did the guest see when it dereferenced this page?" --
+        /// because between two writes the entry is read an unbounded number of times, and on
+        /// Daybreak the translation is done by the microcode itself (MAR&lt;- never translates), so
+        /// the value returned here IS the address the guest ends up reading.
+        /// </summary>
+        private void MapWatchRead(int vpage, int addr)
+        {
+            if (_mapWatchLeft <= 0 || _mapWatch == null || !_mapWatch.Contains(vpage)) return;
+            if (MapWatchLog.Count >= 12000) return;
+            int w = ReadWord != null ? ReadWord(_mar) : -1;
+            MapWatchLog.Add("MAPR vp=" + vpage + " (0x" + vpage.ToString("X4") + ")"
+                + "  entry=" + (w < 0 ? "????" : w.ToString("X4"))
+                + "  real 0x" + (w < 0 ? "???" : (((w & 0x1F) << 8) | (w >> 8)).ToString("X4"))
+                + "  flags " + (w < 0 ? "??" : (w & 0xE0).ToString("X2"))
+                + (w >= 0 && (w & 0xE0) == 0x60 ? " VACANT" : "")
+                + "  @" + addr.ToString("X3") + " CPi=" + InstructionCount);
+        }
+        private void MapWatch(int addr, ushort value)
+        {
+            if (_mapWatchLeft < 0)
+            {
+                _mapWatch = new HashSet<int>();
+                _mapWatchLeft = 0;
+                string s = Environment.GetEnvironmentVariable("DOVE_MAP_WATCH");
+                if (!string.IsNullOrEmpty(s))
+                {
+                    foreach (string t in s.Split(','))
+                    {
+                        int v;
+                        string u = t.Trim();
+                        if (u.StartsWith("0x") || u.StartsWith("0X"))
+                        {
+                            if (int.TryParse(u.Substring(2), System.Globalization.NumberStyles.HexNumber,
+                                              null, out v)) _mapWatch.Add(v);
+                        }
+                        else if (int.TryParse(u, out v)) _mapWatch.Add(v);
+                    }
+                    if (_mapWatch.Count > 0)
+                    {
+                        _mapWatchLeft = 4000;
+                        if (MapWatchLog == null) MapWatchLog = new List<string>();
+                    }
+                }
+            }
+            if (_mapWatchLeft == 0) return;
+
+            int mapBase = (_mapA & 0xF) << 16;
+            int vpage = addr - mapBase;
+            if (vpage < 0 || vpage > 0xFFFF || !_mapWatch.Contains(vpage)) return;
+
+            _mapWatchLeft--;
+            int oldw = ReadWord != null ? ReadWord(addr) : -1;
+            MapWatchLog.Add("MAPW vp=" + vpage + " (0x" + vpage.ToString("X4") + ")"
+                + "  " + (oldw < 0 ? "????" : oldw.ToString("X4"))
+                + " -> " + value.ToString("X4")
+                + "   real 0x" + (oldw < 0 ? "???" : (((oldw & 0x1F) << 8) | (oldw >> 8)).ToString("X4"))
+                + " -> 0x" + ((((value & 0x1F) << 8) | (value >> 8))).ToString("X4")
+                + "   flags " + (oldw < 0 ? "??" : (oldw & 0xE0).ToString("X2"))
+                + " -> " + (value & 0xE0).ToString("X2")
+                + "   @" + _mar.ToString("X5") + " CPi=" + InstructionCount);
+        }
         public List<string> MapPhaseLog;   // the FIRST Map<- executed outside c1 (the invariant DLion asserts)
         // OVERALL microword distribution across c1/c2/c3.  This picks the lane:
         //   ~1/3 each  => the rotation is SOUND and we have a pure PHASE OFFSET (hunt the one event).
@@ -1020,6 +1117,7 @@ namespace D.CP
                                     + "  Q=" + _alu.Q.ToString("X4") + " R6=" + _alu.R[6].ToString("X4")
                                     + " RH2=" + _rh[2].ToString("X2"));
                             }
+                            MapWatchRead(_vpg, addr);
                             Note("Map<-");
                         }
                         else
@@ -1105,7 +1203,11 @@ namespace D.CP
                         // MDR<- -- DLion CentralProcessor.cs:664: cancel the store if the PRECEDING MAR<- crossed a
                         // page (the un-carried splice address is wrong; the pageCross branch re-issues it correctly).
                         if (_ioRefPending) { Pit8254Write(_yBus); _ioRefPending = false; }
-                        else if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel)) WriteWord(_mar, _yBus);
+                        else if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel))
+                        {
+                            MapWatch(_mar, _yBus);
+                            WriteWord(_mar, _yBus);
+                        }
                         // StashPC watch (env DOVE_STASHWATCH): catch the write that saves GFI 99's PC.
                         if (StashWatchLog != null && StashWatchLog.Count < 2000
                             && InstructionCount >= StashWatchFrom && InstructionCount < StashWatchTo
@@ -1504,7 +1606,7 @@ namespace D.CP
                                 // STRAIGHT to hardware without touching the ProcessorFace.mp global ("Does not set
                                 // ProcessorFace.mp" -- ProcessorFace.mesa:27-34), so this dispatch is the only place
                                 // every MP post is visible, in order.  TOS (R0) = the mesa arg = the MP code.
-                                if (WrmpLog != null && _ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x77)
+                                if (WrmpLog != null && WrmpLog.Count < 20000 && _ibFront == 0xF8 && _ib[((int)_ibPtr) & 0x1] == 0x77)
                                     WrmpLog.Add("MP <- " + _alu.R[0].ToString("X4") + " (dec " + _alu.R[0]
                                         + ")  @CPi " + InstructionCount + " @" + addr.ToString("X3")
                                         + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " sp=" + _stackP);
