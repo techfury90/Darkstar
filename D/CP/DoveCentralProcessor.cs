@@ -34,6 +34,67 @@ namespace D.CP
         // Register files (sizes mirror the DLion CP).
         private readonly ushort[] _u = new ushort[256];
         private readonly byte[] _rh = new byte[16];
+
+        // Last 256 microstore addresses, always recorded.  A wedge with no I/O is a spin, and the
+        // shape of the spin is the whole diagnosis: a handful of distinct addresses repeating is a
+        // tight poll (waiting on a device or a cell that never changes), while a long non-repeating
+        // trace is real work that merely produced no disk traffic.  Cheap enough to leave on.
+        private readonly int[] _uRing = new int[256];
+        private int _uRingN;
+
+        /// <summary>
+        /// A human-readable snapshot of CP state, for DOVE_CP_STATE.  Includes the Mesa-level
+        /// pointers, because naming the spinning module is what makes a wedge actionable when the
+        /// code is ViewPoint and we have no source for it: GFI at least says WHICH module, and if
+        /// it turns out to be Pilot or Mesa we do have the source.
+        ///
+        /// L = local frame (RH3:R3), GF = global frame (RH2:R2); the global link at L-2 holds
+        /// GFI &lt;&lt; 2, which is the module identity.  All of these are long pointers whose high part
+        /// is FIVE bits -- see the MAR splice; a 4-bit mask silently aliases any frame above real
+        /// page 4096, which is most of them once demand paging is running.
+        /// </summary>
+        public string DescribeState()
+        {
+            var sb = new System.Text.StringBuilder();
+            int L = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
+            int GF = ((_rh[2] & 0x1F) << 16) | _alu.R[2];
+            int gfi = -1, gl = -1;
+            if (ReadWord != null && L > 0x100) { gl = ReadWord(L - 2); gfi = gl >> 2; }
+            sb.AppendLine("CP state at shutdown");
+            sb.AppendLine("  CPi          = " + InstructionCount);
+            sb.AppendLine("  microstore   = 0x" + _tpc[_task].ToString("X3") + "   cycle=" + (_cycle & 3) + "  stackP=" + _stackP);
+            sb.AppendLine("  macro PC     = RH5:R5 = " + _rh[5].ToString("X2") + ":" + _alu.R[5].ToString("X4")
+                          + "  pc16=" + (_pc16 ? 1 : 0)
+                          + "  -> word 0x" + ((((_rh[5] & 0x1F) << 16) | _alu.R[5])).ToString("X5"));
+            sb.AppendLine("  L (frame)    = 0x" + L.ToString("X5") + "   GF = 0x" + GF.ToString("X5"));
+            sb.AppendLine("  globalLink   = " + (gl < 0 ? "??" : "0x" + gl.ToString("X4")) + "   GFI = " + gfi);
+            sb.AppendLine("  MAR=0x" + _mar.ToString("X5") + "  MAPA=" + _mapA.ToString("X"));
+            sb.Append("  R  =");
+            for (int i = 0; i < 16; i++) sb.Append(" " + _alu.R[i].ToString("X4"));
+            sb.AppendLine();
+            sb.Append("  RH =");
+            for (int i = 0; i < 16; i++) sb.Append(" " + _rh[i].ToString("X2"));
+            sb.AppendLine();
+
+            // The spin itself.
+            var seen = new System.Collections.Generic.List<int>();
+            var order = new System.Collections.Generic.List<int>();
+            int n = _uRingN < 256 ? _uRingN : 256;
+            for (int i = 0; i < n; i++)
+            {
+                int a = _uRing[(_uRingN - n + i) & 0xFF];
+                order.Add(a);
+                if (!seen.Contains(a)) seen.Add(a);
+            }
+            sb.AppendLine("  last " + n + " microstore addresses: " + seen.Count + " distinct");
+            sb.Append("    distinct:");
+            foreach (int a in seen) sb.Append(" " + a.ToString("X3"));
+            sb.AppendLine();
+            sb.Append("    sequence:");
+            foreach (int a in order) sb.Append(" " + a.ToString("X3"));
+            sb.AppendLine();
+            return sb.ToString();
+        }
         private readonly int[] _link = new int[8];
         private readonly int[] _tpc = new int[8];
         private int _stackP;
@@ -623,6 +684,7 @@ namespace D.CP
         private void Step()
         {
             int addr = _tpc[_task];
+            _uRing[_uRingN++ & 0xFF] = addr;   // last 256 microstore addresses -- characterises a spin
             if (AddrHist != null && InstructionCount >= HistFrom) AddrHist[addr & 0xFFF]++;
             Microinstruction mi = Fetch(_execBank, addr);
 
@@ -893,7 +955,7 @@ namespace D.CP
                     // Tag reads by target: low-MDS 0x781xx = AllocationVector (IGNORE - the allocator
                     // masquerade filter); 0x78xxx-0x79xxx = frame words ([F-1]=ReadPC,[F-3]=walk step);
                     // else = codebase (zCATCH scan / enable intervals).
-                    int Lr = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                    int Lr = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
                     int curGFI = (Lr > 0x100) ? (ReadWord(Lr - 2) >> 2) : -1;
                     if (WalkRdGfi < 0 || curGFI == WalkRdGfi)   // WalkRdGfi<0 = log every frame (no GFI gate)
                     {
@@ -909,7 +971,7 @@ namespace D.CP
                 if (ModCensCount != null && InstructionCount >= ModCensFrom && InstructionCount < ModCensTo
                     && _mar >= 0x42000 && !(_mar >= 0x78000 && _mar <= 0x7A000))
                 {
-                    int Lc = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                    int Lc = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
                     if (Lc > 0x1000)
                     {
                         int gw = ReadWord(Lc - 2);
@@ -1033,7 +1095,7 @@ namespace D.CP
                 if (_ab0Run == Ab0RunThreshold && !_ab0InvokeLatched)
                 {
                     _ab0InvokeLatched = true;
-                    int va = ((_lastDispRH5 & 0xF) << 16) | _lastDispR5;
+                    int va = ((_lastDispRH5 & 0x1F) << 16) | _lastDispR5;
                     _ab0Invoke = "INVOKING OP=0x" + _lastDispOp.ToString("X2") + " @" + _lastDispAddr.ToString("X3")
                         + " dispatchedCPi=" + _lastDispCPi + "  ab0FirstBurstCPi=" + InstructionCount
                         + "   inputs: R5=" + _lastDispR5.ToString("X4") + " RH5=" + _lastDispRH5.ToString("X2")
@@ -1050,7 +1112,7 @@ namespace D.CP
                     // block: a Monitor.Wait / Process op / fault).  GF (globallink) + codebase name the module.
                     if (ReadWord != null && FrameChainLog != null)
                     {
-                        int L = ((_lastDispRH3 & 0xF) << 16) | _lastDispR3;
+                        int L = ((_lastDispRH3 & 0x1F) << 16) | _lastDispR3;
                         int mds = L & 0xFF0000;   // MDS bank; frame/GF links are MDS-relative 16-bit words
                         FrameChainLog.Add("=== FRAME CHAIN at @AB0 invocation (L=0x" + L.ToString("X5")
                             + ", PC=0x" + va.ToString("X5") + ", MDS base=0x" + mds.ToString("X5") + ") ===");
@@ -1252,7 +1314,7 @@ namespace D.CP
                             && InstructionCount >= StashWatchFrom && InstructionCount < StashWatchTo
                             && (_mar == StashWatchAddr || _yBus == StashWatchVal))
                         {
-                            int Lr = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                            int Lr = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
                             StashWatchLog.Add("CPi=" + InstructionCount + " @" + addr.ToString("X3")
                                 + (_mar == StashWatchAddr ? " [ADDR]" : "") + (_yBus == StashWatchVal ? " [VAL]" : "")
                                 + " mar=0x" + _mar.ToString("X5") + " <-0x" + _yBus.ToString("X4")
@@ -1530,7 +1592,7 @@ namespace D.CP
                                 // NB: the old `|| inStartPage` OR-gate filled the 400-entry cap at CPi ~2900 and made
                                 // every later window silently empty.  Window only; inStartPage is just a label now.
                                 if (OpLog != null && OpLog.Count < 400 && InstructionCount >= OpLogFrom && InstructionCount < OpLogTo)
-                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP + " L=[" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4") + "]->" + ((((_rh[3] & 0xF) << 16) | _alu.R[3])).ToString("X5"));
+                                    OpLog.Add((inStartPage ? "[START] " : "") + "CPi=" + InstructionCount + " @" + addr.ToString("X3") + " OP=0x" + _ibFront.ToString("X2") + " R5=" + _alu.R[5].ToString("X4") + " RH5=" + _rh[5].ToString("X") + " pc16=" + (_pc16?1:0) + " ibPtr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4") + " offC=" + ((_alu.R[5] - _ibFrontWord) & 0xFFFF).ToString("X4") + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "] TOS=" + _alu.R[0].ToString("X4") + " sp=" + _stackP + " L=[" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4") + "]->" + ((((_rh[3] & 0x1F) << 16) | _alu.R[3])).ToString("X5"));
                                     // offC = committed-R5 offset (sampled post-L487 ALU commit, unlike the top-of-Step off at L307
                                     // which reads R5 PRE-commit and manufactures the 0xFFFF word-crossing artifact -- see audit wf_2e3020ed).
                                 // ENTERING-OPCODE PROBE: record every dispatched mesa opcode with the
@@ -1669,9 +1731,9 @@ namespace D.CP
                                         + " ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2")
                                         + "] ptr=" + _ibPtr + " fw=" + _ibFrontWord.ToString("X4")
                                         // signal-walk anchor: L (=d.raiser = current local frame) + pc16 + all links
-                                        + "  L=" + (((_rh[3] & 0xF) << 16) | _alu.R[3]).ToString("X5")
+                                        + "  L=" + (((_rh[3] & 0x1F) << 16) | _alu.R[3]).ToString("X5")
                                         + " rhL:L=" + _rh[3].ToString("X2") + ":" + _alu.R[3].ToString("X4")
-                                        + " GF=" + (((_rh[2] & 0xF) << 16) | _alu.R[2]).ToString("X5")
+                                        + " GF=" + (((_rh[2] & 0x1F) << 16) | _alu.R[2]).ToString("X5")
                                         + " pc16=" + (_pc16 ? 1 : 0)
                                         + " links=" + string.Join(",", System.Linq.Enumerable.Select(System.Linq.Enumerable.Range(0, 8), i => _link[i].ToString("X"))));
                                     // Read the LIVE frame words at L (=d.raiser) via the VM map -- the STOP memdump's
@@ -1697,7 +1759,7 @@ namespace D.CP
                                             int w = vrd(cbase + ((bpc & 0x1FFFF) >> 1));
                                             return ((bpc & 1) != 0) ? (w & 0xFF) : ((w >> 8) & 0xFF);
                                         };
-                                        int raiserReal = ((_rh[3] & 0xF) << 16) | _alu.R[3];
+                                        int raiserReal = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
                                         int link = ReadWord(raiserReal - 3);   // ReadReturnLink[raiser] -> start at caller
                                         string walk = "";
                                         for (int depth = 0; depth < 14; depth++)

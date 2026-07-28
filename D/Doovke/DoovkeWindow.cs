@@ -121,6 +121,17 @@ namespace D.Doovke
                 catch { }
                 try
                 {
+                    string cp = Environment.GetEnvironmentVariable("DOVE_CP_STATE");
+                    if (!string.IsNullOrEmpty(cp))
+                    {
+                        string cpState;
+                        lock (_machineLock) cpState = _machine.Cp.DescribeState();
+                        System.IO.File.WriteAllText(cp, cpState);
+                    }
+                }
+                catch { }
+                try
+                {
                     string p = Environment.GetEnvironmentVariable("DOVE_MP_TRACE");
                     if (!string.IsNullOrEmpty(p) && _mpTrace != null)
                         System.IO.File.WriteAllLines(p, _mpTrace.ToArray());
