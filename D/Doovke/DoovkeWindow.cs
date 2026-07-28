@@ -83,6 +83,28 @@ namespace D.Doovke
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
                 _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
 
+            // DOVE_MP_TRACE=<path>: the panel as DISPLAYED, sampled from the cursor sprite buffer.
+            //
+            // This exists because the @WRMP opcode hook (DOVE_MP_LOG) is not trustworthy: it tests
+            // _ib[_ibPtr & 1] for the alpha byte, which picked up 259 false posts from a stale IB
+            // byte and MISSED the one code that was actually on screen.  The sprite is the panel --
+            // the ROM draws the digits into ED00-ED1F -- so sampling it needs no opcode decoding and
+            // no assumption about which microcode path posted.  Raw bytes are logged and decoded
+            // offline; rendering glyphs to digits in here would just be a second thing to get wrong.
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_TRACE")))
+            {
+                _mpTrace = new System.Collections.Generic.List<string>();
+                _machine.Display.OnCursorWrite += (port, value) =>
+                {
+                    if (_mpTrace.Count >= 20000) return;
+                    byte[] b = _machine.Display.GetCursorBuffer();
+                    string hex = BitConverter.ToString(b);
+                    if (hex == _lastSprite) return;          // only log real changes
+                    _lastSprite = hex;
+                    _mpTrace.Add("CPi=" + _machine.Cp.InstructionCount + " " + hex);
+                };
+            }
+
             // DOVE_DRAM_DUMP=<path> dumps shared DRAM on the way out, so a state reached
             // interactively (a wedge, an MP code) can be analysed without having to hit the menu
             // before closing -- closing is the thing you were going to do anyway.
@@ -94,6 +116,15 @@ namespace D.Doovke
                 try { FlushMapWatch(Environment.GetEnvironmentVariable("DOVE_MAP_WATCH_LOG")); }
                 catch { }
                 try { FlushMpLog(Environment.GetEnvironmentVariable("DOVE_MP_LOG")); }
+                catch { }
+                try { DumpCursorSprite(Environment.GetEnvironmentVariable("DOVE_CURSOR_DUMP")); }
+                catch { }
+                try
+                {
+                    string p = Environment.GetEnvironmentVariable("DOVE_MP_TRACE");
+                    if (!string.IsNullOrEmpty(p) && _mpTrace != null)
+                        System.IO.File.WriteAllLines(p, _mpTrace.ToArray());
+                }
                 catch { }
                 SaveRigidDisk();
                 Shutdown();
@@ -139,6 +170,9 @@ namespace D.Doovke
             _sinceSave.Reset(); _sinceSave.Start();
             SaveRigidDisk();
         }
+
+        private System.Collections.Generic.List<string> _mpTrace;
+        private string _lastSprite;
 
         private const int AutoSaveIntervalMs = 120000;   // 2 minutes
         private long _lastSavedRdcOps = -1;
@@ -225,6 +259,37 @@ namespace D.Doovke
             lock (_machineLock) log = _machine.Cp.WrmpLog;
             if (log == null) return;
             System.IO.File.WriteAllLines(path, log.ToArray());
+        }
+
+        /// <summary>
+        /// DOVE_CURSOR_DUMP=&lt;path&gt; -- write the 16x16 hardware cursor sprite as ASCII art.
+        ///
+        /// On Daybreak the MP code IS the cursor sprite: the ROM draws the digits into the 32-byte
+        /// sprite buffer at ED00-ED1F.  So this is the ONLY ground truth for "what does the panel
+        /// say" -- the @WRMP hook captures what the CP posts through SpecialSetMP, which is a
+        /// different thing and can disagree (it missed the code being displayed, and it also picks
+        /// up false positives from a stale IB byte).  Decoding four 4x5 digits by eye from a zoomed
+        /// screenshot is exactly the step worth removing from the loop.
+        /// </summary>
+        private void DumpCursorSprite(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return;
+            byte[] buf;
+            lock (_machineLock) buf = _machine.Display.GetCursorBuffer();
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine("16x16 hardware cursor sprite (ED00-ED1F), MSB first:");
+            for (int row = 0; row < 16; row++)
+            {
+                // Intel byte order in the buffer: 2 bytes per 16-px row, ED00 = even byte.
+                int hi = buf[row * 2], lo = buf[row * 2 + 1];
+                int bits = (hi << 8) | lo;
+                var line = new System.Text.StringBuilder();
+                for (int b = 15; b >= 0; b--) line.Append(((bits >> b) & 1) != 0 ? '#' : '.');
+                sb.AppendLine(string.Format("{0,2}: {1}  {2:X2} {3:X2}", row, line, hi, lo));
+            }
+            sb.AppendLine();
+            sb.AppendLine("raw: " + BitConverter.ToString(buf));
+            System.IO.File.WriteAllText(path, sb.ToString());
         }
 
         /// <summary>Returns bytes written; a null or empty path is a no-op returning 0.</summary>
