@@ -80,7 +80,17 @@ namespace D.Doovke
             _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); AutoSaveRigidDisk(); };
 
             Load += OnWindowLoad;
-            FormClosing += (s, e) => { SaveRigidDisk(); Shutdown(); };
+            // DOVE_DRAM_DUMP=<path> dumps shared DRAM on the way out, so a state reached
+            // interactively (a wedge, an MP code) can be analysed without having to hit the menu
+            // before closing -- closing is the thing you were going to do anyway.
+            FormClosing += (s, e) =>
+            {
+                // Never let the diagnostic block the shutdown that saves the pack.
+                try { DumpSharedDramTo(Environment.GetEnvironmentVariable("DOVE_DRAM_DUMP")); }
+                catch { }
+                SaveRigidDisk();
+                Shutdown();
+            };
         }
 
         /// <summary>
@@ -138,6 +148,61 @@ namespace D.Doovke
             }
         }
 
+        /// <summary>
+        /// Write the whole 4 MB shared DRAM array to a file, for offline analysis.
+        ///
+        /// This exists because the in-emulator scanners that preceded it were not trustworthy and
+        /// were believed anyway.  A "locate the CP map by its vacant stamps" probe found zero
+        /// stamps, reported base 0xFFFFFFFF, and then happily printed map entries read from that
+        /// base -- all zeros, which read as "the page map does not resolve".  A companion scan
+        /// concluded the boot file's last pages were "absent from the whole array" while a
+        /// write-point trace proved them present, correct, and readback-verified.  Both were
+        /// searching from a bad base; neither said so.
+        ///
+        /// A dump has no such failure mode: the bytes are the bytes, the analysis happens outside,
+        /// and a wrong hypothesis about where a structure lives cannot disguise itself as evidence
+        /// about what the structure contains.  Prefer this over adding another in-process scanner.
+        ///
+        /// The CP and IOP share this one array (there is no bridge).  CP word W is byte 2W, big
+        /// endian; the VM map lives at CP word 0x40000 = byte 0x80000, entry for virtual page V at
+        /// byte 0x80000 + 2V, decoding as realPage = ((w &amp; 0x1F) &lt;&lt; 8) | (w &gt;&gt; 8) with flags
+        /// referenced 0x0080, dirty 0x0040, writeProtect 0x0020 and a vacant stamp of 0x0060.
+        /// The 16 KB IOP-local SRAM at 0x00000-0x03FFF is a SEPARATE array and is NOT in this dump.
+        /// </summary>
+        private void DumpSharedDram()
+        {
+            using (var dlg = new SaveFileDialog())
+            {
+                dlg.Title = "Dump shared DRAM";
+                dlg.Filter = "Raw memory image (*.bin)|*.bin|All files (*.*)|*.*";
+                dlg.FileName = "dove_dram.bin";
+                if (dlg.ShowDialog(this) != DialogResult.OK) return;
+                try
+                {
+                    long n = DumpSharedDramTo(dlg.FileName);
+                    MessageBox.Show(this, "Wrote " + n.ToString("N0") + " bytes to " + dlg.FileName,
+                                    "Dump shared DRAM", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                }
+                catch (Exception ex)
+                {
+                    MessageBox.Show(this, "Could not write the dump: " + ex.Message,
+                                    "Dump shared DRAM", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                }
+            }
+        }
+
+        /// <summary>Returns bytes written; a null or empty path is a no-op returning 0.</summary>
+        private long DumpSharedDramTo(string path)
+        {
+            if (string.IsNullOrEmpty(path)) return 0;
+            byte[] ram;
+            // Hold the machine lock for the copy only -- writing 4 MB to disk under it would
+            // stall the emulation thread for the duration of the I/O.
+            lock (_machineLock) ram = (byte[])_machine.Memory.SystemRaw.Clone();
+            System.IO.File.WriteAllBytes(path, ram);
+            return ram.Length;
+        }
+
         private MenuStrip BuildMenu()
         {
             var menu = new MenuStrip();
@@ -148,6 +213,7 @@ namespace D.Doovke
             file.DropDownItems.Add("&Eject Floppy", null, (s, e) => { lock (_machineLock) _machine.EjectFloppy(0); });
             file.DropDownItems.Add(new ToolStripSeparator());
             file.DropDownItems.Add("&Save Rigid Disk Now", null, (s, e) => SaveRigidDisk());
+            file.DropDownItems.Add("&Dump Shared DRAM...", null, (s, e) => DumpSharedDram());
             file.DropDownItems.Add(new ToolStripSeparator());
             file.DropDownItems.Add("E&xit", null, (s, e) => Close());
             menu.Items.Add(file);

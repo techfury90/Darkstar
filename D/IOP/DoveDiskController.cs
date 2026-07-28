@@ -246,6 +246,57 @@ namespace D.IOP
         private void WrWord(int phys, ushort v) { WrMem(phys, (byte)(v >> 8)); WrMem(phys + 1, (byte)v); }
         private static ushort Bswap(ushort v) { return (ushort)((v << 8) | (v >> 8)); }
 
+        /// <summary>
+        /// DOVE_RDC_DESTLOG=&lt;n&gt; -- log WHERE each read sector lands, emitted AT THE WRITE
+        /// rather than inferred from the neighbouring DMA line.  Default off; n bounds the lines.
+        ///
+        /// Attribution by adjacency is what defeated the previous attempt at this measurement:
+        /// sector 0's page-DMA is armed BEFORE its cc=2 Execute, so pairing each DMA line with the
+        /// preceding op shifts every derived address by exactly one page -- which is indistinguishable
+        /// from the off-by-one we were hunting.  Here the address and the sector are known in the
+        /// same instant, so there is nothing to infer.
+        ///
+        /// The destination is the output of the IOP's %ConvertAddress, which resolves a Mesa virtual
+        /// page by walking the CP page map through mesaPageMapSegment:mesaPageMapOffset -- a pointer
+        /// pair whose only writer in the B2 ROM is a 32-word conditional-assembly stub.  So this also
+        /// settles whether that map resolved, without having to locate those variables in IOP memory:
+        /// a nil or stub-derived pointer can only show up here as a wrong address.
+        ///
+        /// The readback is the point of the whole thing.  WrMem cannot fault: 0xF-prefixed addresses
+        /// route to IOP-local memory and everything else is masked to 4 MB.  A bad address therefore
+        /// lands somewhere real and stays silent.  Reading the first word straight back through the
+        /// same path is what distinguishes "delivered elsewhere" from "not delivered at all".
+        /// </summary>
+        private int _destLogLeft = -1;
+        private void LogDelivery(int addr, int cyl, int head, int sector, int k)
+        {
+            if (LogWriter == null) return;
+            if (_destLogLeft < 0)
+            {
+                string s = Environment.GetEnvironmentVariable("DOVE_RDC_DESTLOG");
+                int n;
+                _destLogLeft = string.IsNullOrEmpty(s) ? 0 : (int.TryParse(s, out n) ? n : 20000);
+            }
+            if (_destLogLeft == 0) return;
+            _destLogLeft--;
+
+            // The DOB label is the EXPECTED one (stepped per sector), which is what Pilot asked
+            // for -- exactly the identifier we want.  On op 6 it is not verified and may be stale.
+            int fp = Bswap(_dob[23 + 5]) | (((_dob[23 + 6] >> 1) & 0x7F) << 16);
+            ushort w0 = (ushort)((_dataBuf[0] << 8) | _dataBuf[1]);
+            ushort back = RdWord(addr);
+            try
+            {
+                LogWriter.WriteLine("    DEST k=" + k + " chs=[" + cyl + "," + head + "," + sector
+                    + "] fp=" + fp + " -> 0x" + addr.ToString("X6")
+                    + (IsIopLocal(addr) ? " IOPLOCAL"
+                        : (addr > Mask ? " WRAPPED->0x" + (addr & Mask).ToString("X6") : ""))
+                    + " w0=" + w0.ToString("X4") + " back=" + back.ToString("X4")
+                    + (back == w0 ? "" : "  *** WRITE DID NOT STICK ***"));
+            }
+            catch { LogWriter = null; }
+        }
+
         // AM2942 word-count decode: value = two's-complement-8 of N, shifted left 1, on bits 8-1.
         private int WordCount()
         {
@@ -689,6 +740,7 @@ namespace D.IOP
                     {
                         if (!_noDataDma)
                             for (int i = 0; i < 512; i++) WrMem(_dataDmaAddr + i, _dataBuf[i]);
+                        LogDelivery(_dataDmaAddr, LastCyl, LastHead, LastSector, 0);
                         _dataDmaArmed = false;
                     }
                     // A streaming run is NOT complete yet -- FinishTransfer raises the single
@@ -1127,6 +1179,7 @@ namespace D.IOP
                     err = ReadSector(c, h, sct, _xferOp == 2 /*verifyLabel*/);
                     if (!err && !_noDataDma)
                         for (int i = 0; i < 512; i++) WrMem(addr + i, _dataBuf[i]);
+                    LogDelivery(addr, c, h, sct, _xferIndex);
                     break;
                 case 3:
                 case 4:
