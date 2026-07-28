@@ -222,8 +222,28 @@ namespace D.IOP
         // ---- physical DRAM access (AM2942 bypasses the 80186 map; index _system directly) ----
         private byte[] Sys { get { return _mem.SystemRaw; } }
         private int Mask { get { return DoveIOPMemory.SystemSize - 1; } }
-        private ushort RdWord(int phys) { var s = Sys; return (ushort)((s[phys & Mask] << 8) | s[(phys + 1) & Mask]); }
-        private void WrWord(int phys, ushort v) { var s = Sys; s[phys & Mask] = (byte)(v >> 8); s[(phys + 1) & Mask] = (byte)v; }
+        /// <summary>
+        /// An AM2942 address whose top nibble is 0xF is IOP-LOCAL, not physical DRAM: the boot
+        /// ROM builds its pointers with IOPLogicalOpieAddress in the high byte, and the low 20
+        /// bits are the IOP linear address.  Those MUST go through DoveIOPMemory, which decodes
+        /// 0x00000-0x03FFF to the separate 16 KB local SRAM -- indexing the DRAM array can never
+        /// reach it.  Everything else stays a raw physical DRAM index, bit-identical to before,
+        /// so the Mesa-initiated path (0x09547C, 0x0C9E00, 0x14D200 ... never 0xF-prefixed) is
+        /// untouched.
+        ///
+        /// This is why a rigid-disk boot failed while a whole ViewPoint install succeeded: Mesa
+        /// initiated every transaction until now and the CP's DOBs and buffers all live in shared
+        /// DRAM.  The boot ROM is the first agent to hand the RDC an address in its own memory --
+        /// its DOB at 0x03E8E and its boot buffer at 0x0A00.  We were reading 0x303E8E instead:
+        /// untouched DRAM, an ALL-ZERO DOB, which decodes as operation 0 / count 0 -> a phantom
+        /// one-sector restore at CHS[0,0,0].  Signature: w2=0000 in a DOB.
+        /// </summary>
+        private static bool IsIopLocal(int a) { return ((a >> 20) & 0xF) == 0xF; }
+        private byte RdMem(int a) { return IsIopLocal(a) ? _mem.ReadByte(a & 0xFFFFF) : Sys[a & Mask]; }
+        private void WrMem(int a, byte v) { if (IsIopLocal(a)) _mem.WriteByte(a & 0xFFFFF, v); else Sys[a & Mask] = v; }
+
+        private ushort RdWord(int phys) { return (ushort)((RdMem(phys) << 8) | RdMem(phys + 1)); }
+        private void WrWord(int phys, ushort v) { WrMem(phys, (byte)(v >> 8)); WrMem(phys + 1, (byte)v); }
         private static ushort Bswap(ushort v) { return (ushort)((v << 8) | (v >> 8)); }
 
         // AM2942 word-count decode: value = two's-complement-8 of N, shifted left 1, on bits 8-1.
@@ -524,7 +544,7 @@ namespace D.IOP
                     if (_dataDmaArmed)           // now _dataBuf is valid -> emit the read data page to mem
                     {
                         if (!_noDataDma)
-                            for (int i = 0; i < 512; i++) Sys[(_dataDmaAddr + i) & Mask] = _dataBuf[i];
+                            for (int i = 0; i < 512; i++) WrMem(_dataDmaAddr + i, _dataBuf[i]);
                         _dataDmaArmed = false;
                     }
                     // A streaming run is NOT complete yet -- FinishTransfer raises the single
@@ -579,7 +599,7 @@ namespace D.IOP
                 }
                 else if (_dmaDir == 1)          // mem->disk: capture data from memory NOW (write ops feed
                 {
-                    if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(_dmaAddr + i) & Mask];
+                    if (!_noDataDma) for (int i = 0; i < 512; i++) _dataBuf[i] = RdMem(_dmaAddr + i);
                 }
                 else                            // disk->mem (read): the firmware arms this StartDMA BEFORE
                 {                               // cc=2, so DON'T emit yet -- _dataBuf isn't filled until
@@ -962,12 +982,12 @@ namespace D.IOP
                 case 6:
                     err = ReadSector(c, h, sct, _xferOp == 2 /*verifyLabel*/);
                     if (!err && !_noDataDma)
-                        for (int i = 0; i < 512; i++) Sys[(addr + i) & Mask] = _dataBuf[i];
+                        for (int i = 0; i < 512; i++) WrMem(addr + i, _dataBuf[i]);
                     break;
                 case 3:
                 case 4:
                     if (!_noDataDma)
-                        for (int i = 0; i < 512; i++) _dataBuf[i] = Sys[(addr + i) & Mask];
+                        for (int i = 0; i < 512; i++) _dataBuf[i] = RdMem(addr + i);
                     // op 3 is vvw: the label verify applies to every sector of the run, not
                     // just the first.  The 4-argument overload skips it.
                     err = WriteSector(c, h, sct, _xferOp == 4 /*storeLabel*/, _xferOp == 3 /*verifyLabel*/);
