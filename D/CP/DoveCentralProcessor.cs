@@ -2211,22 +2211,22 @@ namespace D.CP
             // successor is (rawINIA XOR 0x00F).  How the modifier merges depends on the
             // dispatch type (mesa IB dispatch replaces bit-fields rather than OR-ing).
             niaModifier |= _xDispNow;      // same-word XDisp bits (opt-in, see XDispSameWord)
-            // ---- SUSPECT: the ^ 0x00F complement ----
-            // TechRef_2 2.3.3.1 gives a pure OR with no complement:
-            //     NIA[0-11] <- INIA[0-11] OR DispBr[0-3] OR Link[0-3]
-            // and cancellation falls out of it: "a condition bit is ignored when its
-            // corresponding position in INIA equals 1", which is what CANCELBR[$,0F] relies on
-            // -- INIA bits already set ABSORB the condition bits.  XOR-ing 0x00F CLEARS exactly
-            // the bits cancellation needs set, turning every "cancel these" into "base 0".
+            // ---- CONFIRMED CORRECT: the ^ 0x00F complement ----
+            // The TechRef control-store bit map names the field "pINIA.00-07" then
+            // "pINIA.08'-11'" -- the PRIMES mark the low four bits as stored complemented,
+            // which is exactly this XOR.  Independently confirmed by execution: C04 has raw
+            // INIA 180 and demonstrably branches to 18F (0x180 ^ 0x00F = 0x18F).
             //
-            // That is the MP 7700 wedge: 18F has raw INIA 00F, which under the manual is a
-            // fully-cancelled fixed target, and under this line becomes base 000 -- a 16-way
-            // dispatch into the trap vectors.  With mod=000 it lands on microstore 0 = ErrTrap,
-            // which then correctly dispatches the no-error case into UnexpectedErr's halt.
+            // Cancellation still works as 2.3.3.1 describes (a condition bit is ignored
+            // where INIA has a 1) -- it applies to the DE-complemented value.  An earlier
+            // note here called this XOR the suspect behind MP 7700; that was WRONG.
             //
-            // NOT changed yet: the complement may be compensating for how INIA is packed in the
-            // 48-bit word, or for a Link/DispBr polarity elsewhere, and removing it blind would
-            // move every branch target in the machine.  Verify against the bit-packing first.
+            // 18F is SMF (Set Map Flags), Misc.mc:273 -- "Xbus <- TT LRot12, XDisp" in c1,
+            // whose c2 successor carries DISP4[SMFb,1].  Its eight targets are 01/03/05/07/
+            // 09/0B/0D/0F: the ",1" forces INIA's low bit, so slot 0 is unreachable BY
+            // CONSTRUCTION -- same trick as DISP4[ErrTrap,3], whose only live slots are
+            // 3/7/B/F.  So no dispatch table can collide with the trap vectors, and our
+            // nia=000 means the base we used is not the one the microcode intends.
             // Also still wrong per Table 2.8, independent of this: dispatch widths differ (Br=1
             // bit into [11]; XwdDisp/XHDisp/XLDisp/PgCrOvDisp=2 into [10-11]; XDisp/YDisp/
             // XC2npcDisp/XWtOKDisp/LnDisp=4 into [8-11]; IBDisp=8 into [4-11]) and we OR 4 bits
@@ -2256,6 +2256,7 @@ namespace D.CP
                     + "  rawINIA=" + mi.INIA.ToString("X3") + " trueINIA=" + trueINIA.ToString("X3")
                     + "  mod=" + niaModifier.ToString("X3") + " modType=" + niaModType
                     + "  xBus=" + _xBus.ToString("X4") + " R2=" + _alu.R[2].ToString("X4")
+                    + "  bank=" + _execBank + " bankPend=" + _bankChangePending
                     + "  -> nia=" + nia.ToString("X3")
                     + (nia == 0 ? "   *** LANDS ON ErrTrap ***" : "")
                     + "  CPi=" + InstructionCount);
