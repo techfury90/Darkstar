@@ -80,6 +80,9 @@ namespace D.Doovke
             _refreshTimer.Tick += (s, e) => { PollMouse(); UpdateAndRender(); AutoSaveRigidDisk(); };
 
             Load += OnWindowLoad;
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_CURSOR_DUMP")))
+                _machine.Display.BorderLog = new System.Collections.Generic.List<string>();
+
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
                 _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
 
@@ -135,6 +138,14 @@ namespace D.Doovke
                     if (!string.IsNullOrEmpty(cs))
                         System.IO.File.AppendAllText(cs,
                             System.Environment.NewLine + _machine.Display.DescribeCursorState()
+                            + System.Environment.NewLine + _machine.Display.DescribeVerticalCs()
+                            + System.Environment.NewLine + "TopBorderLines=" + _machine.Display.TopBorderLines
+                            + System.Environment.NewLine
+                            + (_machine.Display.BorderLog == null ? "" :
+                               System.Environment.NewLine + "border/control write history:"
+                               + System.Environment.NewLine + "  "
+                               + string.Join(System.Environment.NewLine + "  ",
+                                             _machine.Display.BorderLog.ToArray()))
                             + System.Environment.NewLine);
                 }
                 catch { }

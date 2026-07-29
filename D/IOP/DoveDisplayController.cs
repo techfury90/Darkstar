@@ -96,6 +96,41 @@ namespace D.IOP
             if (OnCursorWrite != null && port >= CursorBufBase && port < CursorBufBase + 32)
                 OnCursorWrite(port, value);
 
+            // Border/control writes as they HAPPEN.  The close-time dump describes one instant, and
+            // the instant being judged on screen is usually a different one: at Set Time the border
+            // registers read 00/00, where phase cannot matter, while under ViewPoint they hold a
+            // real 22/88 stipple.  Without a history there is no way to tell which values were live
+            // when a screenshot was taken.
+            if (BorderLog != null && BorderLog.Count < 400 &&
+                (port == RegBorderLo || port == RegBorderHi || port == RegControl))
+            {
+                string name = port == RegBorderLo ? "borderLo"
+                            : port == RegBorderHi ? "borderHi" : "EC80";
+                BorderLog.Add(name + "=" + value.ToString("X2")
+                    + "   (lo=" + BorderLow.ToString("X2") + " hi=" + BorderHigh.ToString("X2")
+                    + " mix=" + MixFunction.ToString("X") + " nintl=" + (NonInterlace ? 1 : 0) + ")");
+            }
+
+            // BORDER PATTERN IS LATCHED BY WRITE ORDER, NOT BY ADDRESS.
+            //
+            // App A software difference #4 says the two chip generations take the border registers
+            // in opposite orders -- gate-array low,high,low,high and standard-cell high,low,high,low
+            // -- and gives the remedy as "swap the programmed values".  That only means anything if
+            // the chip latches the pair alternately as they arrive rather than by which address was
+            // written, so decoding by address makes one guest correct and the other swapped.
+            //
+            // Measured, both from the border/control write history:
+            //   boot ROM   borderLo=BB then borderHi=EE   (gate-array order)
+            //   ViewPoint  borderHi=88 then borderLo=22   (standard-cell order, repeatedly)
+            // The FIRST-written value is the top pair in both.  No single phase constant can
+            // satisfy both, which is why three successive phase theories -- vertical control-store
+            // geometry, interlace, and a fixed swap -- each fixed one screen and broke the other.
+            if (port == RegBorderLo || port == RegBorderHi)
+            {
+                if (_borderWriteToggle == 0) _borderTop = value; else _borderBottom = value;
+                _borderWriteToggle ^= 1;
+            }
+
             _reg[port - WindowBase] = value;
 
             if (_traceRegisters && IsInterestingRegister(port))
@@ -138,6 +173,69 @@ namespace D.IOP
         /// entirely a function of the mix: mix A is "C" (cursor bit -> lit) while mix 5 is "C'"
         /// (inverted).  Rather than guess which the ROM programs, read it.
         /// </summary>
+        /// <summary>
+        /// Run-length summary of the VERTICAL control store (E800-EBFF, one nibble per scan line:
+        /// b0 VSYNC, b1 VBLANK, b2 VPIC picture/border', b3 EOF).
+        ///
+        /// The border is NOT a fixed 32 lines -- TechRef 3.1.1 says the border size is "set by
+        /// microcode", and the DDC reference warns the counts are guest-dependent.  Observed: the
+        /// border phase that lines up under the boot ROM does not line up under ViewPoint, which is
+        /// exactly that warning coming true.  So read the geometry rather than assume it.
+        /// </summary>
+        /// <summary>Set to a list to record border/control-register writes as they happen.</summary>
+        public System.Collections.Generic.List<string> BorderLog;
+
+        public string DescribeVerticalCs()
+        {
+            var sb = new System.Text.StringBuilder("vertical CS runs (line: code xN): ");
+            int n = 0, runStart = 0, prev = -1, emitted = 0;
+            for (int line = 0; line <= 1024; line++)
+            {
+                int code = line < 1024 ? (_reg[VertCsBase - WindowBase + line] & 0x0F) : -2;
+                if (code != prev)
+                {
+                    if (prev >= 0 && emitted < 24)
+                    {
+                        sb.Append(runStart + ":" + prev.ToString("X") + " x" + (line - runStart) + "  ");
+                        emitted++;
+                    }
+                    runStart = line; prev = code;
+                }
+                if (code >= 0) n++;
+            }
+            sb.Append("| nonzero entries=" + NonZeroVertCs());
+            return sb.ToString();
+        }
+
+        private int NonZeroVertCs()
+        {
+            int n = 0;
+            for (int i = 0; i < 1024; i++) if (_reg[VertCsBase - WindowBase + i] != 0) n++;
+            return n;
+        }
+
+        /// <summary>
+        /// Top border height in lines, taken from the vertical control store when the guest has
+        /// programmed one: the leading run of visible, non-picture lines (VBLANK=0, VPIC=0).
+        /// Falls back to the nominal 32 when the CS is empty (nothing has programmed it yet).
+        /// </summary>
+        public int TopBorderLines
+        {
+            get
+            {
+                if (NonZeroVertCs() == 0) return BorderPixels;
+                int lines = 0;
+                for (int i = 0; i < 1024; i++)
+                {
+                    int code = _reg[VertCsBase - WindowBase + i] & 0x0F;
+                    if ((code & 0x02) != 0) continue;        // blanked -- not visible
+                    if ((code & 0x04) != 0) break;           // first picture line
+                    lines++;
+                }
+                return lines > 0 && lines < 256 ? lines : BorderPixels;
+            }
+        }
+
         public string DescribeCursorState()
         {
             return "EC80=" + ControlRegister.ToString("X2")
@@ -158,6 +256,13 @@ namespace D.IOP
         public int QuadwordsPerLine { get { return _reg[RegQuadwords - WindowBase] & 0x3F; } }
         public int BorderLow { get { return _reg[RegBorderLo - WindowBase]; } }
         public int BorderHigh { get { return _reg[RegBorderHi - WindowBase]; } }
+
+        /// <summary>Border pattern for the first line-pair, i.e. the first of the pair written.</summary>
+        public int BorderTop { get { return _borderTop; } }
+        /// <summary>Border pattern for the second line-pair.</summary>
+        public int BorderBottom { get { return _borderBottom; } }
+        private byte _borderTop, _borderBottom;
+        private int _borderWriteToggle;
 
         /// <summary>Cursor word position (X, in 16-px words).</summary>
         public int CursorWord { get { return _reg[RegCursorXHi - WindowBase]; } }
@@ -272,20 +377,19 @@ namespace D.IOP
             // a rebuild.  Calibrating against a screenshot costs one restart; deriving it from
             // blanking widths costs an afternoon and is what the DDC reference warns against for
             // the cursor offsets.
+            // The boot ROM and ViewPoint want vertical phases exactly two apart, and it is NOT
+            // interlace -- both run interlaced (operator).  The remaining candidate is the top
+            // border LINE COUNT, which TechRef 3.1.1 says is "set by microcode" and which the DDC
+            // reference warns is guest-dependent: if the two program different counts, our
+            // frame-relative pair alignment shifts with them.  DescribeVerticalCs / TopBorderLines
+            // are instrumented to settle it; until then this stays a knob rather than a guess.
             int vph = EnvInt("DOVE_BORDER_VPHASE", 0);
             int hph = EnvInt("DOVE_BORDER_HPHASE", 0);
             for (int y = 0; y < height; y++)
             {
-                // LOW pattern on the top pair, not high.  App A 4.0.4 says "high at the top",
-                // but that describes the GATE-ARRAY part: software difference #4 is that the two
-                // chips take the border registers in opposite order -- gate-array low,high,low,high
-                // and standard-cell high,low,high,low -- with the memo's own remedy being "swap the
-                // programmed values".  We model the CMOS part (_typeSize = 0x00), so the pair lands
-                // exchanged.  Confirmed against the running machine: with high-on-top there was a
-                // visible seam on all four sides where the border met the desktop stipple, and
-                // swapping removed it.
-                bool lowPair = ((((y + vph) >> 1) & 1) == 0);    // lines 0,1 low; 2,3 high; ...
-                int pat = lowPair ? BorderLow : BorderHigh;
+                // First-written pattern on the top pair (see WriteByte).
+                bool firstPair = ((((y + vph) >> 1) & 1) == 0);
+                int pat = firstPair ? BorderTop : BorderBottom;
                 bool pictureRow = y >= BorderPixels && y < BorderPixels + picH;
                 int row = y * width;
                 if (pictureRow)
