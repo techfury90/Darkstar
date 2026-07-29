@@ -40,7 +40,7 @@ namespace D.CP
         // tight poll (waiting on a device or a cell that never changes), while a long non-repeating
         // trace is real work that merely produced no disk traffic.  Cheap enough to leave on.
         private readonly int[] _uRing = new int[256];
-        private int _uRingN;
+        private long _uRingN;   // long: an int wrapped negative after 41e9 instructions and broke the dump
 
         /// <summary>
         /// A human-readable snapshot of CP state, for DOVE_CP_STATE.  Includes the Mesa-level
@@ -69,6 +69,10 @@ namespace D.CP
             sb.AppendLine("  L (frame)    = 0x" + L.ToString("X5") + "   GF = 0x" + GF.ToString("X5"));
             sb.AppendLine("  globalLink   = " + (gl < 0 ? "??" : "0x" + gl.ToString("X4")) + "   GFI = " + gfi);
             sb.AppendLine("  MAR=0x" + _mar.ToString("X5") + "  MAPA=" + _mapA.ToString("X"));
+            sb.AppendLine("  trapCode=" + _trapCode + "  ibPtr=" + (int)_ibPtr + " (" + _ibPtr + ")"
+                          + "  ibEmptyPending=" + _ibEmptyPending
+                          + "  IbEmptyTraps=" + IbEmptyTraps
+                          + "  InitTraps=" + InitTrapCount + "  stackTraps=" + _stkTraps);
             sb.Append("  R  =");
             for (int i = 0; i < 16; i++) sb.Append(" " + _alu.R[i].ToString("X4"));
             sb.AppendLine();
@@ -79,13 +83,31 @@ namespace D.CP
             // The spin itself.
             var seen = new System.Collections.Generic.List<int>();
             var order = new System.Collections.Generic.List<int>();
-            int n = _uRingN < 256 ? _uRingN : 256;
+            int n = _uRingN < 256 ? (int)_uRingN : 256;
             for (int i = 0; i < n; i++)
             {
-                int a = _uRing[(_uRingN - n + i) & 0xFF];
+                int a = _uRing[(int)((_uRingN - n + i) & 0xFF)];
                 order.Add(a);
                 if (!seen.Contains(a)) seen.Add(a);
             }
+            // Disassemble the microwords on the path into address 0.  The predecessor is the
+            // whole question when trapCode is 0: nothing raised an error, so something
+            // BRANCHED to ErrTrap, and this names the instruction that did it.
+            sb.AppendLine("  path microwords:");
+            foreach (int ua in new int[] { 0x18F, 0xC04, 0xBDA, 0x5F8, 0x268, 0xD7C, 0x500, 0x003, 0x000 })
+            {
+                string d;
+                try { d = "word=" + _cs.GetWord(_execBank, ua).ToString("X12") + "  " + Fetch(_execBank, ua).Disassemble(-1); }
+                catch (Exception e) { d = "<" + e.GetType().Name + ">"; }
+                sb.AppendLine("    " + ua.ToString("X3") + ": " + d);
+            }
+            if (ErrTrapLog != null && ErrTrapLog.Count > 0)
+            {
+                sb.AppendLine("  ErrTrap entries (" + ErrTrapLog.Count + "):");
+                int from = ErrTrapLog.Count > 12 ? ErrTrapLog.Count - 12 : 0;
+                for (int i = from; i < ErrTrapLog.Count; i++) sb.AppendLine("    " + ErrTrapLog[i]);
+            }
+            else sb.AppendLine("  ErrTrap entries: NONE (never entered microstore 0)");
             sb.AppendLine("  last " + n + " microstore addresses: " + seen.Count + " distinct");
             sb.Append("    distinct:");
             foreach (int a in seen) sb.Append(" " + a.ToString("X3"));
@@ -179,6 +201,27 @@ namespace D.CP
         public ushort[] URegs { get { return _u; } }
         public ushort[] USnapshot;      // U registers captured for the harness U-register diff
         private int _trapCode;          // <-IntStat X[8-9]: 1=InitTrap, 2=stack, 3=IB-empty
+        // Raised by an ib read on an empty buffer, vectored at the end of the click (see the
+        // IB-Empty trap block in the NIA computation).  Env-gated so the old behaviour --
+        // detect and log, never trap -- is one variable away if this regresses something.
+        private bool _ibEmptyPending;
+        public long IbEmptyTraps;
+        public System.Collections.Generic.List<string> ErrTrapLog =
+            new System.Collections.Generic.List<string>();
+        private int _ibEmptyEnabled = -1;
+        private bool IbEmptyTrapEnabled
+        {
+            get
+            {
+                if (_ibEmptyEnabled < 0)
+                    _ibEmptyEnabled = (Environment.GetEnvironmentVariable("DOVE_NO_IBEMPTY_TRAP") == null) ? 1 : 0;
+                return _ibEmptyEnabled == 1;
+            }
+        }
+        private void NoteIbEmptyRead()
+        {
+            if (_ibPtr == IBState.Empty && IbEmptyTrapEnabled) _ibEmptyPending = true;
+        }
         // Map-array base: MAPA<- sets it (from the X bus).  MAPA<-4 => real word 0x40000
         // (CPKernel.mapOffset) is the only value the boot path uses.
         private int _mapA = 4;
@@ -684,7 +727,7 @@ namespace D.CP
         private void Step()
         {
             int addr = _tpc[_task];
-            _uRing[_uRingN++ & 0xFF] = addr;   // last 256 microstore addresses -- characterises a spin
+            _uRing[(int)(_uRingN++ & 0xFF)] = addr;   // last 256 microstore addresses -- characterises a spin
             if (AddrHist != null && InstructionCount >= HistFrom) AddrHist[addr & 0xFFF]++;
             Microinstruction mi = Fetch(_execBank, addr);
 
@@ -796,7 +839,19 @@ namespace D.CP
                                 // reasons sit at X[13]=MesaIntRq=0x0004, X[14]=IOP=0x0002,
                                 // X[15]=timer=0x0001.  (The 8254 status ".2" is NOT the X-bus value.)
                                 // X[8-9]=trap code.  Reading acks the timer edge (read-to-clear).
-                        _xBus = (ushort)(((_trapCode & 3) << 6) | (_mInt ? 0x2 : 0) | (_timerInt ? 0x1 : 0));
+                        // fZ 9 = ErrnIBInt.  Proven from Daybreak.dfn:488 -- RegDef[ULsave, U, 3A]
+                        // encodes "rA = L = 3, fZ = ErrnIBnStkp = A" in the U-register address (low
+                        // nibble = fZ), and ErrnIBInt is the one-off assembler built-in for the fZ 9
+                        // slot (it appears exactly once in the whole microcode, at Refill.mc:196).
+                        //
+                        // fZ 9 and fZ A share u45's FIRST enable half, so X[8-9] (trap, true) and
+                        // X[10-11] (~ibPtr) are IDENTICAL between them; they diverge only below, in
+                        // ~stackP (A) vs IntStat (9).  We were omitting ~ibPtr here, which is what
+                        // made ErrTrap's dispatch nibble -- {Trap0,Trap1,~ibPtr0,~ibPtr1} after the
+                        // LRot12 -- read as pure zero rather than (EKErr << 2) | ~ibPtr.
+                        _xBus = (ushort)(((_trapCode & 3) << 6)
+                                       | (((~(int)_ibPtr) & 0x3) << 4)
+                                       | (_mInt ? 0x2 : 0) | (_timerInt ? 0x1 : 0));
                         IntStatReads++;
                         // TIMER-DRIVEN-SPIN PROBE: log <-IntStat reads in the spin window with the CPi delta
                         // since the last read, and whether the timer bit was set.  If the germ reads IntStat
@@ -855,26 +910,56 @@ namespace D.CP
                         _xBus = _rh[mi.rB];
                         break;
                     case 0xC:   // <-ibNA (front, no advance)
+                        NoteIbEmptyRead();
                         _xBus = _ibFront;
                         break;
                     case 0xD:   // <-ib (front, then advance: refill ibFront from IB and decrement ibPtr)
                         if (IbLog != null && InstructionCount >= IbLogFrom && InstructionCount < IbLogTo)
                             IbLog.Add("@" + addr.ToString("X3") + " CPi=" + InstructionCount + " <-ib reads front=" + _ibFront.ToString("X2") + " ptr=" + _ibPtr + " (next front<-_ib[" + (((int)_ibPtr) & 0x1) + "]=" + _ib[((int)_ibPtr) & 0x1].ToString("X2") + ") ib=[" + _ib[0].ToString("X2") + "," + _ib[1].ToString("X2") + "]" + (_ibPtr == IBState.Empty ? "  <<< READ FROM EMPTY (DLion would trap/refill)" : ""));
+                        NoteIbEmptyRead();
                         _xBus = _ibFront;
                         _ibFront = _ib[((int)_ibPtr) & 0x1];
                         _ibPtr = _nextIBPtr[(int)_ibPtr];
                         _ibFrontWord = _ibWord;   // MEASUREMENT: front now comes from the _ib pair's word
                         break;
                     case 0xE:   // <-ibLow
+                        NoteIbEmptyRead();
                         _xBus = (ushort)(_ibFront & 0xf);
                         break;
                     case 0xF:   // <-ibHigh
+                        NoteIbEmptyRead();
                         _xBus = (ushort)((_ibFront >> 4) & 0xf);
                         break;
                     default:    // 6/8 = ExtStat/DebB (Burdock debug byte pipe): 0
                         _xBus = 0;
                         Note("IOXIn:" + mi.fZ.ToString("X"));
                         break;
+                }
+
+                // ErrTrap forensics.  Refill.mc:196 is  "rInt <- ErrnIBInt, ClrIntErr, ... c1, at[0]"
+                // and c2 dispatches DISP4 on rInt LRot12.  Slot 3 = UnexpectedErr = a terminal
+                // GOTO-self, and slot 3 is what you get when the dispatch nibble reads 0 -- i.e.
+                // when NO EKErr is set.  So the one number that matters is the value this read
+                // actually latches into rInt.  Record it, with the fZ code that produced it:
+                // ErrnIBInt is a THIRD mnemonic (only Refill.mc:196 uses it; everything else reads
+                // ErrnIBnStkp), and only the ErrnIBnStkp encoding -- trap at bits 6-7, ~ibPtr at
+                // 4-5 -- yields the documented slots 7/0B/0F for EKErr 1/2/3.  If ErrTrap assembles
+                // to a different fZ we serve as something else (or as the default 0), every trap
+                // funnels to slot 3 regardless of the code, which is exactly the observed wedge.
+                if (addr == 0 && ErrTrapLog != null && ErrTrapLog.Count < 200)
+                {
+                    // The 24 microwords that led here.  trapCode=0 with no trap counted means
+                    // we did not TAKE a trap -- something branched to address 0 -- so the
+                    // predecessor is the whole question.  The ring excludes this instruction.
+                    var pre = new System.Text.StringBuilder("    came from:");
+                    for (int k = 24; k >= 1; k--)
+                        pre.Append(" " + _uRing[(int)((_uRingN - 1 - k) & 0xFF)].ToString("X3"));
+                    ErrTrapLog.Add(pre.ToString());
+                    ErrTrapLog.Add("ErrTrap@0 c" + _cycle + " fZ=" + mi.fZ.ToString("X")
+                        + " -> xBus=" + _xBus.ToString("X4")
+                        + "  nibble(bits4-7)=" + ((_xBus >> 4) & 0xF).ToString("X")
+                        + "  trapCode=" + _trapCode + " ibPtr=" + (int)_ibPtr
+                        + " stackP=" + _stackP + " CPi=" + InstructionCount);
                 }
             }
 
@@ -2087,6 +2172,36 @@ namespace D.CP
                     break;
             }
             _tpc[_task] = nia;
+
+            // ---- IB-Empty trap (EKErr 3) ----
+            // Refill.mc:  "Control comes to IBEmpty Trap if an <-ib, <-ibNA, <-ibLow, or <-ibHigh
+            // were executed on an empty buffer (left empty by the NERefill code when the PC is on
+            // the last word of a page) ... the trap always occurs in the click AFTER the one which
+            // error'd."  So the flag is raised by the read and vectored here, at the end of the
+            // click, sending the next click to microstore 0 (ErrTrap).
+            //
+            // ErrTrap dispatches on rInt LRot12, i.e. ErrnIBInt bits 4-7 = (EKErr << 2) | ~ibPtr:
+            //   1 Boot -> slot 7 XferIndirect   2 Stack -> slot 0B StackErr   3 IBEmpty -> slot 0F
+            // and slot 3 -- reached when NO code is set -- is UnexpectedErr, an unconditional
+            // GOTO[UnexpectedErr] self-loop with T <- sHardwareError.  That is exactly where this
+            // emulator wedged at MP 7700: it detected the empty-buffer read (there was even a log
+            // line saying "DLion would trap/refill") but never set EKErr, so the microcode's own
+            // ErrTrap dispatched the no-code case and span forever at microstore 0x003.
+            //
+            // This is the instruction-stream page-crossing mechanism -- IBEmpty restores PC/pc16/
+            // TOS/stackP from SaveState and faults in the new PC page -- which is why full Pilot
+            // with demand paging is the first thing to need it.
+            if (_ibEmptyPending && _cycle == 3)      // end of the erroring click; trap on the next one
+            {
+                _ibEmptyPending = false;
+                if (_trapCode == 0)         // "smaller values of EKErr have priority over the larger"
+                {
+                    _trapCode = 3;
+                    _tpc[_task] = 0;
+                    _cycle = 0;             // ++ below makes the trap click start at c1
+                    IbEmptyTraps++;
+                }
+            }
 
             if (mi.LinkAddress != -1)
             {
