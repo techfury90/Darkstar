@@ -2210,7 +2210,28 @@ namespace D.CP
             // The WCS stores INIA's low nibble COMPLEMENTED (TechRef Fig 2.6); the true
             // successor is (rawINIA XOR 0x00F).  How the modifier merges depends on the
             // dispatch type (mesa IB dispatch replaces bit-fields rather than OR-ing).
-            niaModifier |= _xDispNow;      // same-word XDisp bits
+            niaModifier |= _xDispNow;      // same-word XDisp bits (opt-in, see XDispSameWord)
+            // ---- SUSPECT: the ^ 0x00F complement ----
+            // TechRef_2 2.3.3.1 gives a pure OR with no complement:
+            //     NIA[0-11] <- INIA[0-11] OR DispBr[0-3] OR Link[0-3]
+            // and cancellation falls out of it: "a condition bit is ignored when its
+            // corresponding position in INIA equals 1", which is what CANCELBR[$,0F] relies on
+            // -- INIA bits already set ABSORB the condition bits.  XOR-ing 0x00F CLEARS exactly
+            // the bits cancellation needs set, turning every "cancel these" into "base 0".
+            //
+            // That is the MP 7700 wedge: 18F has raw INIA 00F, which under the manual is a
+            // fully-cancelled fixed target, and under this line becomes base 000 -- a 16-way
+            // dispatch into the trap vectors.  With mod=000 it lands on microstore 0 = ErrTrap,
+            // which then correctly dispatches the no-error case into UnexpectedErr's halt.
+            //
+            // NOT changed yet: the complement may be compensating for how INIA is packed in the
+            // 48-bit word, or for a Link/DispBr polarity elsewhere, and removing it blind would
+            // move every branch target in the machine.  Verify against the bit-packing first.
+            // Also still wrong per Table 2.8, independent of this: dispatch widths differ (Br=1
+            // bit into [11]; XwdDisp/XHDisp/XLDisp/PgCrOvDisp=2 into [10-11]; XDisp/YDisp/
+            // XC2npcDisp/XWtOKDisp/LnDisp=4 into [8-11]; IBDisp=8 into [4-11]) and we OR 4 bits
+            // for everything; IBDisp SETS NIA[4-7] rather than ORing; and Link is a THIRD
+            // contributor to the same OR.
             int trueINIA = mi.INIA ^ 0x00F;
             int nia;
             switch (niaModType)
