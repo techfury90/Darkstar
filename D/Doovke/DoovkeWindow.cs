@@ -85,6 +85,8 @@ namespace D.Doovke
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_CP_STATE")))
                 _machine.Io.GateLog = new System.Collections.Generic.List<string>();
+                _machine.Io.ConfigEeprom.ReadLog = new System.Collections.Generic.List<int>();
+                _machine.Io.ConfigEeprom.WriteLog = new System.Collections.Generic.List<int>();
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
                 _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
@@ -177,6 +179,28 @@ namespace D.Doovke
                                 + System.Environment.NewLine;
                         }
 
+                        // What did the 93C46 actually return, and did bit 11 ever rise?
+                        //
+                        // The firmware's %ReadEEProm sets carry on failure, and InitCPSpecific then
+                        // defaults csBankConfiguration to fourKEEPromFormat -- ONE bank -- after
+                        // which CheckBlock discards every CP block destined for a bank it believes
+                        // absent.  So a failed EEPROM READ is enough to leave the WCS empty, which is
+                        // why overriding the EEPROM's own bank nibble changed nothing.
+                        //
+                        // Bit 11 carries read DATA during a read and READY/BUSY otherwise (same 0x0800
+                        // mask), so a histogram of it across ALL reads is the thing to look at.  The
+                        // earlier gate log printed only the first and last eight of 300 samples, which
+                        // could not show whether it varied in between.
+                        var rl = _machine.Io.ConfigEeprom.ReadLog;
+                        cpState += System.Environment.NewLine + "93C46 completed READs: "
+                                 + (rl == null ? "(not logging)" : rl.Count.ToString())
+                                 + System.Environment.NewLine;
+                        if (rl != null)
+                            for (int i = 0; i < rl.Count && i < 16; i++)
+                                cpState += "  addr " + ((rl[i] >> 16) & 0x3F).ToString("X2")
+                                         + " -> " + (rl[i] & 0xFFFF).ToString("X4")
+                                         + System.Environment.NewLine;
+
                         var g = _machine.Io.GateLog;
                         if (g != null && g.Count > 0)
                         {
@@ -189,6 +213,7 @@ namespace D.Doovke
                             cpState += string.Join(System.Environment.NewLine + "  ", pick.ToArray())
                                 + System.Environment.NewLine
                                 + "  total input-port reads = " + _machine.Io.InputPortReads
+                                + ", of which bit 11 high = " + _machine.Io.InputPortB11High
                                 + System.Environment.NewLine;
                         }
                         System.IO.File.WriteAllText(cp, cpState);

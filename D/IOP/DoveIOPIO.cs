@@ -715,11 +715,13 @@ namespace D.IOP
                         // empty with the block loop spinning (MP 0199), it is because the loader
                         // decided not to stream -- WriteLane stores unconditionally, so zero
                         // occupancy means zero writes -- and these reads are what it decided on.
+                        InputPortReads++;
+                        if (((v >> 11) & 1) != 0) InputPortB11High++;
                         if (GateLog != null && GateLog.Count < 300)
                             GateLog.Add("in80=" + v.ToString("X4")
                                 + " b6=" + ((v >> 6) & 1)
                                 + " b11(eeprom)=" + ((v >> 11) & 1)
-                                + "  reads=" + (++InputPortReads));
+                                + "  reads=" + InputPortReads);
                         return v;
                     }
                 case MesaIntrLatch:
@@ -787,6 +789,8 @@ namespace D.IOP
         /// <summary>Set to a list to record input-port (0x80) reads -- the microcode-load gates.</summary>
         public List<string> GateLog;
         public long InputPortReads;
+        /// <summary>How many input-port reads saw bit 11 (EEPROM DO / READY) high.</summary>
+        public long InputPortB11High;
 
         public ushort ControlReg { get { return _controlReg; } }
         public ushort ResetReg { get { return _resetReg; } }

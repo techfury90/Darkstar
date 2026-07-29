@@ -54,13 +54,31 @@ namespace D.IOP
         }
 
         /// <summary>Load a 128-byte (64-word, little-endian) image (e.g. a U128 dump).</summary>
+        /// <summary>
+        /// Load a 128-byte 93C46 dump as 64 words, BIG-ENDIAN: the even byte is the word's HIGH
+        /// half and the odd byte its LOW half.
+        ///
+        /// This was assembled the other way round, which byte-swapped every word the guest read.
+        /// It went unnoticed because the Pilot 14 boot path never reads the config, but it is fatal
+        /// to the Pilot 12 path: InitCPSpecific does %ReadEEProm(eePromMemSize) then AND AL, 0F0H --
+        /// the LOW byte's high nibble -- so for byte 25 = 0x22 the correct word 0x0C22 yields
+        /// csBankConfiguration 0x20, while the swapped 0x220C yields 0x00.  Zero makes CheckBlock
+        /// discard every CP microcode block, so the writable control store stays empty, no CP Start
+        /// block is ever acted on, RamBoot.ProcessCPBlock never drains the boot buffer, and
+        /// RAMFlpBt's WaitForBuffer spins on bootDataEnd != bootDataStart forever.  One byte order,
+        /// four symptoms.
+        ///
+        /// Big-endian is independently confirmed by the config checksum: read this way the trailing
+        /// pair at words 62/63 are exact one's complements (0x5C25 + 0xA3DA = 0xFFFF) across all
+        /// eight museum dumps, which does not hold under the swapped reading.
+        /// </summary>
         public void Load(byte[] image)
         {
             for (int i = 0; i < 64; i++)
             {
-                int lo = (i * 2) < image.Length ? image[i * 2] : 0xFF;
-                int hi = (i * 2 + 1) < image.Length ? image[i * 2 + 1] : 0xFF;
-                _mem[i] = (ushort)(lo | (hi << 8));
+                int hi = (i * 2) < image.Length ? image[i * 2] : 0xFF;
+                int lo = (i * 2 + 1) < image.Length ? image[i * 2 + 1] : 0xFF;
+                _mem[i] = (ushort)((hi << 8) | lo);
             }
         }
 
