@@ -131,6 +131,15 @@ namespace D.Doovke
                 catch { }
                 try
                 {
+                    string cs = Environment.GetEnvironmentVariable("DOVE_CURSOR_DUMP");
+                    if (!string.IsNullOrEmpty(cs))
+                        System.IO.File.AppendAllText(cs,
+                            System.Environment.NewLine + _machine.Display.DescribeCursorState()
+                            + System.Environment.NewLine);
+                }
+                catch { }
+                try
+                {
                     string cp = Environment.GetEnvironmentVariable("DOVE_CP_STATE");
                     if (!string.IsNullOrEmpty(cp))
                     {

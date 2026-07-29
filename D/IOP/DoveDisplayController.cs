@@ -132,6 +132,25 @@ namespace D.IOP
         /// <summary>Raw display control register (EC80), so callers can watch it change.</summary>
         public byte ControlRegister { get { return _reg[RegControl - WindowBase]; } }
 
+        /// <summary>
+        /// One-line summary of the state that decides how the cursor is drawn.  The MP sprite
+        /// currently renders white-on-black where the panel should be black-on-white, and that is
+        /// entirely a function of the mix: mix A is "C" (cursor bit -> lit) while mix 5 is "C'"
+        /// (inverted).  Rather than guess which the ROM programs, read it.
+        /// </summary>
+        public string DescribeCursorState()
+        {
+            return "EC80=" + ControlRegister.ToString("X2")
+                 + " mix=" + MixFunction.ToString("X")
+                 + " video=" + (VideoEnabled ? 1 : 0)
+                 + " ncursor=" + (CursorDisabled ? 1 : 0)
+                 + " rasterX=" + (CursorWord * 16 + CursorBitOffset)
+                 + " rasterY=" + CursorLine
+                 + " -> visible " + CursorVisibleX + "," + CursorVisibleY
+                 + "  border=" + BorderLow.ToString("X2") + "/" + BorderHigh.ToString("X2")
+                 + "  qw=" + QuadwordsPerLine;
+        }
+
         public bool VideoEnabled { get { return (_reg[RegControl - WindowBase] & 0x02) != 0; } }
         public bool NonInterlace { get { return (_reg[RegControl - WindowBase] & 0x01) != 0; } }
         public bool ForcePicture { get { return (_reg[RegControl - WindowBase] & 0x08) != 0; } }
@@ -186,33 +205,112 @@ namespace D.IOP
 
         // ---- Scan-out ----
 
+        private static int EnvInt(string name, int dflt)
+        {
+            string e = Environment.GetEnvironmentVariable(name);
+            int v;
+            return (!string.IsNullOrEmpty(e) && int.TryParse(e, out v)) ? v : dflt;
+        }
+
+        /// <summary>Border is 32 lines top and bottom, 32 bits each side (TechRef 3.1.1 / 3.4).</summary>
+        public const int BorderPixels = 32;
+
         /// <summary>
-        /// Render one mono field from the bitmap in memory plus the hardware cursor
-        /// sprite, into <see cref="Frame"/>.  Picture area only (no border frame).
+        /// Picture-area size, i.e. the bitmap proper, excluding the border frame.
+        /// 15" = 13 quadwords x 633 lines = 832x633; 19" = 18 quadwords x 861 = 1152x861.
+        ///
+        /// NB the TechRef says "17 quadwords" for the 19" and that is a documentation error --
+        /// DsplHdlr.asm has numberQuadWords 13/18, and 18 x 64 = 1152 while 17 x 64 = 1088.
+        /// </summary>
+        public int PictureWidth { get; private set; }
+        public int PictureHeight { get; private set; }
+
+        /// <summary>
+        /// Render one mono field: the border frame, the bitmap, and the hardware cursor sprite,
+        /// into <see cref="Frame"/>.
+        ///
+        /// The frame is the VISIBLE area = picture + 32 pixels of border on every side, so
+        /// 15" = 896x697 and 19" = 1216x925.  (The 15" figures are given outright in TechRef
+        /// 3.1.1 -- 832+64 = 896, 633+64 = 697 -- which is what pins the border arithmetic.)
+        /// Rendering the picture alone, as this did before, is why the cursor could never be
+        /// placed correctly: the cursor registers are in raster coordinates that count the border.
         /// </summary>
         public void RenderMono()
         {
             int quadwords = QuadwordsPerLine;
             if (quadwords <= 0) quadwords = 13;         // default 15"
             int wordsPerLine = quadwords * 4;
-            int width = wordsPerLine * 16;
-            // Line count follows the monitor: 19" large-format bitmap is 861 lines
-            // (17-18 quadwords/line), 15" is 633 (13 quadwords).  Per the Daybreak
-            // DDC reference: 15" = 13 qw x 633, 19" = 17 qw x 861.
-            int height = _displayLines > 0 ? _displayLines
-                       : (quadwords >= 16 ? 861 : 633);
+            int picW = wordsPerLine * 16;
+            int picH = _displayLines > 0 ? _displayLines
+                     : (quadwords >= 16 ? 861 : 633);
 
+            PictureWidth = picW;
+            PictureHeight = picH;
+
+            int width = picW + 2 * BorderPixels;
+            int height = picH + 2 * BorderPixels;
             Width = width;
             Height = height;
             if (_frame == null || _frame.Length != width * height) _frame = new byte[width * height];
 
+            // ---- border ----
+            // EC81 = pattern low, EC82 = pattern high, and the screen alternates TWO lines of
+            // low with TWO of high, HIGH AT THE TOP (App A 4.0.4).  The 8-bit pattern repeats
+            // horizontally, MSB leftmost.
+            //
+            // PHASE.  The guest programs the border to continue whatever stipple the picture is
+            // using, so a phase error of one pixel or one line shows as a seam on all four sides
+            // rather than as a wrong pattern.  Three things can each be off by one and the
+            // documentation pins none of them outright:
+            //   * which line of the 4-line cycle the visible area starts on (and hence whether the
+            //     top pair is high or low -- App A says "high at the top" of the SCREEN, but our
+            //     frame origin is the top border, not the top of the raster);
+            //   * the horizontal bit phase, which depends on where the visible left edge falls in
+            //     the raster (the pattern free-runs across blanking);
+            //   * interlace, where the two fields are offset by a half line.
+            // DOVE_BORDER_VPHASE (0-3 lines) and DOVE_BORDER_HPHASE (0-7 pixels) tune them without
+            // a rebuild.  Calibrating against a screenshot costs one restart; deriving it from
+            // blanking widths costs an afternoon and is what the DDC reference warns against for
+            // the cursor offsets.
+            int vph = EnvInt("DOVE_BORDER_VPHASE", 0);
+            int hph = EnvInt("DOVE_BORDER_HPHASE", 0);
+            for (int y = 0; y < height; y++)
+            {
+                // LOW pattern on the top pair, not high.  App A 4.0.4 says "high at the top",
+                // but that describes the GATE-ARRAY part: software difference #4 is that the two
+                // chips take the border registers in opposite order -- gate-array low,high,low,high
+                // and standard-cell high,low,high,low -- with the memo's own remedy being "swap the
+                // programmed values".  We model the CMOS part (_typeSize = 0x00), so the pair lands
+                // exchanged.  Confirmed against the running machine: with high-on-top there was a
+                // visible seam on all four sides where the border met the desktop stipple, and
+                // swapping removed it.
+                bool lowPair = ((((y + vph) >> 1) & 1) == 0);    // lines 0,1 low; 2,3 high; ...
+                int pat = lowPair ? BorderLow : BorderHigh;
+                bool pictureRow = y >= BorderPixels && y < BorderPixels + picH;
+                int row = y * width;
+                if (pictureRow)
+                {
+                    // side borders only
+                    for (int x = 0; x < BorderPixels; x++)
+                        _frame[row + x] = (byte)((pat >> (7 - ((x + hph) & 7))) & 1);
+                    for (int x = width - BorderPixels; x < width; x++)
+                        _frame[row + x] = (byte)((pat >> (7 - ((x + hph) & 7))) & 1);
+                }
+                else
+                {
+                    for (int x = 0; x < width; x++)
+                        _frame[row + x] = (byte)((pat >> (7 - ((x + hph) & 7))) & 1);
+                }
+            }
+
+            // ---- picture ----
             int originByte = BitmapStartWord * 2;
             int lineBytes = wordsPerLine * 2;
 
-            for (int y = 0; y < height; y++)
+            for (int y = 0; y < picH; y++)
             {
                 int rowBase = originByte + y * lineBytes;
-                int px = y * width;
+                int px = (y + BorderPixels) * width + BorderPixels;
                 for (int w = 0; w < wordsPerLine; w++)
                 {
                     int word = DisplayReader != null ? DisplayReader(rowBase + w * 2)
@@ -241,12 +339,64 @@ namespace D.IOP
             return b;
         }
 
+        /// <summary>
+        /// Cursor raster-to-visible offsets.  These are NAMED FIRMWARE CONSTANTS from
+        /// DsplHdlr.asm -- xCoordOffset 208/304 (15"/19"), yCoordOffset 32 (both) -- and the
+        /// DDC reference is explicit that they must not be derived from the frame geometry.
+        ///
+        /// The IOP adds them to the Mesa picture-space coordinate before writing EC83-EC86, so
+        /// scanning them back out gives a raster coordinate.  Y counts from the top of the
+        /// VISIBLE area (i.e. from the top border), which is why yCoordOffset happens to equal
+        /// the 32-line border and cancels here; X does not cancel.
+        ///
+        /// DOVE_CURSOR_XOFF / DOVE_CURSOR_YOFF override them, because the exact reference edge
+        /// for X is the one thing the documentation does not state outright and it is far
+        /// cheaper to calibrate against a screenshot than to reason about blanking widths.
+        /// </summary>
+        private int CursorXOffset
+        {
+            get
+            {
+                string e = Environment.GetEnvironmentVariable("DOVE_CURSOR_XOFF");
+                int v;
+                if (!string.IsNullOrEmpty(e) && int.TryParse(e, out v)) return v;
+                return QuadwordsPerLine >= 16 ? 304 : 208;      // 19" : 15"
+            }
+        }
+        private int CursorYOffset
+        {
+            get
+            {
+                string e = Environment.GetEnvironmentVariable("DOVE_CURSOR_YOFF");
+                int v;
+                if (!string.IsNullOrEmpty(e) && int.TryParse(e, out v)) return v;
+                return 32;
+            }
+        }
+
+        /// <summary>
+        /// Cursor origin in VISIBLE-frame coordinates.  Registers are raster coordinates, and the
+        /// frame origin sits BorderPixels outside the picture, so
+        ///     visible = raster - firmwareOffset + border.
+        /// Both the sprite composite and the mix-exclusion band must use this; when they disagreed
+        /// the sprite drew at the corrected position while the mix was suppressed over a 16x16 hole
+        /// at the raw position, which showed as a black box tracking the mouse.
+        /// </summary>
+        public int CursorVisibleX
+        {
+            get { return CursorWord * 16 + CursorBitOffset - CursorXOffset + BorderPixels; }
+        }
+        public int CursorVisibleY
+        {
+            get { return CursorLine - CursorYOffset + BorderPixels; }
+        }
+
         private void CompositeCursor(int width, int height)
         {
             if (CursorDisabled) return;
 
-            int cx = CursorWord * 16 + CursorBitOffset;
-            int cy = CursorLine;
+            int cx = CursorVisibleX;
+            int cy = CursorVisibleY;
             int mix = MixFunction;
 
             for (int row = 0; row < 16; row++)
@@ -306,8 +456,8 @@ namespace D.IOP
             int cy0 = -1, cy1 = -1, cx0 = 0, cx1 = 0;
             if (!CursorDisabled)
             {
-                cx0 = CursorWord * 16 + CursorBitOffset; cx1 = cx0 + 16;
-                cy0 = CursorLine; cy1 = cy0 + 16;
+                cx0 = CursorVisibleX; cx1 = cx0 + 16;
+                cy0 = CursorVisibleY; cy1 = cy0 + 16;
             }
 
             for (int y = 0; y < height; y++)
