@@ -159,6 +159,24 @@ namespace D.Doovke
                     {
                         string cpState;
                         lock (_machineLock) cpState = _machine.Cp.DescribeState();
+                        // Which port is actually being hammered?  A spin shows up here as one port
+                        // with a count orders of magnitude above the rest.  Reading a single
+                        // suspected port (as the input-port gate log does) cannot distinguish "this
+                        // is the spin" from "this is incidental polling while the spin is elsewhere".
+                        var pc = _machine.Io.PortCounts;
+                        if (pc != null && pc.Count > 0)
+                        {
+                            var items = new System.Collections.Generic.List<string>();
+                            var keys = new System.Collections.Generic.List<ushort>(pc.Keys);
+                            keys.Sort((x, y) => pc[y].CompareTo(pc[x]));
+                            for (int i = 0; i < keys.Count && i < 14; i++)
+                                items.Add(keys[i].ToString("X4") + "=" + pc[keys[i]]);
+                            cpState += System.Environment.NewLine
+                                + "hottest I/O ports (count desc):" + System.Environment.NewLine
+                                + "  " + string.Join("  ", items.ToArray())
+                                + System.Environment.NewLine;
+                        }
+
                         var g = _machine.Io.GateLog;
                         if (g != null && g.Count > 0)
                         {

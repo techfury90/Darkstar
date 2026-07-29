@@ -508,11 +508,18 @@ namespace D.IOP
                     _picSlave.LowerIrq(1);
                     return 0x00;
 
-                // Arbiter command read-strobes: the read *is* the command; no data (never tested by the
-                // firmware).  AllowRDC (0xF4, bit 0x04) latches the RDC-DMA bus grant.
+                // Arbiter command read-strobes.  The read IS the command for the RDC-DMA bus grant
+                // (AllowRDC, bit 0x04), and returning 0 was fine for every Pilot 14 guest -- which is
+                // why the old comment here claimed the value is "never tested by the firmware".
+                //
+                // That claim is false for at least one guest.  The Pilot 12 Medley installation
+                // utility reads this port 13,541,312 times while stalled at MP 0199 -- three orders
+                // of magnitude more than any other port -- so it is plainly testing what comes back
+                // and waiting for a bit we never set.  DOVE_ARB_F4=<hex> overrides the returned byte
+                // so the expected value can be found by sweep rather than assumed.
                 case ArbAllowRDC:
                     _allowRDC = true; ArbAllowRdcCount++;
-                    return 0x00;
+                    return ArbF4Value;
                 case ArbHoldIOP:
                 case ArbAllowPC:
                     return 0x00;
@@ -863,6 +870,27 @@ namespace D.IOP
         // (RDiskCtlrIntr = slave IR3, RDiskDmaIntr' = slave IR2) cascade to master IR5 -> IOP ISR.
         private readonly DoveDiskController _rdc;
         private readonly Micropolis1325 _disk;
+        /// <summary>
+        /// Byte returned by a read of 0xF4 (ArbAllowRDC).  Default 0, which every Pilot 14 guest
+        /// accepts; DOVE_ARB_F4 overrides it for guests that test the value.
+        /// </summary>
+        private static byte ArbF4Value
+        {
+            get
+            {
+                if (_arbF4 < 0)
+                {
+                    string e = Environment.GetEnvironmentVariable("DOVE_ARB_F4");
+                    byte v;
+                    _arbF4 = (!string.IsNullOrEmpty(e) &&
+                              byte.TryParse(e, System.Globalization.NumberStyles.HexNumber, null, out v))
+                             ? v : 0x00;
+                }
+                return (byte)_arbF4;
+            }
+        }
+        private static int _arbF4 = -1;
+
         private bool _allowRDC;                       // set by the 0xF4 arbiter AllowRDC command
         private bool _prevRdcCtlrInt, _prevRdcDmaInt; // edge state for the slave-8259 raise
         public System.Collections.Generic.List<string> RdcLog;   // diagnostic: every RDC/arbiter access

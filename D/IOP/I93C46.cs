@@ -78,18 +78,24 @@ namespace D.IOP
                 // Chip deselected: reset the serial state machine.
                 _started = false;
                 _readMode = false;
+                _dataMode = false;
                 _cmdBits = 0;
                 _dataOut = false;
                 _clock = false;
                 _cs = false;
-                return;
+                return;      // _ready survives: the guest polls it across CS transitions
+
             }
 
             if (cs && !_cs)
             {
-                // CS rising: new command.
+                // CS rising: new command.  _ready is deliberately NOT cleared here -- the guest
+                // polls status by reasserting CS after a write, so clearing it on the rising edge
+                // would make the ready bit unobservable and the spin unbreakable.  It clears when a
+                // start bit actually arrives.
                 _started = false;
                 _readMode = false;
+                _dataMode = false;
                 _cmdBits = 0;
                 _cmdReg = 0;
                 _dataOut = false;
@@ -104,9 +110,33 @@ namespace D.IOP
                     _outBit--;
                     _dataOut = (_outBit >= 0 && _outBit < 16) && ((_outWord >> _outBit) & 1) != 0;
                 }
+                else if (_dataMode)
+                {
+                    // WRITE / WRAL: 16 data bits follow the 8 command bits, MSB first.
+                    _dataReg = ((_dataReg << 1) | (di ? 1 : 0)) & 0xFFFF;
+                    if (++_dataBits == 16)
+                    {
+                        _dataMode = false;
+                        if (_writeEnabled)
+                        {
+                            if (_pendingWral) { for (int a = 0; a < _mem.Length; a++) _mem[a] = (ushort)_dataReg; }
+                            else _mem[_pendingAddr] = (ushort)_dataReg;
+                            Dirty = true;
+                        }
+                        // READY.  Bit 11 is BOTH EEPReadDataMask and EEPStatusReady in HardDefs.asm
+                        // -- one pin, two meanings by phase -- and EEPProcs.asm spins on it unbounded
+                        // after a write, erase or reset (WriteLoop2 / EraseLoop / ResetLoop, no
+                        // timeout).  Leaving it low is why installation utilities hung at MP 0199: a
+                        // plain boot only READS the EEPROM, while an installer WRITES it to record the
+                        // boot device and configuration.
+                        _ready = true;
+                        if (WriteLog != null && WriteLog.Count < 200)
+                            WriteLog.Add((_pendingAddr << 16) | (_dataReg & 0xFFFF));
+                    }
+                }
                 else if (!_started)
                 {
-                    if (di) { _started = true; _cmdBits = 0; _cmdReg = 0; }  // start bit
+                    if (di) { _started = true; _cmdBits = 0; _cmdReg = 0; _ready = false; }  // start bit
                 }
                 else
                 {
@@ -116,24 +146,69 @@ namespace D.IOP
                     {
                         int opcode = (_cmdReg >> 6) & 3;
                         int addr = _cmdReg & 0x3F;
-                        if (opcode == 2)  // READ (binary 10)
+                        switch (opcode)
                         {
-                            _outWord = _mem[addr];
-                            _readMode = true;
-                            _outBit = 16;      // leading dummy bit; first read edge -> bit 15
-                            _dataOut = false;
-                            if (ReadLog != null && ReadLog.Count < 200) ReadLog.Add((addr << 16) | _outWord);
+                            case 2:   // READ (10)
+                                _outWord = _mem[addr];
+                                _readMode = true;
+                                _outBit = 16;      // leading dummy bit; first read edge -> bit 15
+                                _dataOut = false;
+                                if (ReadLog != null && ReadLog.Count < 200) ReadLog.Add((addr << 16) | _outWord);
+                                break;
+
+                            case 1:   // WRITE (01) -- 16 data bits follow
+                                _pendingAddr = addr; _pendingWral = false;
+                                _dataMode = true; _dataBits = 0; _dataReg = 0;
+                                break;
+
+                            case 3:   // ERASE (11) -- set the word to all ones
+                                if (_writeEnabled) { _mem[addr] = 0xFFFF; Dirty = true; }
+                                _ready = true;
+                                break;
+
+                            case 0:   // special, selected by the top two address bits
+                                switch ((addr >> 4) & 3)
+                                {
+                                    case 3: _writeEnabled = true; break;    // EWEN (cmd 30H)
+                                    case 0: _writeEnabled = false; break;   // EWDS (cmd 00H)
+                                    case 2:                                 // ERAL (cmd 20H)
+                                        if (_writeEnabled)
+                                        {
+                                            for (int a = 0; a < _mem.Length; a++) _mem[a] = 0xFFFF;
+                                            Dirty = true;
+                                        }
+                                        _ready = true;
+                                        break;
+                                    case 1:                                 // WRAL (cmd 10H)
+                                        _pendingWral = true;
+                                        _dataMode = true; _dataBits = 0; _dataReg = 0;
+                                        break;
+                                }
+                                break;
                         }
-                        // opcode 0 = special (EWEN/EWDS/ERAL/WRAL), 1 = WRITE, 3 = ERASE:
-                        // accepted and ignored (bootstrap is read-only).
                     }
                 }
             }
             _clock = clock;
         }
 
-        /// <summary>Current data-out bit, ready to be OR'd into Input Port bit 11.</summary>
-        public bool DataOut { get { return _dataOut; } }
+        /// <summary>
+        /// Input-port bit 11.  The pin carries READ DATA while a read shifts out and READY/BUSY
+        /// status otherwise: EEPReadDataMask and EEPStatusReady are the same 0x0800 mask.
+        /// </summary>
+        public bool DataOut { get { return _readMode ? _dataOut : (_ready || _dataOut); } }
+
+        /// <summary>True once a write or erase has modified the image, so the host can persist it.</summary>
+        public bool Dirty;
+
+        /// <summary>Diagnostic: completed WRITEs, each (address&lt;&lt;16)|word.</summary>
+        public System.Collections.Generic.List<int> WriteLog;
+
+        private bool _ready;          // status pin high = not busy
+        private bool _writeEnabled;   // EWEN/EWDS latch
+        private bool _dataMode;       // shifting the 16 data bits of a WRITE/WRAL
+        private bool _pendingWral;
+        private int _pendingAddr, _dataBits, _dataReg;
 
         /// <summary>Diagnostic: log of completed READs, each (address&lt;&lt;16)|word.</summary>
         public System.Collections.Generic.List<int> ReadLog;
