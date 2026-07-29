@@ -94,6 +94,7 @@ namespace D.Doovke
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_TRACE")))
             {
                 _mpTrace = new System.Collections.Generic.List<string>();
+                _mpTracePath = Environment.GetEnvironmentVariable("DOVE_MP_TRACE");
                 _machine.Display.OnCursorWrite += (port, value) =>
                 {
                     if (_mpTrace.Count >= 20000) return;
@@ -101,7 +102,16 @@ namespace D.Doovke
                     string hex = BitConverter.ToString(b);
                     if (hex == _lastSprite) return;          // only log real changes
                     _lastSprite = hex;
-                    _mpTrace.Add("CPi=" + _machine.Cp.InstructionCount + " " + hex);
+                    string line = "CPi=" + _machine.Cp.InstructionCount + " " + hex;
+                    _mpTrace.Add(line);
+                    // Append as we go, not only on close.  Waiting for shutdown meant the only way
+                    // to learn whether the machine was alive was to kill it -- and a 7x00 phase can
+                    // run 642 MILLION instructions with no disk I/O and a frozen cursor, which is
+                    // indistinguishable from a wedge from outside.  Several healthy runs were closed
+                    // as "hangs" on exactly that guess.  Flushing live means the panel can be read
+                    // from the file while the machine keeps running.
+                    try { System.IO.File.AppendAllText(_mpTracePath, line + System.Environment.NewLine); }
+                    catch { }
                 };
             }
 
@@ -132,9 +142,7 @@ namespace D.Doovke
                 catch { }
                 try
                 {
-                    string p = Environment.GetEnvironmentVariable("DOVE_MP_TRACE");
-                    if (!string.IsNullOrEmpty(p) && _mpTrace != null)
-                        System.IO.File.WriteAllLines(p, _mpTrace.ToArray());
+                    // already appended live; nothing to do on close.
                 }
                 catch { }
                 SaveRigidDisk();
@@ -184,6 +192,7 @@ namespace D.Doovke
 
         private System.Collections.Generic.List<string> _mpTrace;
         private string _lastSprite;
+        private string _mpTracePath;
 
         private const int AutoSaveIntervalMs = 120000;   // 2 minutes
         private long _lastSavedRdcOps = -1;

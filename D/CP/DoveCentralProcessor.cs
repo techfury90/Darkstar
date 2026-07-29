@@ -1685,8 +1685,28 @@ namespace D.CP
                         break;
                     case 0xD:   // Bank<- : load the fetch-bank latch from Y[12-15], 1 delay slot
                         {
-                            int code = (_yBus >> 12) & 0xf;   // one-hot chip-select nibble
-                            _bankTarget = (code & 8) == 0 ? 0 : ((code & 4) != 0 ? 1 : ((code & 2) != 0 ? 2 : 3));
+                            // Extensions.dfn pins the codes:
+                            //     Set[bank0, 0], Set[bank1, 0C], Set[bank2, 0A], Set[bank3, 09]
+                            // and "Bank <- r0100 {= bank0 in low 4 bits}" (Bank1Misc.mc,
+                            // GrayBltSubs.mc:53, LineBreak.mc:522) shows only the LOW four bits of
+                            // the operand reach the latch.  We were taking the HIGH nibble and
+                            // decoding it as a one-hot chip select, so bank1 (0x0C) resolved to 0 --
+                            // i.e. no bank change ever happened.
+                            //
+                            // That is the MP 7700 wedge.  ViewPoint executes a floating-point ESC 4x
+                            // opcode, which enters the three-stage bank bridge:
+                            //   0xC04  bank 0  addrESCHi+4: "Bank <- bank1, CANCELBR[Bank1ESC,0F]"
+                            //   0x18F  bank 0  Bank1ESC (Misc.mc:82): "GOTOBANK1[Bank1ESCx]",
+                            //                  i.e. GOTOABS[0x0000] -- INIA 0 BY DESIGN
+                            //   0x000  bank 1  Bank1ESCx (Bank1Misc.mc:23) -> DISP4[Bank1ESCHi]
+                            // The one-cycle delay slot is load-bearing: it keeps 0x18F itself in
+                            // bank 0, where Bank1ESC lives, while making its target resolve in bank
+                            // 1.  With the target stuck in bank 0, address 0 is the trap vector, so
+                            // we entered ErrTrap with no EKErr set and span forever in
+                            // UnexpectedErr -- a deliberate halt for a machine in an incoherent
+                            // state, which is exactly what we had put it in.
+                            int code = _yBus & 0xf;           // LOW four bits
+                            _bankTarget = code == 0x0 ? 0 : code == 0xC ? 1 : code == 0xA ? 2 : code == 0x9 ? 3 : 0;
                             _bankChangePending = 2;           // N writes; N+1 old bank; N+2 new
                             Note("Bank<-");
                         }
