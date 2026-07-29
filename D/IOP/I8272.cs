@@ -265,6 +265,9 @@ namespace D.IOP
             if (site >= 0 && site < IntRaisesBySite.Length) IntRaisesBySite[site]++;
         }
 
+        /// <summary>First bytes of each delivered payload, for spotting .db block headers.</summary>
+        public System.Collections.Generic.List<string> SectorHeads;
+
         /// <summary>Bytes pulled off the image by Read commands, cumulative.</summary>
         public long TotalGathered;
         /// <summary>Bytes the guest's DMA actually consumed, cumulative.</summary>
@@ -501,6 +504,39 @@ namespace D.IOP
                 // that one hid for a full day because every individual read still reported "ok".
                 TotalGathered += _execData.Length;
                 TotalDmaSent += _dmaSent;
+
+                // Head of each DELIVERED payload.  The boot buffer is a single 512-byte streaming
+                // buffer, reused per sector, so a .db block header passes through it once and is
+                // overwritten -- searching memory at the stall cannot find it.  Watching the stream
+                // can.  The CP WriteData block we are looking for begins
+                //     D0 00  00 00  00 00  0F 59
+                // (CP WriteData / Daybreak / cfg=0, bank 0, uAddr 0, 3929 microinstructions).
+                if (SectorHeads != null && SectorHeads.Count < 200 && _dmaSent > 0)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.Append("C=" + c + " H=" + head + " R=" + r + " sent=" + _dmaSent + "B: ");
+                    for (int k = 0; k < 16 && k < _execData.Length; k++)
+                        sb.Append(_execData[k].ToString("X2") + " ");
+                    // Search for the EXACT 8-byte CP WriteData header rather than a bit pattern.
+                    // A "type word in 0x8000-0xDFFF with low bits clear" test matches ordinary x86
+                    // code constantly -- these payloads ARE 8086 code (the .db carries RamBoot /
+                    // DoveCP / RAMFlpBt blocks as well as microcode), so that detector was pure noise.
+                    byte[] want = { 0xD0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0F, 0x59 };
+                    int lim = System.Math.Min(_dmaSent, _execData.Length) - want.Length;
+                    for (int k = 0; k <= lim; k++)
+                    {
+                        bool m = true;
+                        for (int j = 0; j < want.Length; j++)
+                            if (_execData[k + j] != want[j]) { m = false; break; }
+                        if (m) sb.Append("  <<<*** CP WriteData HEADER at +" + k + " ***>>>");
+                    }
+                    // also flag the 2-byte length field on its own, in case the header straddles
+                    // a sector boundary and only the tail landed in this payload
+                    for (int k = 0; k + 1 <= lim + 6; k++)
+                        if (_execData[k] == 0x0F && _execData[k + 1] == 0x59)
+                            sb.Append("  <<< length word 0F59 at +" + k);
+                    SectorHeads.Add(sb.ToString());
+                }
                 if (ReadTrace != null && ReadTrace.Count > 0)
                     ReadTrace[ReadTrace.Count - 1] += " sent=" + _dmaSent + "B";
 

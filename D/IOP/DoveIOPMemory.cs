@@ -332,6 +332,14 @@ namespace D.IOP
         /// <summary>Raw system/display DRAM backing (for diagnostics / VRAM dumps).</summary>
         public byte[] SystemRaw { get { return _system; } }
 
+        /// <summary>
+        /// The 16 KB IOP-LOCAL SRAM (0x00000-0x03FFF).  A separate array from SystemRaw, which is
+        /// why a "memory dump" that only writes SystemRaw silently omits it -- the same trap that
+        /// cost the MP 0149 hunt a day, and that just made a search for the CP microcode block come
+        /// back empty when the boot buffer lives here.
+        /// </summary>
+        public byte[] SramRaw { get { return _sram; } }
+
         /// <summary>Diagnostic hook fired on every SRAM byte write (address, value).</summary>
         public System.Action<int, byte> OnSramWrite;
 

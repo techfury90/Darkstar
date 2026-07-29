@@ -97,6 +97,7 @@ namespace D.Doovke
                 {
                     _machine.Io.Fdc.RecentLog = new string[256];
                     _machine.Io.Fdc.ReadTrace = new System.Collections.Generic.List<string>();
+                    _machine.Io.Fdc.SectorHeads = new System.Collections.Generic.List<string>();
                 }
             }
 
@@ -203,6 +204,14 @@ namespace D.Doovke
                         // mask), so a histogram of it across ALL reads is the thing to look at.  The
                         // earlier gate log printed only the first and last eight of 300 samples, which
                         // could not show whether it varied in between.
+                        cpState += System.Environment.NewLine
+                            + "WCS writes: byteOUTs=" + _machine.Io.WcsByteWrites
+                            + " wordOUTs=" + _machine.Io.WcsWordWrites
+                            + "  ports " + (_machine.Io.WcsFirstPort < 0 ? "none"
+                                : _machine.Io.WcsFirstPort.ToString("X4") + ".." + _machine.Io.WcsLastPort.ToString("X4"))
+                            + "   (a full CP load = 23,574 byte OUTs)"
+                            + System.Environment.NewLine;
+
                         var fdc = _machine.Io.Fdc;
                         if (fdc != null)
                         {
@@ -240,6 +249,13 @@ namespace D.Doovke
                                 string entry = fdc.RecentLog[(int)(i % n)];
                                 if (!string.IsNullOrEmpty(entry)) cpState += "  " + entry + System.Environment.NewLine;
                             }
+                        }
+                        if (fdc != null && fdc.SectorHeads != null)
+                        {
+                            cpState += System.Environment.NewLine + "delivered payload heads ("
+                                     + fdc.SectorHeads.Count + "):" + System.Environment.NewLine;
+                            foreach (string h in fdc.SectorHeads)
+                                cpState += "  " + h + System.Environment.NewLine;
                         }
                         if (fdc != null && fdc.ReadTrace != null)
                         {
@@ -456,12 +472,20 @@ namespace D.Doovke
         private long DumpSharedDramTo(string path)
         {
             if (string.IsNullOrEmpty(path)) return 0;
-            byte[] ram;
+            byte[] ram, sram;
             // Hold the machine lock for the copy only -- writing 4 MB to disk under it would
             // stall the emulation thread for the duration of the I/O.
-            lock (_machineLock) ram = (byte[])_machine.Memory.SystemRaw.Clone();
+            lock (_machineLock)
+            {
+                ram = (byte[])_machine.Memory.SystemRaw.Clone();
+                sram = (byte[])_machine.Memory.SramRaw.Clone();
+            }
             System.IO.File.WriteAllBytes(path, ram);
-            return ram.Length;
+            // The IOP-local SRAM is a SEPARATE array and was silently missing from this dump.
+            // Anything the IOP keeps in its own memory -- the boot buffer, its DOB, its stacks --
+            // lives there, so searching only the DRAM for it comes back empty and looks like proof.
+            System.IO.File.WriteAllBytes(path + ".sram", sram);
+            return ram.Length + sram.Length;
         }
 
         private MenuStrip BuildMenu()

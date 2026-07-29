@@ -581,6 +581,18 @@ namespace D.IOP
             // (0xE000) before each block.  Route both into the control store.
             if (port >= WcsBase && port <= WcsEnd)
             {
+                // WriteCntlStore (DybrkCP.asm) writes the control store with BYTE OUTs:
+                // "OUT DX, AL" per lane, DX = 0x8000|N stepping by nextCSByte 0x1000 six times per
+                // microword.  A successful load of the one CP WriteData block in the uCode file is
+                // therefore 3,929 x 6 = 23,574 byte OUTs into 0x8000-0xDFFF, preceded by one OUT to
+                // the bank register with AL=0x00.
+                //
+                // Counting them splits the remaining possibilities: ZERO means the parser never
+                // reached the block, so the bug is upstream in ProcessCPBlock/IncrementSI; 23,574
+                // means the writes happen and our port decode is dropping them.
+                WcsByteWrites++;
+                if (WcsFirstPort < 0) WcsFirstPort = port;
+                WcsLastPort = port;
                 _controlStore.WriteLane(port, value);
                 return;
             }
@@ -735,6 +747,9 @@ namespace D.IOP
             }
         }
 
+        /// <summary>Byte OUTs into the WCS window -- the path DybrkCP.asm actually uses.</summary>
+        public long WcsByteWrites = 0;
+        public int WcsFirstPort = -1, WcsLastPort = -1;
         public long WcsWordWrites = 0;   // TEMP: count 16-bit OUTs that land in the WCS window (0x8000-0xDFFF)
         public void WriteWord(ushort port, ushort value)
         {
