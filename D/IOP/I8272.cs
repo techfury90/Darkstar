@@ -265,6 +265,11 @@ namespace D.IOP
             if (site >= 0 && site < IntRaisesBySite.Length) IntRaisesBySite[site]++;
         }
 
+        /// <summary>Bytes pulled off the image by Read commands, cumulative.</summary>
+        public long TotalGathered;
+        /// <summary>Bytes the guest's DMA actually consumed, cumulative.</summary>
+        public long TotalDmaSent;
+
         public long CommandCount;
         public long ReadCount;
         /// <summary>Last Read's cyl/head/sector, for trajectory tracing.</summary>
@@ -487,6 +492,18 @@ namespace D.IOP
             {
                 int sent = DmaOut(_execData);
                 _dmaSent = sent > 0 ? sent : _execData.Length;
+
+                // Totals on BOTH sides of the transfer.  "gathered" is what the controller pulled
+                // off the image; "sent" is what the guest's DMA actually consumed into IOP memory.
+                // If they agree, the data reached memory and any fault is in the .db block parser
+                // downstream.  If they diverge, the transfer is losing bytes between controller and
+                // memory -- which is the floppy analogue of the RDC one-DMA-per-sector defect, and
+                // that one hid for a full day because every individual read still reported "ok".
+                TotalGathered += _execData.Length;
+                TotalDmaSent += _dmaSent;
+                if (ReadTrace != null && ReadTrace.Count > 0)
+                    ReadTrace[ReadTrace.Count - 1] += " sent=" + _dmaSent + "B";
+
                 FinishExecution();
             }
         }
@@ -544,12 +561,26 @@ namespace D.IOP
             _result[3] = (byte)c; _result[4] = (byte)h; _result[5] = (byte)r; _result[6] = (byte)n;
         }
 
-        // ST3 (Sense Drive Status): drive is ready + two-sided; track0 if at cyl 0.
+        /// <summary>
+        /// ST3 (Sense Drive Status): b7 Fault, b6 WriteProtect, b5 Ready, b4 Track0, b3 TwoSided,
+        /// b2 Head, b1-0 Unit.
+        ///
+        /// READY IS ALWAYS TRUE.  On this hardware the drive's RDY line is not connected -- the
+        /// controller senses INDEX instead -- so the pin reads asserted regardless of unit or
+        /// whether a diskette is loaded (operator, from the machine).  We previously gated it on
+        /// media presence, which made three of the four unit selects report not-ready and left any
+        /// driver scanning for a ready drive with nowhere to settle.  Measured against the Pilot 12
+        /// Medley installer: 1152 of 1237 FDC commands were Sense Drive Status cycling units
+        /// 3,2,1,0 forever.
+        ///
+        /// Write-protect still needs media -- with no diskette there is no write-protect notch to
+        /// sense -- and Track0 still reflects the head position.
+        /// </summary>
         private byte St3(int unit, int head)
         {
             int s = (head << 2) | unit;
             FloppyDisk d = Drives[unit];
-            if (d != null) s |= 0x20;         // Ready (media present)
+            s |= 0x20;                        // Ready: RDY not wired, reads always asserted
             s |= 0x08;                        // TwoSided
             if (_presentCyl == 0) s |= 0x10;  // Track0
             if (d != null && d.IsWriteProtected) s |= 0x40;

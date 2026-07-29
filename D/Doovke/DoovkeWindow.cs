@@ -209,7 +209,16 @@ namespace D.Doovke
                             cpState += System.Environment.NewLine
                                 + "FDC: commands=" + fdc.CommandCount
                                 + " reads=" + fdc.ReadCount
-                                + " intRaises=" + fdc.IntRaises;
+                                + " intRaises=" + fdc.IntRaises
+                                + System.Environment.NewLine
+                                + "  gathered=" + fdc.TotalGathered + "B  dmaSent=" + fdc.TotalDmaSent + "B"
+                                + "  overGathered=" + (fdc.TotalGathered - fdc.TotalDmaSent) + "B"
+                                // gathered > sent is EXPECTED and not loss: we pull every sector from
+                                // R to EOT while the guest's DMA takes only what it programmed,
+                                // terminated by TC.  What matters is whether dmaSent equals what the
+                                // guest asked for -- check it against sectors x 512, not against
+                                // gathered.  (I first labelled this difference "lost", which is wrong.)
+                                + "  dmaSent/512=" + (fdc.TotalDmaSent / 512.0).ToString("F1") + " sectors";
                             if (fdc.CommandCount > 0)
                                 cpState += " (" + (fdc.IntRaises / (double)fdc.CommandCount).ToString("F2")
                                          + " per command)";
@@ -235,9 +244,9 @@ namespace D.Doovke
                         if (fdc != null && fdc.ReadTrace != null)
                         {
                             cpState += System.Environment.NewLine + "FDC read trace ("
-                                     + fdc.ReadTrace.Count + " reads), last 12:"
+                                     + fdc.ReadTrace.Count + " reads), all:"
                                      + System.Environment.NewLine;
-                            int f = fdc.ReadTrace.Count > 12 ? fdc.ReadTrace.Count - 12 : 0;
+                            int f = 0;   // ALL reads: the last 12 hid where the sequence STARTED
                             for (int i = f; i < fdc.ReadTrace.Count; i++)
                                 cpState += "  " + fdc.ReadTrace[i] + System.Environment.NewLine;
                         }
