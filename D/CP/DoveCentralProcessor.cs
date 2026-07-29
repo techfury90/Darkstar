@@ -99,6 +99,15 @@ namespace D.CP
                 int f = NiaWatchLog.Count > 14 ? NiaWatchLog.Count - 14 : 0;
                 for (int i = f; i < NiaWatchLog.Count; i++) sb.AppendLine("    " + NiaWatchLog[i]);
             }
+            sb.Append("  control-store occupancy:");
+            for (int bk = 0; bk < DoveControlStore.NumBanks; bk++)
+            {
+                int nz = 0;
+                for (int w = 0; w < DoveControlStore.WordsPerBank; w++)
+                    if (_cs.GetWord(bk, w) != 0) nz++;
+                sb.Append("  bank" + bk + "=" + nz);
+            }
+            sb.AppendLine();
             sb.AppendLine("  path microwords:");
             foreach (int ua in new int[] { 0x18F, 0xC04, 0xBDA, 0x5F8, 0x268, 0xD7C, 0x500, 0x003, 0x000 })
             {
