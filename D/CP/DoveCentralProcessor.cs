@@ -93,6 +93,12 @@ namespace D.CP
             // Disassemble the microwords on the path into address 0.  The predecessor is the
             // whole question when trapCode is 0: nothing raised an error, so something
             // BRANCHED to ErrTrap, and this names the instruction that did it.
+            if (NiaWatchLog != null && NiaWatchLog.Count > 0)
+            {
+                sb.AppendLine("  NIA watch (" + NiaWatchLog.Count + " hits, last 14):");
+                int f = NiaWatchLog.Count > 14 ? NiaWatchLog.Count - 14 : 0;
+                for (int i = f; i < NiaWatchLog.Count; i++) sb.AppendLine("    " + NiaWatchLog[i]);
+            }
             sb.AppendLine("  path microwords:");
             foreach (int ua in new int[] { 0x18F, 0xC04, 0xBDA, 0x5F8, 0x268, 0xD7C, 0x500, 0x003, 0x000 })
             {
@@ -129,6 +135,23 @@ namespace D.CP
         private int _bankChangePending; // delay-slot counter for Bank<-
         private ushort _xBus, _yBus, _lastYBus;
         private int _niaModifier;
+        private int _xDispNow;          // XDisp bits for the CURRENT microword (see the XDisp case)
+        private int _xDispSame = -1;
+        private bool XDispSameWord
+        {
+            get
+            {
+                if (_xDispSame < 0)
+                    // DEFAULT OFF.  Making XDisp same-word broke the boot at MP 0200 with heavy
+                    // display corruption -- XDisp is used throughout (stack-depth dispatches in
+                    // BBInit/TextBlt/RESSupport, the ib paths), so changing when its bits land
+                    // moves every one of those targets.  The 18F measurement stands (mod=000
+                    // with xBus=2004, nia=000 into ErrTrap) but the remedy does not: opt in with
+                    // DOVE_XDISP_SAME to reproduce the experiment.
+                    _xDispSame = (Environment.GetEnvironmentVariable("DOVE_XDISP_SAME") != null) ? 1 : 0;
+                return _xDispSame == 1;
+            }
+        }
         private bool _altUAddr;
         private bool _pc16;
         private bool _lastRefWasMap;   // OQ52: was the last c1 memory ref a Map<- (translate)?  <-MD then returns the
@@ -206,6 +229,9 @@ namespace D.CP
         // detect and log, never trap -- is one variable away if this regresses something.
         private bool _ibEmptyPending;
         public long IbEmptyTraps;
+        public System.Collections.Generic.List<string> NiaWatchLog =
+            new System.Collections.Generic.List<string>();
+        private int _niaWatch = -2;
         public System.Collections.Generic.List<string> ErrTrapLog =
             new System.Collections.Generic.List<string>();
         private int _ibEmptyEnabled = -1;
@@ -726,6 +752,13 @@ namespace D.CP
 
         private void Step()
         {
+            if (_niaWatch == -2)
+            {
+                string w = Environment.GetEnvironmentVariable("DOVE_NIA_WATCH");
+                int wv;
+                _niaWatch = (!string.IsNullOrEmpty(w) &&
+                             int.TryParse(w, System.Globalization.NumberStyles.HexNumber, null, out wv)) ? wv : -1;
+            }
             int addr = _tpc[_task];
             _uRing[(int)(_uRingN++ & 0xFF)] = addr;   // last 256 microstore addresses -- characterises a spin
             if (AddrHist != null && InstructionCount >= HistFrom) AddrHist[addr & 0xFFF]++;
@@ -817,6 +850,7 @@ namespace D.CP
             ushort _r5old = _alu.R[5]; byte _rh5old = _rh[5];
             int niaModifier = _niaModifier;
             _niaModifier = 0;
+            _xDispNow = 0;
             int niaModType = _niaModType;   // latched with niaModifier (applied one instruction late)
             _niaModType = 0;
             bool altUAddr = _altUAddr;
@@ -1485,7 +1519,26 @@ namespace D.CP
                         _niaModifier |= (_xBus & 0x80) >> 7;
                         break;
                     case YDispBrFunction.NibCarryBr: if (_alu.NibCarry) _niaModifier |= 1; break;
-                    case YDispBrFunction.XDisp: _niaModifier |= (_xBus & 0xf); break;
+                    case YDispBrFunction.XDisp:
+                        // XDisp contributes to THIS microword's next address, not the one after.
+                        //
+                        // _niaModifier is latched at the top of the instruction and applied a
+                        // microword late, which is right for the condition branches above (the
+                        // ALU result they test is not settled until late in the click).  It is
+                        // wrong for XDisp: the X bus is already valid when the dispatch is
+                        // decoded, and the microcode places the targets relative to the SAME
+                        // word's INIA.  Measured at 18F -- 'XDisp LRot12 Xbus<- R2', rawINIA 00F
+                        // so trueINIA 000 -- with xBus=2004 the nibble is 4 and the healthy boot
+                        // path goes to 004, but the deferred modifier left mod=000 and nia=000,
+                        // which is ErrTrap.  Nothing had trapped; a dispatch simply evaluated to
+                        // zero, and address 0 happens to be the trap vector -- indistinguishable
+                        // from a real trap except by click phase (a trap can only arrive in c1;
+                        // this arrived in c2).
+                        //
+                        // DOVE_XDISP_LATE restores the old deferred behaviour.
+                        if (XDispSameWord) _xDispNow |= (_xBus & 0xf);
+                        else _niaModifier |= (_xBus & 0xf);
+                        break;
                     case YDispBrFunction.YDisp: _niaModifier |= (_yBus & 0xf); break;
                     case YDispBrFunction.XC2npcDisp:
                         _niaModifier |= (_xBus & 0xc) | (_cycle == 2 ? 0x2 : 0x0) | (_pc16 ? 0x0 : 0x1);
@@ -2157,6 +2210,7 @@ namespace D.CP
             // The WCS stores INIA's low nibble COMPLEMENTED (TechRef Fig 2.6); the true
             // successor is (rawINIA XOR 0x00F).  How the modifier merges depends on the
             // dispatch type (mesa IB dispatch replaces bit-fields rather than OR-ing).
+            niaModifier |= _xDispNow;      // same-word XDisp bits
             int trueINIA = mi.INIA ^ 0x00F;
             int nia;
             switch (niaModType)
@@ -2171,6 +2225,19 @@ namespace D.CP
                     nia = trueINIA | niaModifier;
                     break;
             }
+            // DOVE_NIA_WATCH=<hex addr>: why did this microword compute the next address it did?
+            // 18F is the ErrTrap dispatch -- 'XDisp LRot12 Xbus<- R2', raw INIA 00F, so
+            // trueINIA = 00F ^ 00F = 000 and nia is PURELY the dispatch nibble.  Healthy boot
+            // resolves it to 4; a nibble of 0 lands on microstore 0 and is indistinguishable
+            // from a trap.  Log the inputs so the zero can be attributed rather than guessed.
+            if (_niaWatch >= 0 && addr == _niaWatch && NiaWatchLog != null && NiaWatchLog.Count < 300)
+                NiaWatchLog.Add("@" + addr.ToString("X3") + " c" + _cycle
+                    + "  rawINIA=" + mi.INIA.ToString("X3") + " trueINIA=" + trueINIA.ToString("X3")
+                    + "  mod=" + niaModifier.ToString("X3") + " modType=" + niaModType
+                    + "  xBus=" + _xBus.ToString("X4") + " R2=" + _alu.R[2].ToString("X4")
+                    + "  -> nia=" + nia.ToString("X3")
+                    + (nia == 0 ? "   *** LANDS ON ErrTrap ***" : "")
+                    + "  CPi=" + InstructionCount);
             _tpc[_task] = nia;
 
             // ---- IB-Empty trap (EKErr 3) ----
