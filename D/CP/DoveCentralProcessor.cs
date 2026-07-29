@@ -99,6 +99,16 @@ namespace D.CP
                 int f = NiaWatchLog.Count > 14 ? NiaWatchLog.Count - 14 : 0;
                 for (int i = f; i < NiaWatchLog.Count; i++) sb.AppendLine("    " + NiaWatchLog[i]);
             }
+            for (int bk = 0; bk < 2; bk++)
+            {
+                sb.Append("  bank" + bk + " words 000-00F:");
+                for (int w = 0; w < 16; w++)
+                {
+                    ulong wd = _cs.GetWord(bk, w);
+                    sb.Append(wd == 0 ? " ----" : " " + (wd & 0xFFFF).ToString("X4"));
+                }
+                sb.AppendLine();
+            }
             sb.Append("  control-store occupancy:");
             for (int bk = 0; bk < DoveControlStore.NumBanks; bk++)
             {
@@ -128,7 +138,7 @@ namespace D.CP
             foreach (int a in seen) sb.Append(" " + a.ToString("X3"));
             sb.AppendLine();
             sb.Append("    sequence:");
-            foreach (int a in order) sb.Append(" " + a.ToString("X3"));
+            foreach (int a in order) sb.Append(" " + (a >> 12) + ":" + (a & 0xFFF).ToString("X3"));
             sb.AppendLine();
             return sb.ToString();
         }
@@ -769,7 +779,7 @@ namespace D.CP
                              int.TryParse(w, System.Globalization.NumberStyles.HexNumber, null, out wv)) ? wv : -1;
             }
             int addr = _tpc[_task];
-            _uRing[(int)(_uRingN++ & 0xFF)] = addr;   // last 256 microstore addresses -- characterises a spin
+            _uRing[(int)(_uRingN++ & 0xFF)] = (_execBank << 12) | addr;   // bank-tagged: an untagged ring cannot attribute a spin   // last 256 microstore addresses -- characterises a spin
             if (AddrHist != null && InstructionCount >= HistFrom) AddrHist[addr & 0xFFF]++;
             Microinstruction mi = Fetch(_execBank, addr);
 
@@ -996,9 +1006,12 @@ namespace D.CP
                     // predecessor is the whole question.  The ring excludes this instruction.
                     var pre = new System.Text.StringBuilder("    came from:");
                     for (int k = 24; k >= 1; k--)
-                        pre.Append(" " + _uRing[(int)((_uRingN - 1 - k) & 0xFF)].ToString("X3"));
+                    {
+                        int pv = _uRing[(int)((_uRingN - 1 - k) & 0xFF)];
+                        pre.Append(" " + (pv >> 12) + ":" + (pv & 0xFFF).ToString("X3"));
+                    }
                     ErrTrapLog.Add(pre.ToString());
-                    ErrTrapLog.Add("ErrTrap@0 c" + _cycle + " fZ=" + mi.fZ.ToString("X")
+                    ErrTrapLog.Add("addr0 bank=" + _execBank + " c" + _cycle + " fZ=" + mi.fZ.ToString("X")
                         + " -> xBus=" + _xBus.ToString("X4")
                         + "  nibble(bits4-7)=" + ((_xBus >> 4) & 0xF).ToString("X")
                         + "  trapCode=" + _trapCode + " ibPtr=" + (int)_ibPtr
@@ -2265,7 +2278,7 @@ namespace D.CP
                     + "  rawINIA=" + mi.INIA.ToString("X3") + " trueINIA=" + trueINIA.ToString("X3")
                     + "  mod=" + niaModifier.ToString("X3") + " modType=" + niaModType
                     + "  xBus=" + _xBus.ToString("X4") + " R2=" + _alu.R[2].ToString("X4")
-                    + "  bank=" + _execBank + " bankPend=" + _bankChangePending
+                    + "  bank=" + _execBank + "->" + _bankTarget + " bankPend=" + _bankChangePending
                     + "  -> nia=" + nia.ToString("X3")
                     + (nia == 0 ? "   *** LANDS ON ErrTrap ***" : "")
                     + "  CPi=" + InstructionCount);
