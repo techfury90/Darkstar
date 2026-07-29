@@ -84,9 +84,21 @@ namespace D.Doovke
                 _machine.Display.BorderLog = new System.Collections.Generic.List<string>();
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_CP_STATE")))
+            {
                 _machine.Io.GateLog = new System.Collections.Generic.List<string>();
                 _machine.Io.ConfigEeprom.ReadLog = new System.Collections.Generic.List<int>();
                 _machine.Io.ConfigEeprom.WriteLog = new System.Collections.Generic.List<int>();
+                // These two exist in I8272 for exactly this shape of stall -- CommandCount climbing
+                // into the thousands while ReadCount stays pinned -- but were never allocated, so
+                // the ring stayed empty.  ReadTrace also records the missing-track case
+                // (ST0=0x40, ST1=0x01), which is what a geometry gap in the IMD conversion looks
+                // like from the controller's side.
+                if (_machine.Io.Fdc != null)
+                {
+                    _machine.Io.Fdc.RecentLog = new string[256];
+                    _machine.Io.Fdc.ReadTrace = new System.Collections.Generic.List<string>();
+                }
+            }
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
                 _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
@@ -191,6 +203,45 @@ namespace D.Doovke
                         // mask), so a histogram of it across ALL reads is the thing to look at.  The
                         // earlier gate log printed only the first and last eight of 300 samples, which
                         // could not show whether it varied in between.
+                        var fdc = _machine.Io.Fdc;
+                        if (fdc != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "FDC: commands=" + fdc.CommandCount
+                                + " reads=" + fdc.ReadCount
+                                + " intRaises=" + fdc.IntRaises;
+                            if (fdc.CommandCount > 0)
+                                cpState += " (" + (fdc.IntRaises / (double)fdc.CommandCount).ToString("F2")
+                                         + " per command)";
+                            cpState += System.Environment.NewLine + "  by site:";
+                            for (int i = 0; i < fdc.IntRaisesBySite.Length; i++)
+                                if (fdc.IntRaisesBySite[i] != 0)
+                                    cpState += " s" + i + "=" + fdc.IntRaisesBySite[i];
+                            cpState += System.Environment.NewLine;
+                        }
+
+                        if (fdc != null && fdc.RecentLog != null)
+                        {
+                            cpState += System.Environment.NewLine + "FDC last commands (ring):"
+                                     + System.Environment.NewLine;
+                            int n = fdc.RecentLog.Length;
+                            long from = fdc.RecentPos > 24 ? fdc.RecentPos - 24 : 0;
+                            for (long i = from; i < fdc.RecentPos; i++)
+                            {
+                                string entry = fdc.RecentLog[(int)(i % n)];
+                                if (!string.IsNullOrEmpty(entry)) cpState += "  " + entry + System.Environment.NewLine;
+                            }
+                        }
+                        if (fdc != null && fdc.ReadTrace != null)
+                        {
+                            cpState += System.Environment.NewLine + "FDC read trace ("
+                                     + fdc.ReadTrace.Count + " reads), last 12:"
+                                     + System.Environment.NewLine;
+                            int f = fdc.ReadTrace.Count > 12 ? fdc.ReadTrace.Count - 12 : 0;
+                            for (int i = f; i < fdc.ReadTrace.Count; i++)
+                                cpState += "  " + fdc.ReadTrace[i] + System.Environment.NewLine;
+                        }
+
                         var rl = _machine.Io.ConfigEeprom.ReadLog;
                         cpState += System.Environment.NewLine + "93C46 completed READs: "
                                  + (rl == null ? "(not logging)" : rl.Count.ToString())

@@ -144,7 +144,7 @@ namespace D.IOP
             _presentCyl = 0;
             _resetSenses = 4;      // the reset routine senses all 4 drives until ST0=80H
             _seekPending = false;
-            _int = true;           // FDC asserts INT after reset
+            RaiseInt(0);   // FDC asserts INT after reset
         }
 
         // ---- Register access ----
@@ -248,6 +248,23 @@ namespace D.IOP
         public System.Collections.Generic.List<string> Log;
 
         /// <summary>Diagnostic counters (total across the whole run, uncapped).</summary>
+        /// <summary>
+        /// Per-site tally of INT assertions.  The Pilot 12 floppy boot waits on
+        /// floppyIOCBDone and then tests flppyIOCB.OperationState == OperationCompleted; a notify
+        /// WITHOUT that state store makes FloppyRead re-enqueue forever, which is why only one
+        /// BOOTSTRAPIOR condition is ever touched and the boot-buffer handshake is never reached.
+        /// Measured shape: ~790 completion-waits against 54 work-notifies, i.e. roughly 14 wakeups
+        /// per request -- so the question is which of our raise sites is firing when it should not.
+        /// </summary>
+        public readonly long[] IntRaisesBySite = new long[8];
+        public long IntRaises;
+        private void RaiseInt(int site)
+        {
+            _int = true;
+            IntRaises++;
+            if (site >= 0 && site < IntRaisesBySite.Length) IntRaisesBySite[site]++;
+        }
+
         public long CommandCount;
         public long ReadCount;
         /// <summary>Last Read's cyl/head/sector, for trajectory tracing.</summary>
@@ -325,7 +342,7 @@ namespace D.IOP
                     _presentCyl = 0;
                     _st0 = (byte)(0x20 | unit);           // SeekEnd | drive
                     _seekPending = true;
-                    _int = true;
+                    RaiseInt(1);
                     GoIdle();
                     break;
 
@@ -333,7 +350,7 @@ namespace D.IOP
                     _presentCyl = _cmd[2];
                     _st0 = (byte)(0x20 | (head << 2) | unit);
                     _seekPending = true;
-                    _int = true;
+                    RaiseInt(2);
                     GoIdle();
                     break;
 
@@ -368,6 +385,19 @@ namespace D.IOP
 
                 case 0x04:   // Sense Drive Status -- result ST3
                     _result[0] = St3(unit, head);
+                    // Log the RETURNED byte, not just that the command happened.  The Pilot 12
+                    // floppy boot cycles SenseDrive across all four unit selects indefinitely
+                    // (1152 of 1237 commands in one run), so which bit it dislikes is the whole
+                    // question -- ST3 is bit7 Fault, b6 WriteProtect, b5 Ready, b4 Track0,
+                    // b3 TwoSided, b2 Head, b1-0 Unit.
+                    if (RecentLog != null)
+                        Recent("SenseDrive unit=" + unit + " -> ST3=" + _result[0].ToString("X2")
+                             + " [rdy=" + ((_result[0] >> 5) & 1)
+                             + " t0=" + ((_result[0] >> 4) & 1)
+                             + " 2s=" + ((_result[0] >> 3) & 1)
+                             + " wp=" + ((_result[0] >> 6) & 1)
+                             + "] presentCyl=" + _presentCyl
+                             + " media=" + (Drives[unit] != null ? 1 : 0));
                     StartResult(1);
                     break;
 
@@ -381,7 +411,7 @@ namespace D.IOP
                         _result[3] = (byte)_presentCyl; _result[4] = (byte)head;
                         _result[5] = 1;                                  // R = first sector
                         _result[6] = (byte)(t != null ? SizeCode(t.SectorSize) : 2);
-                        _int = true;
+                        RaiseInt(3);
                         StartResult(7);
                     }
                     break;
@@ -425,7 +455,7 @@ namespace D.IOP
                 if (ReadTrace != null && ReadTrace.Count < 600)
                     ReadTrace.Add("Read#" + CommandCount + " C=" + c + " H=" + head + " R=" + r + " EOT=" + eot + " N=" + n
                         + " -> **MISSING-TRACK ABNORMAL** ST0=" + _st0.ToString("X2") + " ST1=01  [c<77=" + (c < 77) + " getTrack=null]");
-                _int = true;
+                RaiseInt(4);
                 StartResult(7);
                 return;
             }
@@ -504,7 +534,7 @@ namespace D.IOP
             _st0 = (byte)((_pendH << 2) | _pendUnit);         // termination head = the head actually read
             SetReadResult(0x00, 0x00, cc, hh, rr, _pendN);
             _execData = null; _execIdx = 0; _dmaSent = 0;
-            _int = true;
+            RaiseInt(5);
             StartResult(7);
         }
 
