@@ -144,11 +144,22 @@ namespace D.IOP
             switch (port)
             {
                 case RegTypeSize:
-                    // Controller-type / CRT-size status.  bit1: 1 = gate-array DCM,
-                    // 0 = CMOS DCM/DDC (App A diff #10).  bit0: 0 = 19", 1 = 15".
-                    // _typeSize = 0x00 => CMOS controller + 19" CRT.
+                    // ECCC: controller-type / CRT-size status.
+                    //   bit 1: 1 = gate-array DCM, 0 = CMOS DCM/DDC   (App A software difference #10)
+                    //   bit 0: 0 = 19" display, 1 = 15"               (HardDefs.asm DisplayTypeMask)
+                    // So 0x00 = CMOS + 19", and 0x02 = gate-array + 19".
+                    //
+                    // We report CMOS, but the evidence says the firmware believes it is driving a
+                    // GATE-ARRAY part: the boot ROM writes the border pattern registers in
+                    // gate-array order (low,high -- see the write-order fix in the border render),
+                    // and the cursor is unconditionally on even at the ROM screen, which is
+                    // difference #7, gate-array not implementing NCURSOR.  The operator also notes it
+                    // is unclear the CMOS part ever shipped.  Since the CMOS part is the LATER one,
+                    // Pilot 12-era software predates it and may take a different path when told CMOS.
+                    //
+                    // DOVE_TYPESIZE=<hex> overrides it so that can be tested rather than argued.
                     TypeSizeReads++;
-                    return _typeSize;
+                    return TypeSizeValue;
 
                 case RegControl:  // DDC status (gate-array only); benign constant
                     return 0x00;
@@ -309,6 +320,25 @@ namespace D.IOP
         public byte[] Frame { get { return _frame; } }
 
         // ---- Scan-out ----
+
+        /// <summary>ECCC value; DOVE_TYPESIZE overrides the default of 0x00 (CMOS + 19").</summary>
+        private byte TypeSizeValue
+        {
+            get
+            {
+                if (_typeSizeOverride < 0)
+                {
+                    string e = Environment.GetEnvironmentVariable("DOVE_TYPESIZE");
+                    byte v;
+                    _typeSizeOverride =
+                        (!string.IsNullOrEmpty(e) &&
+                         byte.TryParse(e, System.Globalization.NumberStyles.HexNumber, null, out v))
+                        ? v : _typeSize;
+                }
+                return (byte)_typeSizeOverride;
+            }
+        }
+        private int _typeSizeOverride = -1;
 
         private static int EnvInt(string name, int dflt)
         {
