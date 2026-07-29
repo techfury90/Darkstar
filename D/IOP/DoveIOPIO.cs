@@ -700,7 +700,21 @@ namespace D.IOP
             {
                 case InputPort:
                     // Input port word; bit 11 = config-EEPROM (93C46) data-out.
-                    return (ushort)(_inputPortWord | (_configEeprom.DataOut ? I93C46.DataOutMask : 0));
+                    {
+                        ushort v = (ushort)(_inputPortWord | (_configEeprom.DataOut ? I93C46.DataOutMask : 0));
+                        // The two guest-side gates on CP microcode loading both read through here:
+                        // machine-ID bit 6 must be 1 (Daybreak) or ALL CP blocks are skipped, and the
+                        // 93C46 csBankConfiguration is clocked out on bit 11.  When the WCS ends up
+                        // empty with the block loop spinning (MP 0199), it is because the loader
+                        // decided not to stream -- WriteLane stores unconditionally, so zero
+                        // occupancy means zero writes -- and these reads are what it decided on.
+                        if (GateLog != null && GateLog.Count < 300)
+                            GateLog.Add("in80=" + v.ToString("X4")
+                                + " b6=" + ((v >> 6) & 1)
+                                + " b11(eeprom)=" + ((v >> 11) & 1)
+                                + "  reads=" + (++InputPortReads));
+                        return v;
+                    }
                 case MesaIntrLatch:
                     // IN AX,0xB0 = Clear Mesa Interrupt Latch (the mesa task reads it as a
                     // WORD).  Same clear-on-read side effect as the byte path.
@@ -762,6 +776,10 @@ namespace D.IOP
         public readonly Queue<byte> DiagUartRx = new Queue<byte>();
         public byte DiagUartStatusExtra = 0x00;   // extra status bits OR'd into 0x74 (e.g. 0x10) for probing
         public bool DiagUartLoopback = true;       // loop TX back to RX so the UART self-test passes
+
+        /// <summary>Set to a list to record input-port (0x80) reads -- the microcode-load gates.</summary>
+        public List<string> GateLog;
+        public long InputPortReads;
 
         public ushort ControlReg { get { return _controlReg; } }
         public ushort ResetReg { get { return _resetReg; } }
@@ -873,7 +891,21 @@ namespace D.IOP
         private byte _prevResetReg;
         // b6 (0x40, machineIDMask) = 1 -> Daybreak/6085.  Required: DoveCP.asm skips all
         // Daybreak CP microcode blocks in the .db if this reads 0 (Daisy).
-        private ushort _inputPortWord = 0x0040;
+        //
+        // EVERY OTHER BIT READS 0, and we do not know what they are.  That is fine for the Pilot /
+        // ViewPoint boot, which never waits on one, but the XDE/Interlisp installer stalls at MP
+        // 0199 polling this port 300+ times with the value constant at 0x0040 -- i.e. waiting on a
+        // bit we do not model.  DOVE_INPUT_PORT=<hex> overrides the whole word so the bit can be
+        // found by sweep rather than by guessing at the hardware.
+        private ushort _inputPortWord = InitialInputPort();
+        private static ushort InitialInputPort()
+        {
+            string e = Environment.GetEnvironmentVariable("DOVE_INPUT_PORT");
+            ushort v;
+            if (!string.IsNullOrEmpty(e) &&
+                ushort.TryParse(e, System.Globalization.NumberStyles.HexNumber, null, out v)) return v;
+            return 0x0040;
+        }
         private byte _displayType = 0x0000;
         private byte _readDefault = 0x00;
         private bool _eepromDataOut = false;

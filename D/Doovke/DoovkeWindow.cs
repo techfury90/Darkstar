@@ -83,6 +83,9 @@ namespace D.Doovke
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_CURSOR_DUMP")))
                 _machine.Display.BorderLog = new System.Collections.Generic.List<string>();
 
+            if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_CP_STATE")))
+                _machine.Io.GateLog = new System.Collections.Generic.List<string>();
+
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
                 _machine.Cp.WrmpLog = new System.Collections.Generic.List<string>();
 
@@ -156,6 +159,20 @@ namespace D.Doovke
                     {
                         string cpState;
                         lock (_machineLock) cpState = _machine.Cp.DescribeState();
+                        var g = _machine.Io.GateLog;
+                        if (g != null && g.Count > 0)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "input-port (0x80) reads -- the microcode-load gates, first 8 and last 8:"
+                                + System.Environment.NewLine + "  ";
+                            var pick = new System.Collections.Generic.List<string>();
+                            for (int i = 0; i < g.Count && i < 8; i++) pick.Add(g[i]);
+                            for (int i = System.Math.Max(8, g.Count - 8); i < g.Count; i++) pick.Add(g[i]);
+                            cpState += string.Join(System.Environment.NewLine + "  ", pick.ToArray())
+                                + System.Environment.NewLine
+                                + "  total input-port reads = " + _machine.Io.InputPortReads
+                                + System.Environment.NewLine;
+                        }
                         System.IO.File.WriteAllText(cp, cpState);
                     }
                 }
