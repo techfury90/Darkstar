@@ -120,8 +120,10 @@ namespace D.Doovke
             {
                 string rp = Environment.GetEnvironmentVariable("DOVE_RETRACE");
                 int rpv;
-                _io.RetracePeriod = (!string.IsNullOrEmpty(rp) && int.TryParse(rp, out rpv) && rpv > 0)
-                    ? rpv : 20000;
+                // Default now comes from DoveIOPIO's documented field rate (105,263 = 76.00 Hz), not
+                // the 20,000 bring-up hack.  DOVE_RETRACE still overrides for A/B.
+                if (!string.IsNullOrEmpty(rp) && int.TryParse(rp, out rpv) && rpv > 0)
+                    _io.RetracePeriod = rpv;
             }
 
             // The CP takes its microcode from the writable control store the IOP loads.

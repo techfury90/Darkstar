@@ -265,12 +265,35 @@ namespace D.IOP
         /// interrupt controller's request register (offset 0x2E).  iRMX channel map
         /// (roadmap): Timer0 -> bit0, Timer1 -> bit4, Timer2 -> bit5.
         /// </summary>
+        /// <summary>
+        /// ★The 80186's internal timers are clocked at CLKOUT/4 = 2 MHz = 500 ns per count -- NOT once
+        /// per CPU clock, which is what this did.  Sources: IOP-TR App. E labels the Timer 0 source
+        /// "Internal 2 MHz Clk", and the etch-2/etch-3 constants cross-check independently
+        /// (20000 x 500 ns = 10.000 ms; 16250 / 1.625 MHz = 10.000 ms -- two constants, two clocks,
+        /// one answer).
+        ///
+        /// Counting per clock ran all three timers 4x fast.  Timer 2 is Opie's 10 ms system tick, so
+        /// that became 2.5 ms: time-of-day and the watchdog 4x fast, every %WaitForTime and
+        /// %WaitForInterrupt timeout 4x short, and %WaitForTime(500) -> ~127 ms against a floppy motor
+        /// that needs 500 ms to spin up.  The documented symptom is "spurious %WaitForInterrupt
+        /// timeouts in every handler" -- i.e. uncaught-signal territory.
+        ///
+        /// One prescaler feeds all three channels, so the remainder is carried across calls rather
+        /// than dropped per call (Tick is invoked with a handful of clocks at a time, so truncating
+        /// each call would lose most of the count).
+        /// </summary>
+        private int _timerPrescale;
+
         public void Tick(int clocks)
         {
             if (clocks <= 0) return;
-            TickTimer(OffsetT0Count, OffsetT0MaxA, OffsetT0Mode, 0x0001, clocks);
-            TickTimer(OffsetT1Count, OffsetT1MaxA, OffsetT1Mode, 0x0010, clocks);
-            TickTimer(OffsetT2Count, OffsetT2MaxA, OffsetT2Mode, 0x0020, clocks);
+            _timerPrescale += clocks;
+            int counts = _timerPrescale >> 2;          // CLKOUT/4
+            if (counts == 0) return;
+            _timerPrescale -= counts << 2;
+            TickTimer(OffsetT0Count, OffsetT0MaxA, OffsetT0Mode, 0x0001, counts);
+            TickTimer(OffsetT1Count, OffsetT1MaxA, OffsetT1Mode, 0x0010, counts);
+            TickTimer(OffsetT2Count, OffsetT2MaxA, OffsetT2Mode, 0x0020, counts);
         }
 
         /// <summary>

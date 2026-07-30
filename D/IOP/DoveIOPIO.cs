@@ -1048,7 +1048,26 @@ namespace D.IOP
         public DoveDiskController Rdc { get { return _rdc; } }
 
         // Display vertical-retrace generator (slave IR0).
-        private int _retracePeriod = 210400;   // ~26.3 ms field at 8 MHz
+        // ★RETRACE INTERRUPT = 38.00 Hz, ONE PER FRAME.  The distinction that matters:
+        //
+        //   field  = 368.5 lines = 13.158 ms = 76.00 Hz   (the physical scan rate)
+        //   frame  = 737   lines = 26.316 ms = 38.00 Hz   (two interlaced fields)
+        //
+        // 737 is ODD, which is how 2:1 interlace puts each field a half-line out, so 737 lines and the
+        // 825,440 px figure (70 x 16 x 737) are per FRAME -- the timing document labels both "field",
+        // which is where the confusion came from.  Non-interlace is 718, even.
+        //
+        // But the INTERRUPT is per frame, not per field (operator): generated on a frame basis so that
+        // software repainting on retrace lands on frame boundaries and never tears across an interlace
+        // pair.  That also makes the firmware's hard-coded `MOV refresh, 38` the plain interrupt rate
+        // rather than something needing halving.
+        //
+        // 8,000,000 / 38 = 210,526 clocks.  History of this constant, since it moved twice: 20,000 was
+        // a bring-up hack (5.3x fast, and the firmware counts retraces to time the 35 s boot-device
+        // selection, making it ~6.6 s); 105,263 was mine, from reading the interrupt as per-FIELD (2x
+        // fast).  Cross-check with the corrected 80186 cycle model: 26.316 ms x 1.20 M instr/s = 31,580
+        // instructions per frame against 210,526 / 6.65 = 31,658 -- 0.25%.
+        private int _retracePeriod = 210526;   // 26.316 ms FRAME at 8 MHz = 38.00 Hz
         private int _retraceCycles;
         private bool _retracePending;
         private long _retraceCount;
