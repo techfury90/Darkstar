@@ -201,6 +201,20 @@ namespace D.Doovke
                         // with a count orders of magnitude above the rest.  Reading a single
                         // suspected port (as the input-port gate log does) cannot distinguish "this
                         // is the spin" from "this is incidental polling while the spin is elsewhere".
+                        // Guest-declared drive geometry vs the configured drive, and any access that
+                        // ran past the backing image (which every accessor otherwise drops in silence).
+                        if (_machine.Io.Rdc != null && _machine.Io.Rdc.GeometryReport != null)
+                            cpState += System.Environment.NewLine + "RDC " + _machine.Io.Rdc.GeometryReport
+                                     + System.Environment.NewLine;
+                        cpState += "RDC out-of-image accesses (cyl >= "
+                            + D.IO.Micropolis1325.Cylinders + "): "
+                            + D.IO.Micropolis1325.OutOfImageAccesses
+                            + (D.IO.Micropolis1325.OutOfImageAccesses > 0
+                                ? "  cyl range " + D.IO.Micropolis1325.OutOfImageMinCyl
+                                  + ".." + D.IO.Micropolis1325.OutOfImageMaxCyl
+                                : "")
+                            + System.Environment.NewLine;
+
                         var pc = _machine.Io.PortCounts;
                         if (pc != null && pc.Count > 0)
                         {

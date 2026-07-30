@@ -774,6 +774,7 @@ namespace D.IOP
                 if (_dmaDir == 1)               // mem->FIFO: ingest the DOB image
                 {
                     for (int w = 0; w < 34; w++) _dob[w] = RdWord(_dmaAddr + w * 2);
+                    CheckGuestGeometry();
                 }
                 else                            // FIFO->mem: write the updated DOB back
                 {
@@ -846,6 +847,42 @@ namespace D.IOP
         private void SetErr(int word, int errByte) { _dob[word] = (ushort)((errByte & 0xFF) << 8); }   // ErrorType = hi byte
         private const int W_HeaderError = 10, W_LabelError = 11, W_DataError = 12, W_LastError = 13;
         private const int W_CurrentCyl = 14, W_DriveCtlrStatus = 20;
+
+        /// <summary>
+        /// The geometry the GUEST declares in the DOB (byte-swapped words 3/4/5 = max sector, heads,
+        /// cylinders).  We have always ignored these in favour of compile-time Micropolis1325
+        /// constants -- logged debt, and the natural hook for the ~two dozen drive types Xerox
+        /// supported.  Measured on the Medley path: 16 / 8 / 1024 against our 16 / 8 / 960, which is
+        /// correct on both sides (the 1325 is physically 1024 cylinders; Xerox formats 960).
+        ///
+        /// This is the "cheap assertion" the debt note asks for: compare once, say so if they differ,
+        /// and count any access that runs past the image.  It changes no behaviour on its own.
+        /// </summary>
+        private int GuestSectorsPerTrack { get { return Bswap(_dob[3]); } }
+        private int GuestHeads           { get { return Bswap(_dob[4]); } }
+        private int GuestCylinders       { get { return Bswap(_dob[5]); } }
+
+        public string GeometryReport;
+        private void CheckGuestGeometry()
+        {
+            if (GeometryReport != null) return;                 // once per run
+            int gs = GuestSectorsPerTrack, gh = GuestHeads, gc = GuestCylinders;
+            if (gs == 0 && gh == 0 && gc == 0) return;          // DOB not populated yet
+            bool agree = gs == Micropolis1325.SectorsPerTrack
+                      && gh == Micropolis1325.Heads
+                      && gc == Micropolis1325.Cylinders;
+            GeometryReport = "guest DOB geometry: " + gs + " sectors/track, " + gh + " heads, "
+                + gc + " cylinders    configured: " + Micropolis1325.SectorsPerTrack + " / "
+                + Micropolis1325.Heads + " / " + Micropolis1325.Cylinders
+                + (agree ? "   (agree)"
+                         : "   *** DISAGREE"
+                           + (gs != Micropolis1325.SectorsPerTrack ? " sectors" : "")
+                           + (gh != Micropolis1325.Heads ? " heads" : "")
+                           + (gc != Micropolis1325.Cylinders ? " cylinders" : "")
+                           + " -- addressing uses heads x sectors so it is unaffected, but any"
+                           + " access at cylinder >= " + Micropolis1325.Cylinders
+                           + " falls outside the backing image ***");
+        }
 
         // Error type bytes (§7.1).  The "not found" family is what an UNFORMATTED platter returns
         // (no address marks/headers to find) -- see DiskHeadLabeledDukeA:880-892.

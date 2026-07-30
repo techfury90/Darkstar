@@ -43,8 +43,30 @@ namespace D.IO
         public Micropolis1325() { }
 
         /// <summary>page number = sector + spt*(head + heads*cyl); the linear sector index.</summary>
+        /// <summary>
+        /// CHS -> page.  ★A Micropolis 1325 is PHYSICALLY a 1024-cylinder drive of which Xerox
+        /// formats only 960 (operator).  So `Cylinders = 960` is the Xerox-usable count, while the
+        /// guest correctly reports the drive's physical 1024 in DOB words 3/4/5 -- measured on the
+        /// Medley path as 0x1000/0x0800/0x0004, byte-swapped 16 sectors / 8 heads / 1024 cylinders.
+        ///
+        /// Addressing is unaffected by the disagreement (this only multiplies by heads x sectors),
+        /// but an access at cylinder >= 960 lands past the end of our backing image, where every
+        /// accessor guards on `page >= TotalSectors` and then returns null or drops the write
+        /// SILENTLY.  A guest that writes such a sector and reads it back sees corruption with no
+        /// error anywhere -- the exact shape of failure this project keeps getting caught by.  So
+        /// count and surface it instead.
+        /// </summary>
+        public static long OutOfImageAccesses;
+        public static int OutOfImageMinCyl = int.MaxValue, OutOfImageMaxCyl = -1;
+
         public static int Page(int cyl, int head, int sector)
         {
+            if (cyl >= Cylinders)
+            {
+                OutOfImageAccesses++;
+                if (cyl < OutOfImageMinCyl) OutOfImageMinCyl = cyl;
+                if (cyl > OutOfImageMaxCyl) OutOfImageMaxCyl = cyl;
+            }
             return sector + SectorsPerTrack * (head + Heads * cyl);
         }
 
