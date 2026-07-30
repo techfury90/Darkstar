@@ -527,6 +527,17 @@ namespace D.CP
             int div = PitDivisor > 0 ? PitDivisor : 128;
             _pitClockAccum += clocks;
             while (_pitClockAccum >= div) { _pitClockAccum -= div; _pit32--; PitCounts++; }
+
+            // ★COUNTER 0 -- Mode 2, the interrupt, and per the timing audit THE clock behind every
+            // Process.SetTimeout in Pilot: the CP's entire response to this interrupt is uWP |= 0x8000,
+            // the process-timeout bit.  It was generated every 40,000 CP INSTRUCTIONS, which at the
+            // corrected CP rate is 5.32 ms rather than 50 ms -- 9.4x fast -- and being instruction-paced
+            // it also froze whenever the CP stalled, where the real 8254 counts wall time regardless
+            // (RawCLKB is not gated by CLKEnb).  Now: reload x 16 us of wall clock, 16 us = 128 clocks
+            // at 8 MHz, honouring whatever the microcode actually programmed.
+            int p0 = (_pit0Reload > 0 ? _pit0Reload : 3125) * 128;
+            _pit0Accum += clocks;
+            while (_pit0Accum >= p0) { _pit0Accum -= p0; _timerInt = true; TimerFireCount++; }
         }
         private ushort _pitLatch1, _pitLatch2;
         private bool _pitLatched, _pitMsb1, _pitMsb2;
@@ -591,8 +602,23 @@ namespace D.CP
         /// </summary>
         public System.Collections.Generic.List<string> IoWriteLog;
 
+        /// <summary>
+        /// Counter 0's programmed reload, captured from the LSB-then-MSB pair the microcode writes to
+        /// port 0x40 at BootTrap.  Pilot programs 3125 (InitDaybreak.mc says so in as many words:
+        /// "0C35 hex = 3125 decimal counts = 50 milliseconds") against a 16 us input, and NOTHING ever
+        /// reprograms it -- @WRIT is a deliberate no-op ("YETCH. Pilot wants to smash the clock.").
+        /// So a tick the emulator fails to start can never be started by software; it must free-run.
+        /// </summary>
+        private int _pit0Reload, _pit0Latch, _pit0Accum;
+        private bool _pit0Hi;
+
         private void Pit8254Write(ushort v)
         {
+            if (_ioPort == 0x40)
+            {
+                if (!_pit0Hi) { _pit0Latch = v & 0xFF; _pit0Hi = true; }
+                else { _pit0Reload = _pit0Latch | ((v & 0xFF) << 8); _pit0Hi = false; }
+            }
             NoteIo(_ioPort, true, _ioPort == 0x43);
             if (IoWriteLog != null && IoWriteLog.Count < 120)
                 IoWriteLog.Add("0x" + _ioPort.ToString("X2") + "=0x" + (v & 0xFFFF).ToString("X4")
@@ -2824,7 +2850,9 @@ namespace D.CP
             // CP 8254 counter0 (mode-2 rate generator) heartbeat: present a timer-interrupt edge
             // (rInt bit 15) every TimerPeriod instructions.  This is the Pilot scheduler tick the
             // germ's waitForInterrupt idles on; without it MesaIntBr never fires and @666 spins.
-            if (++_timerCounter >= TimerPeriod) { _timerCounter = 0; _timerInt = true; TimerFireCount++; }
+            // Legacy instruction-paced tick: only when CP pacing has been explicitly selected.
+            if (PitFromCpInstructions && ++_timerCounter >= TimerPeriod)
+            { _timerCounter = 0; _timerInt = true; TimerFireCount++; }
             // 8254 channels 1+2: ~12.8 CP instructions per count (62.5 kHz), counting DOWN.
             // The old model advanced the 8254 once per 12.8 CP INSTRUCTIONS, which only yields the
             // 62.5 kHz the guest programs for (3125 counts = 50 ms) if the CP runs at 800 kHz.  Measured
