@@ -80,7 +80,20 @@ namespace D.IOP
             }
             if (address < SramBase + SramSize)
             {
-                return _sram[address - SramBase];
+                byte sv = _sram[address - SramBase];
+                // IOCB WATCH, read side.  Both ROMFlpBt:195 and FloppyRead test
+                //     CMP bootDeviceIORSpace.floppyIOCB.OperationState, OperationCompleted
+                // so the OperationState byte is READ in a retry loop.  Tallying reads per address
+                // names it without needing SIZE(Condition): the byte a retry loop compares will
+                // dominate its window, and it is at floppyIOCB+1 on an EVEN base, hence ODD.
+                if (IocbWatch != null && InIocbWindow(address))
+                {
+                    long[] r = GetIocbRec(address);
+                    r[0]++; r[4] = sv; r[5] = CurrentPC;
+                    if (r[6] == 0) r[6] = HostClock;
+                    r[7] = HostClock;
+                }
+                return sv;
             }
 
             int sys = TranslateMap(address);
@@ -132,6 +145,19 @@ namespace D.IOP
                 // static image (OperationIsQueued=TRUE then OperationState=OperationWaiting=3) and
                 // the question "does any byte here ever become 6?" is then answered by inspection.
                 // Condition words read 0x0000 idle / 0x0001 stored-wakeup / 0x8000|ptr waiter.
+                // IOCB WATCH, write side: per-address tally of the OperationState values, with the
+                // storing PC.  A retry loop re-arming OperationWaiting(3) forever without anything
+                // ever storing OperationCompleted(6) is the shape to look for.
+                if (IocbWatch != null && InIocbWindow(address))
+                {
+                    long[] r = GetIocbRec(address);
+                    r[1]++;
+                    if (value == 3) { r[2]++; r[8] = CurrentPC; }
+                    if (value == 6) { r[3]++; r[9] = CurrentPC; }
+                    r[4] = value; r[5] = CurrentPC;
+                    if (r[6] == 0) r[6] = HostClock;
+                    r[7] = HostClock;
+                }
                 if (BootIorSeq != null && address >= 0x3C00 && address < 0x4000)
                 {
                     System.Collections.Generic.List<byte> sq;
@@ -283,6 +309,37 @@ namespace D.IOP
         public System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<byte>> BootIorSeq;
         /// <summary>BOOTSTRAPIOR writes carrying an OperationState enum value (3..7), in order.</summary>
         public System.Collections.Generic.List<string> BootIorLog;
+
+        /// <summary>
+        /// addr -> {reads, writes, writes-of-3, writes-of-6, lastValue, lastPC, firstClock, lastClock,
+        /// pcWriting3, pcWriting6} over the two candidate floppy-IOCB windows.
+        ///
+        /// There are TWO BOOTSTRAPIOR placements and they are NOT the same address.  ROMSysB2's
+        /// locator controls put the ROM's at 0x03E00; the separately-located downloaded floppy
+        /// bootstrap (FlpyBoot.mp2, MEMORY MAP OF MODULE RAMFLPBT) puts its own at 0x00580-0x006AD,
+        /// with FLOPPYIOR 0x006B0, MAINTPANELIOR 0x007A0, BOOTSTRAPSTK 0x007D0 and the RAMFlpBt code
+        /// itself at IOPEINRAM 0x008F0-0x00EE9.  0x008F0 is exactly where our floppy DMA lands and
+        /// where the ROM then executes, which confirms the download-and-JMP-iopEntry handoff.
+        ///
+        /// Watching both windows distinguishes WHICH retry loop is spinning: ROMFlpBt has its own
+        /// copy of the same test (:195 CMP OperationState, OperationCompleted / :201 MOV
+        /// OperationWaiting / :204 JMP jumpTable.iopEntry), so a spin in the ROM's window means the
+        /// handoff never completed, while a spin in the downloaded window means RAMFlpBt owns it.
+        /// </summary>
+        public System.Collections.Generic.Dictionary<int, long[]> IocbWatch;
+
+        private static bool InIocbWindow(int a)
+        {
+            return (a >= 0x0500 && a < 0x0900)      // downloaded: BOOTSTRAPIOR .. BOOTSTRAPSTK
+                || (a >= 0x3D00 && a < 0x3E80);     // ROM's, plus the 0x3D77 candidate below it
+        }
+
+        private long[] GetIocbRec(int a)
+        {
+            long[] r;
+            if (!IocbWatch.TryGetValue(a, out r)) { r = new long[10]; IocbWatch[a] = r; }
+            return r;
+        }
 
         private static string StateName(byte v)
         {

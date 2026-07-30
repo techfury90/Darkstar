@@ -103,6 +103,7 @@ namespace D.Doovke
                 _machine.Memory.BootIorSeq =
                     new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<byte>>();
                 _machine.Memory.BootIorLog = new System.Collections.Generic.List<string>();
+                _machine.Memory.IocbWatch = new System.Collections.Generic.Dictionary<int, long[]>();
                 // CPU faults, and who polls the umbilical i8255.
                 _machine.Iop.FaultLog = new System.Collections.Generic.List<string>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
@@ -218,6 +219,11 @@ namespace D.Doovke
                             + "  ports " + (_machine.Io.WcsFirstPort < 0 ? "none"
                                 : _machine.Io.WcsFirstPort.ToString("X4") + ".." + _machine.Io.WcsLastPort.ToString("X4"))
                             + "   (a full CP load = 23,574 byte OUTs)"
+                            + System.Environment.NewLine
+                            + "  bank register 0xE000 OUTs=" + _machine.Io.BankRegWrites
+                            + " lastValue=" + (_machine.Io.BankRegLastValue < 0 ? "(never)"
+                                : "0x" + _machine.Io.BankRegLastValue.ToString("X2"))
+                            + "   (WriteCntlStore writes this ONCE, AL=0, before its byte OUTs)"
                             + System.Environment.NewLine;
 
                         // ---- CPU faults ----
@@ -372,6 +378,103 @@ namespace D.Doovke
                         // flppyIOCB.OperationState (flppyIOCB+1), which FloppyRead compares against
                         // OperationCompleted = 6.  Every requested byte can be delivered -- and we have
                         // proven they are, header and all -- without that byte ever being stored.
+                        // ---- 80186 integrated interrupt controller ----
+                        // Vector 0x60 fired 83,631,176 times in one 130-second run, straight into
+                        // IVT[0x60] = FC00:035D, which the IVT dump shows is the ROM's DEFAULT handler
+                        // (the same entry installed for 0x24-0x29, 0x2F, 0x36-0x39, 0x3B, 0x3C, 0x3E,
+                        // 0x3F).  Nothing in DoveIOPIO raises master IR0, so 0x60 is not an external
+                        // 8259 line at all: master IR6 cascades the 80186's OWN controller, and
+                        // AcknowledgeInternal returns (IntVector & 0xF8) | requestBit -- so this is
+                        // internal request bit 0 with the vector base at 0x60.  InternalAckByBit says
+                        // which source, and it was already being counted and never printed.
+                        if (_machine.Io.Pcb != null)
+                        {
+                            var pcb = _machine.Io.Pcb;
+                            cpState += System.Environment.NewLine
+                                + "80186 internal PIC: acks=" + pcb.AckCount + " eois=" + pcb.EoiCount
+                                + " autoEOI=" + pcb.AutoEoi
+                                + "  vecBase=0x" + (pcb.GetRegisterWord(0x20) & 0xF8).ToString("X2")
+                                + "  request=0x" + pcb.InternalRequest.ToString("X4")
+                                + " mask=0x" + pcb.GetRegisterWord(0x28).ToString("X4")
+                                + " inService=0x" + pcb.InternalInService.ToString("X4")
+                                + System.Environment.NewLine + "  acks by request bit:";
+                            for (int i = 0; i < pcb.InternalAckByBit.Length; i++)
+                                if (pcb.InternalAckByBit[i] != 0)
+                                    cpState += " b" + i + "=" + pcb.InternalAckByBit[i];
+                            cpState += System.Environment.NewLine + "  timer maxcount hits by request bit:";
+                            for (int i = 0; i < pcb.TimerFireByReq.Length; i++)
+                                if (pcb.TimerFireByReq[i] != 0)
+                                    cpState += " b" + i + "=" + pcb.TimerFireByReq[i];
+                            cpState += System.Environment.NewLine
+                                + "  T0 cnt=" + pcb.GetRegisterWord(0x50).ToString("X4")
+                                + " maxA=" + pcb.GetRegisterWord(0x52).ToString("X4")
+                                + " maxB=" + pcb.GetRegisterWord(0x54).ToString("X4")
+                                + " ctl=" + pcb.GetRegisterWord(0x56).ToString("X4")
+                                + " | T1 cnt=" + pcb.GetRegisterWord(0x58).ToString("X4")
+                                + " maxA=" + pcb.GetRegisterWord(0x5A).ToString("X4")
+                                + " ctl=" + pcb.GetRegisterWord(0x5E).ToString("X4")
+                                + " | T2 cnt=" + pcb.GetRegisterWord(0x60).ToString("X4")
+                                + " maxA=" + pcb.GetRegisterWord(0x62).ToString("X4")
+                                + " ctl=" + pcb.GetRegisterWord(0x66).ToString("X4")
+                                + System.Environment.NewLine;
+                        }
+
+                        // ---- floppy IOCB: which OperationState byte, and does it ever reach 6? ----
+                        var iw = _machine.Memory.IocbWatch;
+                        if (iw != null)
+                        {
+                            byte[] sr = _machine.Memory.SramRaw;
+                            cpState += System.Environment.NewLine
+                                + "FLOPPY IOCB WATCH  (downloaded BOOTSTRAPIOR 0x00580-0x006AD, ROM's 0x03E00;"
+                                + " OperationState = floppyIOCB+1, EVEN base so ODD address)"
+                                + System.Environment.NewLine;
+
+                            // Candidates by the static image's own signature: even address holding
+                            // MesaTRUE then OperationWaiting(3), per RAMFlpBt's initialRec.
+                            if (sr != null)
+                            {
+                                cpState += "  even-aligned (MesaTRUE,03) signature scan:";
+                                int hits = 0;
+                                for (int a = 0x0500; a < 0x3E80; a += 2)
+                                {
+                                    if (!(a < 0x0900 || a >= 0x3D00)) continue;
+                                    if (a + 1 >= sr.Length) break;
+                                    if ((sr[a] == 0x01 || sr[a] == 0xFF) && sr[a + 1] == 0x03)
+                                    { cpState += " 0x" + a.ToString("X4"); hits++; }
+                                }
+                                cpState += hits == 0 ? " (none -- no IOCB left in Waiting)" : "";
+                                cpState += System.Environment.NewLine;
+                            }
+
+                            // Busiest addresses in the windows.  A retry loop's CMP dominates reads.
+                            var ik = new System.Collections.Generic.List<int>(iw.Keys);
+                            ik.Sort(delegate (int a, int b)
+                            { return (iw[b][0] + iw[b][1]).CompareTo(iw[a][0] + iw[a][1]); });
+                            cpState += "  busiest bytes (reads/writes, w3=stores of Waiting, w6=stores of Completed):"
+                                     + System.Environment.NewLine;
+                            for (int i = 0; i < ik.Count && i < 14; i++)
+                            {
+                                long[] r = iw[ik[i]];
+                                cpState += "    0x" + ik[i].ToString("X4")
+                                    + (((ik[i]) & 1) != 0 ? " [odd]" : "      ")
+                                    + " reads=" + r[0] + " writes=" + r[1]
+                                    + " w3=" + r[2] + " w6=" + r[3]
+                                    + " last=0x" + r[4].ToString("X2")
+                                    + " lastPC=" + r[5].ToString("X5");
+                                if (r[2] > 0) cpState += " pcW3=" + r[8].ToString("X5");
+                                if (r[3] > 0) cpState += " pcW6=" + r[9].ToString("X5");
+                                cpState += "  IOP " + r[6] + ".." + r[7] + System.Environment.NewLine;
+                            }
+                            // The headline: anything re-armed to Waiting but never Completed.
+                            cpState += "  re-armed to Waiting(3) but NEVER Completed(6):";
+                            int stuck = 0;
+                            foreach (System.Collections.Generic.KeyValuePair<int, long[]> kv in iw)
+                                if (kv.Value[2] > 0 && kv.Value[3] == 0)
+                                { cpState += " 0x" + kv.Key.ToString("X4") + "(x" + kv.Value[2] + ")"; stuck++; }
+                            cpState += stuck == 0 ? " (none)" : "";
+                            cpState += System.Environment.NewLine;
+                        }
+
                         var bseq = _machine.Memory.BootIorSeq;
                         if (bseq != null)
                         {

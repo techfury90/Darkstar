@@ -642,6 +642,14 @@ namespace D.IOP
             }
             if (port == DaybreakBankReg)
             {
+                // DybrkCP.asm WriteCntlStore opens with exactly one OUT here (AL=0x00) before its
+                // 23,574 byte OUTs into 0x8000-0xDFFF.  So this counter separates "the block loader
+                // was never entered" from "it was entered and its inner loop did not run" -- a
+                // distinction WcsByteWrites=0 alone cannot make, and one the hottest-ports report
+                // cannot show either, since a full load spreads its OUTs over 3,929 ports at ~6
+                // each and never reaches the top of the histogram.
+                BankRegWrites++;
+                BankRegLastValue = value;
                 _controlStore.SelectBank(value);
                 return;
             }
@@ -974,6 +982,12 @@ namespace D.IOP
         private readonly I93C46 _configEeprom;
         private readonly byte[] _hostProm = new byte[8];
         private I80186Pcb _pcb;
+        /// <summary>The 80186's integrated peripheral block, for state reporting.</summary>
+        public I80186Pcb Pcb { get { return _pcb; } }
+
+        /// <summary>OUTs to the CP control-store bank register (0xE000) -- WriteCntlStore's entry.</summary>
+        public long BankRegWrites;
+        public int BankRegLastValue = -1;
 
         // ---- Rigid Disk Controller (RDC): 8x305 command/status @ 0x0214 + AM2942 DMA/FIFO @ 0x0200-0x0216 ----
         // Behavioral 8X305 + AM2942 in DoveDiskController over a Micropolis-1325 backing store.  The DOB
