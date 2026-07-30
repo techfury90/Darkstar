@@ -490,8 +490,21 @@ namespace D.CP
         /// not be the default.  DOVE_PIT_IOPCLK=1 selects IOP-clock pacing; DOVE_PIT_DIV=&lt;n&gt; sets the
         /// divisor for whichever domain is active, so a documented rate needs no rebuild.
         /// </summary>
+        // ★DEFAULT IS NOW WALL-CLOCK, NOT CP INSTRUCTIONS.  Invariant T1 of the Daybreak timing
+        // audit: the MPB interval timers take a 16 us input clock (TR2 2.5.2.4 verbatim) = RawCLKB/256
+        // = 16 MHz / 256 = 62.5 kHz, and "RawCLKB is not gated by CLKEnb" -- the 8254 keeps counting
+        // while the CP is stalled on B/Rdy, halted via MBCHalt', or stopped at a Burdock breakpoint.
+        // Timer time is WALL time, never CP-instruction time, and the audit names tying ticks to
+        // instruction count as causing interval-timer drift and MP 0930-class clock starvation.
+        //
+        // Physically this is the MPB's own 32 MHz crystal (a separate oscillator from the IOP's -- the
+        // machine has five, none phase-locked), but the FREQUENCY is what we have to reproduce, and
+        // ElapsedClocks is an 8 MHz wall clock, so /128 gives exactly 62,500 Hz.  Cross-checked by the
+        // guest itself: counter 0 = 3125 x 16 us = 50.000 ms.
+        //
+        // DOVE_PIT_CPINSTR=1 restores CP-instruction pacing for A/B.
         public bool PitFromCpInstructions =
-            string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("DOVE_PIT_IOPCLK"));
+            !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("DOVE_PIT_CPINSTR"));
 
         /// <summary>Divisor for the active PIT domain.  Default 128 for IOP clocks; for CP pacing the
         /// legacy accumulator is used unless this is set, in which case it is CP instructions/count.</summary>

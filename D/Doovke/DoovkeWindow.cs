@@ -43,7 +43,9 @@ namespace D.Doovke
         private Thread _machineThread;
         private volatile bool _machineRunning;
         private volatile bool _paused;
-        private const int BatchSteps = 50000;   // steps per lock acquisition
+        /// <summary>Milliseconds the machine thread may hold _machineLock before yielding to the UI.</summary>
+        private const int MachineBatchMs = 4;
+        private readonly System.Diagnostics.Stopwatch _batchTimer = System.Diagnostics.Stopwatch.StartNew();
 
         private readonly System.Windows.Forms.Timer _refreshTimer;
         private readonly StatusStrip _statusStrip;
@@ -1239,9 +1241,24 @@ namespace D.Doovke
                 if (_paused) { Thread.Sleep(20); continue; }
                 try
                 {
+                    // ★TIME-BOUNDED, NOT COUNT-BOUNDED.  The UI thread needs _machineLock to render and
+                    // to poll the mouse, so whatever this loop holds it for is the UI's worst-case
+                    // latency.  Bounding by a fixed 50,000 STEPS made that latency a function of how
+                    // fast the emulator happens to be: any change that makes Step heavier -- correcting
+                    // the 80186 cycle costs, coupling the CP 1:1 to the IOP clock, enabling tracing --
+                    // stretches the hold and the window stops responding to keys and menus.  That is a
+                    // long-standing intermittent the operator has hit before, not a new regression.
+                    //
+                    // Bounding by TIME keeps the hold constant no matter what a Step costs.  The check
+                    // is amortised over a small step run so the Stopwatch read is not itself the cost.
+                    long deadline = _batchTimer.ElapsedMilliseconds + MachineBatchMs;
                     lock (_machineLock)
                     {
-                        for (int i = 0; i < BatchSteps && _machineRunning && !_paused; i++) _machine.Step();
+                        while (_machineRunning && !_paused)
+                        {
+                            for (int i = 0; i < 512 && _machineRunning && !_paused; i++) _machine.Step();
+                            if (_batchTimer.ElapsedMilliseconds >= deadline) break;
+                        }
                     }
                 }
                 catch (Exception e)

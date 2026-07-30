@@ -29,8 +29,29 @@ namespace D.Doovke
         private readonly byte[] _sysRam;
         private readonly int _ramMask;
 
-        /// <summary>CP microinstructions executed per IOP instruction.</summary>
-        private const int CpStepsPerIopInstruction = 4;
+        /// <summary>
+        /// ★The CP runs ONE MICROINSTRUCTION PER IOP CLOCK, because both are 125 ns.
+        ///
+        /// CP: 32 MHz MPB crystal, 125 ns cycle = one microinstruction (TR2 2.2.2 verbatim: "Each
+        /// microinstruction is decoded and executed in 125 nanoseconds, or one cycle"), 375 ns click,
+        /// 1.875 us round => 8.00 M microinstructions/s.
+        /// IOP: 16 MHz crystal / 2 = 8 MHz CLKOUT, T-state 125 ns (IOP-TR 2.1, 4.1).
+        ///
+        /// So CP cycles and IOP T-states are the same 125 ns and the correct coupling is 1:1 against
+        /// ElapsedClocks -- not a fixed count per IOP *instruction*.  A constant 4 was 0.58 steps per
+        /// clock once the 80186 cost model was corrected to ~6.4 clocks/instruction, leaving the CP at
+        /// 4.64 M/s against its documented 8.00 M/s.  Stepping by the instruction's own clock count
+        /// makes the CP exactly 8 MHz and keeps it locked to the same wall clock as the display and the
+        /// 8254, which is what having five unsynchronised oscillators actually looks like from software.
+        ///
+        /// DOVE_CP_STEPS=&lt;n&gt; pins a fixed count instead, for A/B.
+        /// </summary>
+        private static readonly int CpStepsFixed = ParseCpSteps();
+        private static int ParseCpSteps()
+        {
+            int v;
+            return int.TryParse(Environment.GetEnvironmentVariable("DOVE_CP_STEPS"), out v) && v > 0 ? v : 0;
+        }
 
         public DoveIOPMemory Memory { get { return _mem; } }
         public DoveIOPIO Io { get { return _io; } }
@@ -271,7 +292,15 @@ namespace D.Doovke
                 _pendingImage = null;
             }
             // Execute() no-ops while the CP is halted, so this is safe before the IOP starts it.
-            _cp.Execute(CpStepsPerIopInstruction);
+            // REVERTED TO A FIXED 4 (2026-07-30).  Coupling the CP 1:1 to the IOP clock is what the
+            // documented 125 ns cycle / 125 ns T-state implies, but stepping by the instruction's own
+            // clock count raised CP work per IOP instruction from 4 to ~6.4 and the emulator became
+            // unresponsive -- the operator lost keyboard and UI.  The run loop executes a fixed batch of
+            // Step() calls between UI pumps, so a 60% heavier Step lengthens every batch by the same
+            // amount.  Correct-but-unusable is not an improvement, and this needs the batch size made
+            // adaptive (or the CP stepped on its own budget) before it can be turned on.
+            // DOVE_CP_STEPS=<n> still pins a count; DOVE_CP_STEPS=0 is not "auto" any more.
+            _cp.Execute(CpStepsFixed > 0 ? CpStepsFixed : 4);
             IopInstructions++;
         }
 
