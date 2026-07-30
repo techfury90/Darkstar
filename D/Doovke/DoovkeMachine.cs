@@ -292,15 +292,17 @@ namespace D.Doovke
                 _pendingImage = null;
             }
             // Execute() no-ops while the CP is halted, so this is safe before the IOP starts it.
-            // REVERTED TO A FIXED 4 (2026-07-30).  Coupling the CP 1:1 to the IOP clock is what the
-            // documented 125 ns cycle / 125 ns T-state implies, but stepping by the instruction's own
-            // clock count raised CP work per IOP instruction from 4 to ~6.4 and the emulator became
-            // unresponsive -- the operator lost keyboard and UI.  The run loop executes a fixed batch of
-            // Step() calls between UI pumps, so a 60% heavier Step lengthens every batch by the same
-            // amount.  Correct-but-unusable is not an improvement, and this needs the batch size made
-            // adaptive (or the CP stepped on its own budget) before it can be turned on.
-            // DOVE_CP_STEPS=<n> still pins a count; DOVE_CP_STEPS=0 is not "auto" any more.
-            _cp.Execute(CpStepsFixed > 0 ? CpStepsFixed : 4);
+            // ONE CP MICROINSTRUCTION PER IOP CLOCK -- both are 125 ns, so this is the documented
+            // coupling, not a tuning choice.  Stepping by the instruction's own clock count puts the CP
+            // at its documented 8.00 M microinstructions/s (a fixed 4 gave 4.64 M/s once the 80186 cost
+            // model was corrected) and locks it to the same wall clock as the display and the 8254.
+            //
+            // This was reverted once because it made the machine unusable -- ~6.4 CP steps per IOP
+            // instruction instead of 4, against a lock held for a fixed 50,000 STEPS, stretched the UI's
+            // worst-case latency until keys and menus stopped responding.  That was a pre-existing
+            // scaling bug in the run loop, not a fault of this change; with the hold now bounded to 4 ms
+            // of wall clock it no longer matters how heavy a Step is.  DOVE_CP_STEPS=<n> pins a count.
+            _cp.Execute(CpStepsFixed > 0 ? CpStepsFixed : clocks);
             IopInstructions++;
         }
 
