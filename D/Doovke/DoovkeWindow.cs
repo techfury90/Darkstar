@@ -106,6 +106,7 @@ namespace D.Doovke
                 _machine.Memory.IocbWatch = new System.Collections.Generic.Dictionary<int, long[]>();
                 // CPU faults, and who polls the umbilical i8255.
                 _machine.Iop.FaultLog = new System.Collections.Generic.List<string>();
+                _machine.Iop.ForwardTrace = new System.Collections.Generic.List<int>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
                 _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
@@ -270,6 +271,19 @@ namespace D.Doovke
                             }
                             if (bk.Count == 0) cpState += " (no reads in 5400..6119)";
                             cpState += System.Environment.NewLine;
+                        }
+                        var ft = _machine.Iop.ForwardTrace;
+                        if (ft != null)
+                        {
+                            cpState += "  AFTER the type word read (armed at file offset 8601):"
+                                     + System.Environment.NewLine
+                                     + "    prelude (into the stop):" + (_machine.Iop.ForwardTracePrelude ?? "(never armed)")
+                                     + System.Environment.NewLine
+                                     + "    forward " + ft.Count + " instrs, first 40 raw:";
+                            for (int i = 0; i < ft.Count && i < 40; i++)
+                                cpState += " " + ft[i].ToString("X5");
+                            cpState += System.Environment.NewLine + "    runs:"
+                                     + D.IOP.i80186.RunsOf(ft, 60) + System.Environment.NewLine;
                         }
                         var fdl = _machine.Io.FdcDestLog;
                         if (fdl != null)

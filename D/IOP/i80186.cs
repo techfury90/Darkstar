@@ -250,6 +250,8 @@ namespace D.IOP
             _curInstrStart = InstructionAddress;
             _pcRing[_pcRingPos] = _curInstrStart;
             _pcRingPos = (_pcRingPos + 1) & (PcRingSize - 1);
+            if (ForwardTraceArmed && ForwardTrace != null && ForwardTrace.Count < 4000)
+                ForwardTrace.Add(_curInstrStart);
 
             while (true)
             {
@@ -1106,6 +1108,42 @@ namespace D.IOP
         /// Logging the faulting instruction's own bytes names the opcode outright.
         /// </summary>
         public System.Collections.Generic.List<string> FaultLog;
+
+        /// <summary>
+        /// Instruction addresses recorded from the moment ForwardTraceArmed goes true.  Used to see
+        /// what the .db walk does immediately after reading the CP WriteData BlockType word, without
+        /// needing any guest symbol address: a CALL DWORD PTR through a null or stale far pointer
+        /// shows up as a transfer to somewhere that is not the loader's code range.
+        /// </summary>
+        public System.Collections.Generic.List<int> ForwardTrace;
+        public bool ForwardTraceArmed;
+        /// <summary>The instruction trail leading INTO the arming point, captured once.</summary>
+        public string ForwardTracePrelude;
+
+        /// <summary>Compress an address list into straight-line runs, as RecentPcRuns does.</summary>
+        public static string RunsOf(System.Collections.Generic.List<int> pcs, int max)
+        {
+            var sb = new System.Text.StringBuilder();
+            int runStart = -1, prev = -1, runLen = 0, emitted = 0;
+            for (int i = 0; i < pcs.Count; i++)
+            {
+                int pc = pcs[i];
+                bool contiguous = prev >= 0 && pc > prev && pc - prev <= 16;
+                if (!contiguous)
+                {
+                    if (runStart >= 0 && ++emitted <= max)
+                        sb.Append(' ').Append(runStart.ToString("X5")).Append("..").Append(prev.ToString("X5"))
+                          .Append('(').Append(runLen).Append(')');
+                    runStart = pc; runLen = 1;
+                }
+                else runLen++;
+                prev = pc;
+            }
+            if (runStart >= 0 && emitted < max)
+                sb.Append(' ').Append(runStart.ToString("X5")).Append("..").Append(prev.ToString("X5"))
+                  .Append('(').Append(runLen).Append(')');
+            return sb.ToString();
+        }
 
         private void ServiceInterrupt(int vector)
         {

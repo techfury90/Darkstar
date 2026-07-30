@@ -96,6 +96,11 @@ namespace D.IOP
                     int fo = BufFileBase + (address - BufBase);
                     if (fo > MaxFileOffsetRead) MaxFileOffsetRead = fo;
                     BufReadTotal++;
+                    // The loader's last byte: the low half of the CP WriteData BlockType word at
+                    // file offset 8600-8601.  Arm a forward instruction trace here -- whatever
+                    // ProcessCPBlock does with 0xD000 happens in the next few hundred instructions,
+                    // and this needs no guest symbol addresses to find it.
+                    if (fo == 8601) CursorStopHit = true;
                     if (fo >= 8400 && fo < 8720)
                     {
                         long[] rec;
@@ -357,6 +362,8 @@ namespace D.IOP
         /// <summary>Highest boot-file offset the loader ever read, and total buffer reads.</summary>
         public int MaxFileOffsetRead = -1;
         public long BufReadTotal;
+        /// <summary>Set once the loader reads boot-file offset 8601 -- its very last read.</summary>
+        public bool CursorStopHit;
 
         private static bool InIocbWindow(int a)
         {

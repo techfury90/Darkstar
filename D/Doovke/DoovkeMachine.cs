@@ -219,6 +219,14 @@ namespace D.Doovke
             _io.CurrentPC = _iop.InstructionAddress;
             _io.RdcHostClock = IopInstructions;
 
+            // Arm the forward trace the instant the .db walk reads its last byte (the low half of
+            // the CP WriteData BlockType word at boot-file offset 8601).
+            if (_mem.CursorStopHit && !_iop.ForwardTraceArmed && _iop.ForwardTrace != null)
+            {
+                _iop.ForwardTracePrelude = _iop.RecentPcs(40);
+                _iop.ForwardTraceArmed = true;
+            }
+
             int clocks = _iop.Execute();
             _io.Tick(clocks);
             ElapsedClocks += clocks;
