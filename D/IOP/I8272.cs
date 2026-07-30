@@ -273,6 +273,26 @@ namespace D.IOP
         /// <summary>Bytes the guest's DMA actually consumed, cumulative.</summary>
         public long TotalDmaSent;
 
+        /// <summary>Trace capacity, and the entry the current read owns (-1 once full).</summary>
+        public int ReadTraceMax = 8000;
+        private int _traceIdx = -1;
+
+        /// <summary>
+        /// DOVE_ST3_MEDIA=1 restores the ORIGINAL ST3 behaviour: Ready gated on media presence.
+        ///
+        /// The current default (Ready always asserted) rests on the operator's hardware reasoning --
+        /// RDY is not wired to the drives, the controller senses INDEX instead -- prompted by a
+        /// measurement showing 1152 of 1237 FDC commands were Sense Drive Status cycling units
+        /// 3,2,1,0 forever.  ★That measurement was taken with the 1108 EIGHT-INCH media mounted, i.e.
+        /// while the disk was unreadable to a 5.25-inch machine, so the spin it was meant to explain
+        /// may have been an artefact of the wrong disk rather than of a gated Ready bit.  What the
+        /// default costs is a lie to the guest: with no diskette in units 1-3 we still report rdy=1
+        /// for them, and a multi-disk installer probing for loaded drives can act on that.  This flag
+        /// exists so the question can be A/B'd on CORRECT media rather than assumed either way.
+        /// </summary>
+        public bool St3ReadyNeedsMedia =
+            !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("DOVE_ST3_MEDIA"));
+
         public long CommandCount;
         public long ReadCount;
         /// <summary>Last Read's cyl/head/sector, for trajectory tracing.</summary>
@@ -479,9 +499,18 @@ namespace D.IOP
             // (opcode 0xC6) and, if under-delivered, its DMA count never drains.
             bool mt = (_cmd[0] & 0x80) != 0;
             if (mt) GatherSectors(d, c, head ^ 1, 1, eot, buf);
-            if (ReadTrace != null && ReadTrace.Count < 600)
+            // _traceIdx = the entry THIS read owns, or -1 when the trace is full.  Without it the
+            // "sent=" append below writes to ReadTrace[Count-1] regardless, so once the cap is hit
+            // every later read appends to the last surviving entry -- which produced a line ending in
+            // seventy repetitions of " sent=512B" and, worse, silently hid the reads nearest the
+            // failure behind a line that looked like the last read.
+            _traceIdx = -1;
+            if (ReadTrace != null && ReadTrace.Count < ReadTraceMax)
+            {
+                _traceIdx = ReadTrace.Count;
                 ReadTrace.Add("Read#" + CommandCount + " C=" + c + " H=" + head + " R=" + r + " EOT=" + eot + " N=" + n
                     + " MT=" + (mt ? 1 : 0) + " -> ok gathered=" + buf.Count + "B");
+            }
             _execData = buf.ToArray();
             _execIdx = 0;
             _phase = Phase.Execution;
@@ -537,8 +566,8 @@ namespace D.IOP
                             sb.Append("  <<< length word 0F59 at +" + k);
                     SectorHeads.Add(sb.ToString());
                 }
-                if (ReadTrace != null && ReadTrace.Count > 0)
-                    ReadTrace[ReadTrace.Count - 1] += " sent=" + _dmaSent + "B";
+                if (ReadTrace != null && _traceIdx >= 0 && _traceIdx < ReadTrace.Count)
+                    ReadTrace[_traceIdx] += " sent=" + _dmaSent + "B";
 
                 FinishExecution();
             }
@@ -616,7 +645,7 @@ namespace D.IOP
         {
             int s = (head << 2) | unit;
             FloppyDisk d = Drives[unit];
-            s |= 0x20;                        // Ready: RDY not wired, reads always asserted
+            if (!St3ReadyNeedsMedia || d != null) s |= 0x20;   // Ready (see St3ReadyNeedsMedia)
             s |= 0x08;                        // TwoSided
             if (_presentCyl == 0) s |= 0x10;  // Track0
             if (d != null && d.IsWriteProtected) s |= 0x40;
