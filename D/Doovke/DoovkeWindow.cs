@@ -108,6 +108,8 @@ namespace D.Doovke
                 _machine.Iop.FaultLog = new System.Collections.Generic.List<string>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
+                _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
+                _machine.Memory.BufReadHist = new System.Collections.Generic.Dictionary<int, long[]>();
             }
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
@@ -242,6 +244,41 @@ namespace D.Doovke
                                          + System.Environment.NewLine;
                             foreach (string fl in flog) cpState += "  " + fl + System.Environment.NewLine;
                         }
+                        // ---- does the .db walk survive the CP Start block? ----
+                        var brh = _machine.Memory.BufReadHist;
+                        if (brh != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "BOOT-FILE CURSOR: buffer reads=" + _machine.Memory.BufReadTotal
+                                + "  highest file offset read=" + _machine.Memory.MaxFileOffsetRead
+                                + System.Environment.NewLine
+                                + "  file map: 0xB800 CP Start at 5458, 0xD000 CP WriteData at 6040."
+                                + "  A 2-byte over-consume in CallDumpCSAddrBlock (CX=5, the Daisy"
+                                + " two-address skip, vs 3 for Daybreak's one) puts the next type read at 6042."
+                                + System.Environment.NewLine;
+                            var bk = new System.Collections.Generic.List<int>(brh.Keys);
+                            bk.Sort();
+                            cpState += "  reads by file offset (offset=value xN):" + System.Environment.NewLine + "   ";
+                            int col = 0;
+                            foreach (int fo in bk)
+                            {
+                                long[] r = brh[fo];
+                                string tag = fo == 8600 ? "<TYPE-hi>" : fo == 8601 ? "<TYPE-lo>"
+                                           : fo == 8602 ? "<BODY>" : "";
+                                cpState += " " + fo + "=" + r[1].ToString("X2") + "x" + r[0] + tag;
+                                if (++col % 8 == 0) cpState += System.Environment.NewLine + "   ";
+                            }
+                            if (bk.Count == 0) cpState += " (no reads in 5400..6119)";
+                            cpState += System.Environment.NewLine;
+                        }
+                        var fdl = _machine.Io.FdcDestLog;
+                        if (fdl != null)
+                        {
+                            cpState += "floppy DMA dests / file offsets (" + fdl.Count + "):"
+                                     + System.Environment.NewLine;
+                            foreach (string s2 in fdl) cpState += "  " + s2 + System.Environment.NewLine;
+                        }
+
                         var dmal = _machine.Io.DmaLog;
                         if (dmal != null)
                         {

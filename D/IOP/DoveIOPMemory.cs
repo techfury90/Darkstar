@@ -81,6 +81,28 @@ namespace D.IOP
             if (address < SramBase + SramSize)
             {
                 byte sv = _sram[address - SramBase];
+                // BOOT-FILE CURSOR.  The .db walk advances SI through the streaming buffer via
+                // IncSIFarProc, so mapping buffer reads back to file offsets shows the cursor
+                // directly.  The question this answers: does the walk survive the CP Start block at
+                // file offset 5458?  CallDumpCSAddrBlock skips a hard-coded CX=5 bytes (1 type byte +
+                // 4 = two cpAddr words, the DAISY layout).  A Daybreak Start block carries ONE start
+                // address, so the correct skip is 3 -- and a 2-byte over-consume would leave every
+                // later BlockType misread, classifying as Special(3) and exiting the file silently
+                // with no error and no WriteCntlStore call.  If so the loader reads a type at 6042
+                // rather than the real WriteData header at 6040.
+                if (BufReadHist != null && BufLen > 0
+                    && address >= BufBase && address < BufBase + BufLen)
+                {
+                    int fo = BufFileBase + (address - BufBase);
+                    if (fo > MaxFileOffsetRead) MaxFileOffsetRead = fo;
+                    BufReadTotal++;
+                    if (fo >= 8400 && fo < 8720)
+                    {
+                        long[] rec;
+                        if (!BufReadHist.TryGetValue(fo, out rec)) { rec = new long[3]; BufReadHist[fo] = rec; }
+                        rec[0]++; rec[1] = sv; rec[2] = CurrentPC;
+                    }
+                }
                 // IOCB WATCH, read side.  Both ROMFlpBt:195 and FloppyRead test
                 //     CMP bootDeviceIORSpace.floppyIOCB.OperationState, OperationCompleted
                 // so the OperationState byte is READ in a retry loop.  Tallying reads per address
@@ -327,6 +349,14 @@ namespace D.IOP
         /// handoff never completed, while a spin in the downloaded window means RAMFlpBt owns it.
         /// </summary>
         public System.Collections.Generic.Dictionary<int, long[]> IocbWatch;
+
+        /// <summary>Current floppy DMA target, set per transfer, used to map buffer reads to file offsets.</summary>
+        public int BufBase, BufLen, BufFileBase;
+        /// <summary>boot-file offset -> {reads, lastValue, lastPC} for offsets near the two CP block headers.</summary>
+        public System.Collections.Generic.Dictionary<int, long[]> BufReadHist;
+        /// <summary>Highest boot-file offset the loader ever read, and total buffer reads.</summary>
+        public int MaxFileOffsetRead = -1;
+        public long BufReadTotal;
 
         private static bool InIocbWindow(int a)
         {

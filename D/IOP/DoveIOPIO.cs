@@ -90,6 +90,20 @@ namespace D.IOP
                 // reported success, and the ROM executed an unfilled buffer.  Unlike the RDC path this
                 // one goes through _memory.WriteByte, so addresses below 0x4000 do reach the IOP-local
                 // SRAM -- but that only matters if `dest` points where the ROM expects.
+                // Map this transfer into BOOT-FILE offset space so the loader's cursor can be read
+                // directly.  The loader sees one byte stream regardless of where the pages physically
+                // live (the boot file is scattered by the Pilot file system -- reads run C=5..C=39, not
+                // contiguously), so the only sound cursor is cumulative bytes delivered.  Confirmed
+                // independently: the CP WriteData header landed at +408 of the 12th delivered sector,
+                // and 11*512 + 408 = 6040, which is exactly its offset in the archive's file map.
+                _memory.BufBase = dest;
+                _memory.BufLen = n;
+                _memory.BufFileBase = _fdcFileBase;
+                _fdcFileBase += n;
+                if (FdcDestLog != null && FdcDestLog.Count < 80)
+                    FdcDestLog.Add("#" + FdcDestLog.Count + " dest=0x" + dest.ToString("X5")
+                        + " len=" + n + " fileOffset=" + _memory.BufFileBase
+                        + ".." + (_memory.BufFileBase + n - 1));
                 if (DmaLog != null && DmaLog.Count < 200)
                     DmaLog.Add("FDC DMA -> dest=0x" + dest.ToString("X5")
                         + " count=" + count + " wrote=" + n + "B"
@@ -988,6 +1002,10 @@ namespace D.IOP
         /// <summary>OUTs to the CP control-store bank register (0xE000) -- WriteCntlStore's entry.</summary>
         public long BankRegWrites;
         public int BankRegLastValue = -1;
+
+        /// <summary>Every floppy DMA transfer as dest + boot-file offset range.</summary>
+        public System.Collections.Generic.List<string> FdcDestLog;
+        private int _fdcFileBase;
 
         // ---- Rigid Disk Controller (RDC): 8x305 command/status @ 0x0214 + AM2942 DMA/FIFO @ 0x0200-0x0216 ----
         // Behavioral 8X305 + AM2942 in DoveDiskController over a Micropolis-1325 backing store.  The DOB
