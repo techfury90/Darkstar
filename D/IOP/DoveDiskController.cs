@@ -652,8 +652,18 @@ namespace D.IOP
             return v;
         }
 
+        /// <summary>
+        /// Rigid-disk commands issued, as a STATIC so the CP side can read it without plumbing.
+        /// The RDC log timestamps in IOP instructions and the MP posts in CP instructions, so the
+        /// operator's observation -- "RDC ops go brrrr right before 0935" -- could not be checked
+        /// against anything.  Sampling this counter INTO each MP post puts both on one axis.
+        /// </summary>
+        public static long OpCount;
+
         public void WriteReg(ushort port, ushort value)
         {
+            if (port == 0x0214 && (value & 3) == 0) OpCount++;   // command byte 0 = a new command
+
             if (Log != null && Log.Count < 800)
                 Log.Add("W  0x" + port.ToString("X4") + " <- 0x" + value.ToString("X4") + " @IOP" + HostClock
                     + (port == 0x0214 ? "  (cmd cc=" + (value & 3) + ")" : ""));

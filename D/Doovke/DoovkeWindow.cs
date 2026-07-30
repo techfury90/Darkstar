@@ -143,11 +143,25 @@ namespace D.Doovke
                     _lastSprite = hex;
                     string line = "CPi=" + _machine.Cp.InstructionCount + " " + hex;
                     _mpTrace.Add(line);
-                    // FREEZE-ON-MP-POST.  The panel just changed, and we are standing on the very
-                    // instruction that drew it, so the CP's macro-dispatch ring still holds the code
-                    // that led here.  Only the last few snapshots survive, so whatever the machine
-                    // finally displays is the one left in the dump.
-                    _machine.Cp.CaptureMacroRing("panel-change");
+                    // FREEZE ON THE SPRITE, NOT ON A POSTED VALUE.  The sprite is ground truth --
+                    // the ROM draws the displayed digits into ED00-ED1F -- whereas the value I was
+                    // reading at the @WRMP dispatch (_alu.R[0]) is NOT the MP code: cross-checking by
+                    // CPi, it read 940 as 18984, 970 as 2, 990 as 2, and 935 as "938 then 990".  It
+                    // invented an MP 938 that never existed.
+                    //
+                    // A code change arrives as a BURST of ~30 sprite writes within ~112 instructions
+                    // (the ROM drawing four digits), so a real transition is the first write after a
+                    // long quiet gap.  Snapshot on those, and freeze on the transition whose preceding
+                    // hold was enormous -- uniquely the 990 -> 935 one, which held 605,491,048
+                    // instructions.  That is the fault, and everything after it is the report loop.
+                    long nowCpi = _machine.Cp.InstructionCount;
+                    long quiet = nowCpi - _lastSpriteCpi;
+                    _lastSpriteCpi = nowCpi;
+                    if (quiet > 1000000)
+                    {
+                        _machine.Cp.CaptureMacroRing("panel-change after " + quiet + " quiet");
+                        if (quiet > 100000000) _machine.Cp.DiagFrozen = true;
+                    }
                     // Append as we go, not only on close.  Waiting for shutdown meant the only way
                     // to learn whether the machine was alive was to kill it -- and a 7x00 phase can
                     // run 642 MILLION instructions with no disk I/O and a frozen cursor, which is
@@ -816,6 +830,7 @@ namespace D.Doovke
 
         private System.Collections.Generic.List<string> _mpTrace;
         private string _lastSprite;
+        private long _lastSpriteCpi;
         private string _mpTracePath;
 
         private const int AutoSaveIntervalMs = 120000;   // 2 minutes

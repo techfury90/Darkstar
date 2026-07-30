@@ -2166,8 +2166,9 @@ namespace D.CP
                                     {
                                         WrmpCount++;
                                         if (WrmpPosts.Count >= 400) WrmpPosts.RemoveRange(0, 200);
-                                        WrmpPosts.Add("#" + WrmpCount + " MP<-" + _alu.R[0].ToString("X4")
-                                            + " (dec " + _alu.R[0] + ") sp=" + _stackP + " @CPi" + InstructionCount);
+                                        WrmpPosts.Add("#" + WrmpCount + " R0(NOT the MP code)=" + _alu.R[0].ToString("X4")
+                                            + " (dec " + _alu.R[0] + ") sp=" + _stackP + " @CPi" + InstructionCount
+                                            + " rdcOps=" + D.IOP.DoveDiskController.OpCount);
                                         // ★Snapshot the macro ring the FIRST time each value is posted.
                                         // The panel-change trigger was useless for this: the panel is
                                         // drawn hundreds of dispatches after the fact and then re-drawn
@@ -2183,7 +2184,8 @@ namespace D.CP
                                             // 935 = cCantTeledebug: the fault has happened and everything
                                             // after this is the report loop.  Freeze, so the logs keep the
                                             // fault window instead of a few billion instructions of dwell.
-                                            if (_alu.R[0] == 935) DiagFrozen = true;
+                                            // NOT a freeze trigger any more: this value is R0 at the
+                                            // dispatch, which is not the MP code (see DoovkeWindow).
                                         }
                                     }
                                 }
