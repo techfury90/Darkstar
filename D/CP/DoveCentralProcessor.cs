@@ -87,7 +87,7 @@ namespace D.CP
         public void EnableMemRing() { _memRing = new int[MemRingSize * 3]; }
         private void NoteMem(bool write, int val)
         {
-            if (_memRing == null) return;
+            if (_memRing == null || DiagFrozen) return;
             int i = (_memRingPos & (MemRingSize - 1)) * 3;
             _memRing[i] = _mar; _memRing[i + 1] = val & 0xFFFF; _memRing[i + 2] = write ? 1 : 0;
             _memRingPos++;
@@ -127,14 +127,36 @@ namespace D.CP
             return sb.ToString();
         }
 
+        /// <summary>
+        /// SystemDispatch watch.  The operator's point: 935 usually follows an UNHANDLED TRAP -- and our
+        /// CP records no hardware trap at all (trapCode=0, no stack/IB-empty traps, the only ErrTrap
+        /// entry is the boot init trap at CPi 12).  So it must be a MESA trap, dispatched through the SD
+        /// rather than the microcode trap vectors.  The germ's 0935 left exactly this fingerprint:
+        /// mar=0x78246/7 = {0x01B7, 0x004E} with 0x01B7 >> 2 = GFI 109, the signal walker.
+        /// The SD sits at a fixed MDS-relative 0x200..0x3FF, so it is catchable without knowing the MDS
+        /// bank, and (offset - 0x200) / 2 IS the trap index -- it names the trap outright.
+        /// </summary>
+        public System.Collections.Generic.List<string> SdWatch;
+
         private void NoteMds(bool write, int val)
         {
             NoteMem(write, val);
+            if (SdWatch != null && !DiagFrozen)
+            {
+                int so = _mar & 0xFFFF;
+                if (so >= 0x200 && so < 0x400)
+                {
+                    if (SdWatch.Count >= 400) SdWatch.RemoveRange(0, 200);
+                    SdWatch.Add((write ? "W " : "R ") + "SD[" + ((so - 0x200) / 2)
+                        + "] mar=0x" + _mar.ToString("X5") + " val=0x" + (val & 0xFFFF).ToString("X4")
+                        + " (link->GFI " + ((val & 0xFFFF) >> 2) + ") @CPi" + InstructionCount);
+                }
+            }
             // A RING, not a first-N cap.  Capping from the start filled this by CPi 715M while the
             // failure lands at 1.31B, so the whole sample missed the event -- the same mistake that
             // made the read trace hide its last 70 reads and that gated the macro ring's memory words
             // to the idle loop.  Interesting things happen at the END of these runs; keep the tail.
-            if (MdsProbe == null) return;
+            if (MdsProbe == null || DiagFrozen) return;
             int off = _mar & 0xFFFF;
             if (off != 0x0370 && off != 0x0371 && off != 0x0374 && off != 0x0375) return;
             if (MdsProbe.Count >= 1200) MdsProbe.RemoveRange(0, 600);
@@ -146,18 +168,39 @@ namespace D.CP
         }
 
         // ---- freeze-on-MP-post: macro-dispatch ring + snapshots taken when the panel changes ----
-        private const int MacroRingSize = 512;
-        private const int MacroRingFields = 8;
+        private const int MacroRingSize = 16384;   // 512 reached back only ~2k instructions --
+                                                   // not even to the previous MP post.
+        private const int MacroRingFields = 9;
+        private int _lastFrameL = -1, _lastFrameGl = -1;
         private int[] _macroRing;
         private int _macroRingPos;
         /// <summary>The most recent few panel-change snapshots, oldest first (see CaptureMacroRing).</summary>
         public System.Collections.Generic.List<string> MacroSnapshots;
+
+        /// <summary>Every @WRMP post (zESC alpha 0x77) -- the maintenance-panel traceback sequence.</summary>
+        public System.Collections.Generic.List<string> WrmpPosts;
+        public long WrmpCount;
+
+        /// <summary>
+        /// Set once MP 935 is first posted, after which every diagnostic below stops recording.
+        ///
+        /// ★THE LESSON OF THIS WHOLE SESSION.  The machine does not stop at the fault -- it reports and
+        /// then runs the DebuggerSubstituteImpl display loop for BILLIONS of instructions.  So a ring
+        /// that keeps its tail keeps the report loop, and a first-N cap fills long before the fault.
+        /// Four instruments in a row measured the wrong window that way (read trace, macro-ring memory
+        /// words, MDS probe, SD watch), and each time the truncated output looked like real evidence
+        /// rather than like a miss.  Freezing at the fault makes every log describe the fault.
+        /// </summary>
+        public bool DiagFrozen;
+        private System.Collections.Generic.HashSet<int> _postsSeen;
 
         /// <summary>Enable the always-on macro-dispatch ring.</summary>
         public void EnableMacroRing()
         {
             _macroRing = new int[MacroRingSize * MacroRingFields];
             MacroSnapshots = new System.Collections.Generic.List<string>();
+            WrmpPosts = new System.Collections.Generic.List<string>();
+            _postsSeen = new System.Collections.Generic.HashSet<int>();
         }
 
         /// <summary>
@@ -188,14 +231,43 @@ namespace D.CP
               .Append(System.Environment.NewLine).Append("      last macro dispatches (oldest first),")
               .Append(" op[alpha]@RH5:R5 GFI:");
             int n = _macroRingPos < MacroRingSize ? _macroRingPos : MacroRingSize;
+            // GFI-run summary over the WHOLE ring: compact, and it is what actually locates the
+            // caller chain and any excursion into signal/error machinery.
+            sb.Append(System.Environment.NewLine).Append("      GFI runs over ").Append(n)
+              .Append(" dispatches (oldest first):").Append(System.Environment.NewLine).Append("      ");
+            // Buffer the runs and print the TAIL.  A "++emitted <= 200" cap printed the FIRST 200
+            // runs plus the final one, so two non-adjacent runs appeared side by side and read as a
+            // call edge -- it invented "2184 -> 705" when the truth was "217 -> 705".  Same family of
+            // error as the four windowing mistakes above: truncation that looks like data.
+            var runsG = new System.Collections.Generic.List<int>();
+            var runsN = new System.Collections.Generic.List<int>();
+            int prevG = int.MinValue, runLen = 0;
+            for (int i = n; i > 0; i--)
+            {
+                int k3 = (_macroRingPos - i) & (MacroRingSize - 1);
+                int gl3 = _macroRing[k3 * MacroRingFields + 8];
+                int g3 = gl3 >= 0 ? (gl3 >> 2) : -1;
+                if (g3 != prevG)
+                {
+                    if (prevG != int.MinValue) { runsG.Add(prevG); runsN.Add(runLen); }
+                    prevG = g3; runLen = 0;
+                }
+                runLen++;
+            }
+            if (prevG != int.MinValue) { runsG.Add(prevG); runsN.Add(runLen); }
+            int rFrom = runsG.Count > 150 ? runsG.Count - 150 : 0;
+            if (rFrom > 0) sb.Append(" ...[").Append(rFrom).Append(" earlier runs omitted]");
+            for (int i = rFrom; i < runsG.Count; i++)
+                sb.Append(' ').Append(runsG[i]).Append('(').Append(runsN[i]).Append(')');
+            sb.Append(System.Environment.NewLine).Append("      last dispatches, op[alpha]@RH5:R5 GFI:");
+            if (n > 700) n = 700;   // detail deep enough to span the 990->935 fault window
             for (int i = n; i > 0; i--)
             {
                 int k = (_macroRingPos - i) & (MacroRingSize - 1);
                 int op = _macroRing[k * MacroRingFields + 1], alpha = _macroRing[k * MacroRingFields + 2];
                 int r5 = _macroRing[k * MacroRingFields + 3], rh5 = _macroRing[k * MacroRingFields + 4];
-                int fl = _macroRing[k * MacroRingFields + 5];
-                int fgl = -1;
-                if (ReadWord != null && fl > 0x100) fgl = ReadWord(fl - 2) >> 2;
+                int gl4 = _macroRing[k * MacroRingFields + 8];
+                int fgl = gl4 >= 0 ? (gl4 >> 2) : -1;
                 if ((n - i) % 4 == 0) sb.Append(System.Environment.NewLine).Append("      ");
                 sb.Append(' ').Append(op.ToString("X2"));
                 // The recorded alpha comes from _ib[_ibPtr & 1] at dispatch, which is the SAME
@@ -231,8 +303,8 @@ namespace D.CP
             for (int i = 0; i < n; i++)
             {
                 int k2 = (_macroRingPos - n + i) & (MacroRingSize - 1);
-                int fl2 = _macroRing[k2 * MacroRingFields + 5];
-                int g2 = (ReadWord != null && fl2 > 0x100) ? (ReadWord(fl2 - 2) >> 2) : -1;
+                int gl2 = _macroRing[k2 * MacroRingFields + 8];
+                int g2 = gl2 >= 0 ? (gl2 >> 2) : -1;
                 if (prevGfi >= 0 && g2 != prevGfi) lastChange = i;
                 prevGfi = g2;
             }
@@ -250,7 +322,7 @@ namespace D.CP
             sb.Append(System.Environment.NewLine).Append("      newest 30 accesses:")
               .Append(RecentMem(30));
             MacroSnapshots.Add(sb.ToString());
-            while (MacroSnapshots.Count > 4) MacroSnapshots.RemoveAt(0);
+            while (MacroSnapshots.Count > 12) MacroSnapshots.RemoveAt(0);
         }
 
         public string DescribeState()
@@ -418,7 +490,7 @@ namespace D.CP
         public System.Collections.Generic.Dictionary<int, long[]> IoPortCensus;
         private void NoteIo(int port, bool write, bool handled)
         {
-            if (IoPortCensus == null) return;
+            if (IoPortCensus == null || DiagFrozen) return;
             long[] r;
             if (!IoPortCensus.TryGetValue(port, out r)) { r = new long[4]; IoPortCensus[port] = r; }
             r[write ? 1 : 0]++;
@@ -2038,7 +2110,7 @@ namespace D.CP
                                 // takes to type the date, which is why every windowed instrument here has missed
                                 // it.  Macro dispatches are far rarer than microinstructions, so a 512-entry
                                 // ring costs a handful of array stores per IB dispatch, not per cycle.
-                                if (_macroRing != null)
+                                if (_macroRing != null && !DiagFrozen)
                                 {
                                     int mi2 = (_macroRingPos & (MacroRingSize - 1)) * MacroRingFields;
                                     _macroRing[mi2 + 0] = (int)InstructionCount;
@@ -2051,7 +2123,69 @@ namespace D.CP
                                     // Memory-ring position at THIS dispatch, so the accesses belonging
                                     // to any run of macro instructions can be sliced out exactly.
                                     _macroRing[mi2 + 7] = _memRingPos;
+                                    // globalLink resolved NOW, not at snapshot time.  Reading [L-2]
+                                    // later attributes a dispatch to whatever module has since been
+                                    // handed that frame -- which is why a 16k-deep ring disagreed with
+                                    // a 512-deep one about who called GFI 705.  Only re-read when the
+                                    // frame pointer actually changes, so this costs one memory read per
+                                    // call/return rather than one per dispatch.
+                                    int fl9 = _macroRing[mi2 + 5];
+                                    if (fl9 != _lastFrameL)
+                                    {
+                                        _lastFrameL = fl9;
+                                        _lastFrameGl = (ReadWord != null && fl9 > 0x100) ? ReadWord(fl9 - 2) : -1;
+                                    }
+                                    _macroRing[mi2 + 8] = _lastFrameGl;
                                     _macroRingPos++;
+                                }
+                                // ★MP TRACEBACK CAPTURE.  DebuggerSubstituteImpl's ShowCodeInMP posts a
+                                // code with ProcessorFace.SpecialSetMP (= MACHINE CODE [zESC, aWRMP],
+                                // alpha 0x77) and then dwells 400,000 iterations so a human can read the
+                                // panel; ShowCardinalInMP calls it TWICE per value, high three digits then
+                                // low, because "mp only guaranteed to be three digits".  GermWorldError's
+                                // twin walks the call stack and cycles the panel through the error code
+                                // plus the gfi and pc of EVERY frame, forever -- so the posted sequence IS
+                                // the traceback of the original fault.
+                                //
+                                // We were reading one frame of a rotating display: measured ~78 complete
+                                // dwell passes after the post (counter 148,908/400,000 at shutdown, ~52 CP
+                                // instructions per iteration) against ZERO cursor-sprite writes, so the
+                                // posts are happening and not reaching the panel.  Capturing them here
+                                // sidesteps the display path entirely.
+                                //
+                                // The alpha is read from MEMORY, not from _ib[_ibPtr & 1] -- that IB read
+                                // is wrong ~2 in 10 (it can echo the opcode back) and is what made
+                                // DOVE_MP_LOG untrustworthy.
+                                if (WrmpPosts != null && _ibFront == 0xF8 && ReadWord != null)
+                                {
+                                    int wa = ((_rh[5] & 0x1F) << 16) | _alu.R[5];
+                                    int w0 = ReadWord(wa), w1 = ReadWord(wa + 1);
+                                    int b0 = w0 >> 8, b1 = w0 & 0xFF, b2 = w1 >> 8;
+                                    int al = (b0 == 0xF8) ? b1 : (b1 == 0xF8 ? b2 : -1);
+                                    if (al == 0x77)
+                                    {
+                                        WrmpCount++;
+                                        if (WrmpPosts.Count >= 400) WrmpPosts.RemoveRange(0, 200);
+                                        WrmpPosts.Add("#" + WrmpCount + " MP<-" + _alu.R[0].ToString("X4")
+                                            + " (dec " + _alu.R[0] + ") sp=" + _stackP + " @CPi" + InstructionCount);
+                                        // ★Snapshot the macro ring the FIRST time each value is posted.
+                                        // The panel-change trigger was useless for this: the panel is
+                                        // drawn hundreds of dispatches after the fact and then re-drawn
+                                        // identically every dwell, so a "last N snapshots" policy kept
+                                        // only report-loop iterations.  Measured, the fault lands just
+                                        // 2,199 CP instructions after the 990 post -- well inside a
+                                        // 512-dispatch ring -- so the snapshot at the FIRST 935 reaches
+                                        // back through the error itself.
+                                        if (_postsSeen != null && !_postsSeen.Contains(_alu.R[0]))
+                                        {
+                                            _postsSeen.Add(_alu.R[0]);
+                                            CaptureMacroRing("first-post-" + _alu.R[0]);
+                                            // 935 = cCantTeledebug: the fault has happened and everything
+                                            // after this is the report loop.  Freeze, so the logs keep the
+                                            // fault window instead of a few billion instructions of dwell.
+                                            if (_alu.R[0] == 935) DiagFrozen = true;
+                                        }
+                                    }
                                 }
                                 if (DispRingCPi != null && InstructionCount >= KfcbLogFrom && InstructionCount < KfcbLogTo)
                                 {

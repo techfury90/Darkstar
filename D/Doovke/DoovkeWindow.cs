@@ -112,6 +112,7 @@ namespace D.Doovke
                 _machine.Cp.EnableMacroRing();
                 _machine.Cp.EnableMemRing();
                 _machine.Cp.MdsProbe = new System.Collections.Generic.List<string>();
+                _machine.Cp.SdWatch = new System.Collections.Generic.List<string>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
                 _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
@@ -206,7 +207,10 @@ namespace D.Doovke
                             var items = new System.Collections.Generic.List<string>();
                             var keys = new System.Collections.Generic.List<ushort>(pc.Keys);
                             keys.Sort((x, y) => pc[y].CompareTo(pc[x]));
-                            for (int i = 0; i < keys.Count && i < 14; i++)
+                            // ALL ports, not the top 14.  A truncated histogram cannot answer "was this
+                            // device touched at all" -- and the question "is there RDC activity?" is
+                            // exactly that.  With 14 entries anything below ~49k reads was invisible.
+                            for (int i = 0; i < keys.Count; i++)
                                 items.Add(keys[i].ToString("X4") + "=" + pc[keys[i]]);
                             cpState += System.Environment.NewLine
                                 + "hottest I/O ports (count desc):" + System.Environment.NewLine
@@ -456,6 +460,33 @@ namespace D.Doovke
                             if (msnaps.Count == 0)
                                 cpState += "  (none -- DOVE_MP_TRACE must also be set to arm the trigger)"
                                          + System.Environment.NewLine;
+                        }
+
+                        // ---- THE MP TRACEBACK, read off the CP's own posts ----
+                        var wp = _machine.Cp.WrmpPosts;
+                        if (wp != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "MP POSTS (@WRMP / SpecialSetMP) -- total " + _machine.Cp.WrmpCount
+                                + ", last " + wp.Count + ":" + System.Environment.NewLine
+                                + "  DebuggerSubstituteImpl cycles the panel through the error code plus the"
+                                + " gfi and pc of every frame, as two 3-digit groups per value"
+                                + " (cardinal/1000 then cardinal MOD 1000)." + System.Environment.NewLine;
+                            foreach (string s5 in wp) cpState += "    " + s5 + System.Environment.NewLine;
+                            if (wp.Count == 0) cpState += "    (none captured)" + System.Environment.NewLine;
+                        }
+
+                        // ---- SystemDispatch: which Mesa trap fired? ----
+                        var sdw = _machine.Cp.SdWatch;
+                        if (sdw != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "SD (SystemDispatch, MDS+0x200..0x3FF) accesses -- (offset-0x200)/2 = trap index ("
+                                + sdw.Count + "):" + System.Environment.NewLine;
+                            int f6 = sdw.Count > 40 ? sdw.Count - 40 : 0;
+                            for (int i = f6; i < sdw.Count; i++) cpState += "    " + sdw[i] + System.Environment.NewLine;
+                            if (sdw.Count == 0)
+                                cpState += "    (none -- no Mesa trap dispatched through the SD)" + System.Environment.NewLine;
                         }
 
                         // ---- MDS-switch probe: same offset, different bank? ----
