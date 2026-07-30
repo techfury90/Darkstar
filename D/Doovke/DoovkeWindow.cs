@@ -109,6 +109,7 @@ namespace D.Doovke
                 _machine.Iop.ForwardTrace = new System.Collections.Generic.List<int>();
                 _machine.Cp.IoPortCensus = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Cp.IoWriteLog = new System.Collections.Generic.List<string>();
+                _machine.Cp.EnableMacroRing();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
                 _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
@@ -139,6 +140,11 @@ namespace D.Doovke
                     _lastSprite = hex;
                     string line = "CPi=" + _machine.Cp.InstructionCount + " " + hex;
                     _mpTrace.Add(line);
+                    // FREEZE-ON-MP-POST.  The panel just changed, and we are standing on the very
+                    // instruction that drew it, so the CP's macro-dispatch ring still holds the code
+                    // that led here.  Only the last few snapshots survive, so whatever the machine
+                    // finally displays is the one left in the dump.
+                    _machine.Cp.CaptureMacroRing("panel-change");
                     // Append as we go, not only on close.  Waiting for shutdown meant the only way
                     // to learn whether the machine was alive was to kill it -- and a 7x00 phase can
                     // run 642 MILLION instructions with no disk I/O and a frozen cursor, which is
@@ -436,6 +442,20 @@ namespace D.Doovke
                         // flppyIOCB.OperationState (flppyIOCB+1), which FloppyRead compares against
                         // OperationCompleted = 6.  Every requested byte can be delivered -- and we have
                         // proven they are, header and all -- without that byte ever being stored.
+                        // ---- freeze-on-MP-post snapshots ----
+                        var msnaps = _machine.Cp.MacroSnapshots;
+                        if (msnaps != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "MACRO-DISPATCH SNAPSHOTS AT PANEL CHANGES (last " + msnaps.Count
+                                + "; the FINAL one is the code left on screen):" + System.Environment.NewLine;
+                            foreach (string ms in msnaps)
+                                cpState += "  " + ms + System.Environment.NewLine;
+                            if (msnaps.Count == 0)
+                                cpState += "  (none -- DOVE_MP_TRACE must also be set to arm the trigger)"
+                                         + System.Environment.NewLine;
+                        }
+
                         // ---- Mesa-bus I/O ports the CP referenced ----
                         var ioc = _machine.Cp.IoPortCensus;
                         if (ioc != null)

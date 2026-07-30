@@ -53,6 +53,88 @@ namespace D.CP
         /// is FIVE bits -- see the MAR splice; a 4-bit mask silently aliases any frame above real
         /// page 4096, which is most of them once demand paging is running.
         /// </summary>
+        // ---- freeze-on-MP-post: macro-dispatch ring + snapshots taken when the panel changes ----
+        private const int MacroRingSize = 512;
+        private int[] _macroRing;
+        private int _macroRingPos;
+        /// <summary>The most recent few panel-change snapshots, oldest first (see CaptureMacroRing).</summary>
+        public System.Collections.Generic.List<string> MacroSnapshots;
+
+        /// <summary>Enable the always-on macro-dispatch ring.</summary>
+        public void EnableMacroRing()
+        {
+            _macroRing = new int[MacroRingSize * 7];
+            MacroSnapshots = new System.Collections.Generic.List<string>();
+        }
+
+        /// <summary>
+        /// Snapshot the last macro dispatches.  Called when the MP panel sprite changes, because on
+        /// Daybreak the MP code IS the cursor sprite and `OnCursorWrite` fires at the instruction that
+        /// draws it -- so this brackets the raise, not the parking spot.  Every previous instrument
+        /// missed this: a manufactured ERROR posts its code and then sits in the teledebug-wait loop for
+        /// hundreds of millions of instructions, so a shutdown dump shows only idling (GFI 705 here),
+        /// and a CPi-windowed trace cannot be aimed because the failure time depends on how long the
+        /// operator takes to type the date.
+        ///
+        /// Only the last few snapshots are kept, so the final one is the code we care about and nothing
+        /// has to decode glyphs in-process to decide what is interesting.
+        /// </summary>
+        public void CaptureMacroRing(string label)
+        {
+            if (_macroRing == null || MacroSnapshots == null) return;
+            var sb = new System.Text.StringBuilder();
+            int L = ((_rh[3] & 0x1F) << 16) | _alu.R[3];
+            int gl = -1, gfi = -1;
+            if (ReadWord != null && L > 0x100) { gl = ReadWord(L - 2); gfi = gl >> 2; }
+            sb.Append(label).Append("  CPi=").Append(InstructionCount)
+              .Append(" ustore=0x").Append(_tpc[_task].ToString("X3"))
+              .Append(" L=0x").Append(L.ToString("X5"))
+              .Append(" GFI=").Append(gfi)
+              .Append(" sp=").Append(_stackP)
+              .Append(" trapCode=").Append(_trapCode)
+              .Append(System.Environment.NewLine).Append("      last macro dispatches (oldest first),")
+              .Append(" op[alpha]@RH5:R5 GFI:");
+            int n = _macroRingPos < MacroRingSize ? _macroRingPos : MacroRingSize;
+            for (int i = n; i > 0; i--)
+            {
+                int k = (_macroRingPos - i) & (MacroRingSize - 1);
+                int op = _macroRing[k * 7 + 1], alpha = _macroRing[k * 7 + 2];
+                int r5 = _macroRing[k * 7 + 3], rh5 = _macroRing[k * 7 + 4];
+                int fl = _macroRing[k * 7 + 5];
+                int fgl = -1;
+                if (ReadWord != null && fl > 0x100) fgl = ReadWord(fl - 2) >> 2;
+                if ((n - i) % 4 == 0) sb.Append(System.Environment.NewLine).Append("      ");
+                sb.Append(' ').Append(op.ToString("X2"));
+                // The recorded alpha comes from _ib[_ibPtr & 1] at dispatch, which is the SAME
+                // unreliable read that gave DOVE_MP_LOG 259 false posts off a stale IB byte -- it is
+                // printed as "ib=" to keep it clearly separate from ground truth.  The trustworthy
+                // bytes are the two memory words at the dispatch PC, dumped here so the opcode can be
+                // located by matching the (definitely correct) _ibFront value and the following byte
+                // read off from there, offline, without this code guessing the byte order.
+                if (alpha >= 0) sb.Append("[ib=").Append(alpha.ToString("X2")).Append(']');
+                sb.Append('@').Append(rh5.ToString("X2")).Append(':').Append(r5.ToString("X4"))
+                  .Append(' ').Append(fgl)
+                  // sp per dispatch: in the germ's MP 0935 the SAME escape transferred at sp=6 and fell
+                  // through at sp=7, so the eval-stack depth was the whole discriminator.  It was being
+                  // recorded here from the start and simply not printed, which cost a run.
+                  .Append(" sp").Append(_macroRing[k * 7 + 6]);
+                // EVERY entry, not a trailing window: the transition into the error module sat at ring
+                // index 150 of 512, so restricting this to the last 48 emitted words for the idle loop
+                // and nothing for the instruction that mattered.  1,024 reads at snapshot time is free.
+                // Cross-run substitution is NOT a way out of that mistake: the macro PC is a physical
+                // word address and Pilot's demand paging places the code differently each run, so the
+                // same PC read against an earlier run's DRAM dump returns zeros.
+                if (ReadWord != null)
+                {
+                    int wa = ((rh5 & 0x1F) << 16) | r5;
+                    sb.Append(" m=").Append(ReadWord(wa).ToString("X4"))
+                      .Append(',').Append(ReadWord(wa + 1).ToString("X4"));
+                }
+            }
+            MacroSnapshots.Add(sb.ToString());
+            while (MacroSnapshots.Count > 4) MacroSnapshots.RemoveAt(0);
+        }
+
         public string DescribeState()
         {
             var sb = new System.Text.StringBuilder();
@@ -1832,6 +1914,24 @@ namespace D.CP
                                 _lastDispIb0 = _ib[0]; _lastDispIb1 = _ib[1]; _lastDispIbPtr = (int)_ibPtr;
                                 // Dispatch ring: cheap int-array capture of (op + pending pair) at THIS dispatch,
                                 // so a KFCB dump can replay the raise-site byte stream incl. straddled operands.
+                                // ALWAYS-ON macro-dispatch ring, for freeze-on-MP-post (see MacroRingSnapshot).
+                                // Unwindowed on purpose: the event we need to bracket is an MP code appearing,
+                                // and its CPi is not knowable in advance -- it depends on how long the operator
+                                // takes to type the date, which is why every windowed instrument here has missed
+                                // it.  Macro dispatches are far rarer than microinstructions, so a 512-entry
+                                // ring costs a handful of array stores per IB dispatch, not per cycle.
+                                if (_macroRing != null)
+                                {
+                                    int mi2 = _macroRingPos & (MacroRingSize - 1);
+                                    _macroRing[mi2 * 7 + 0] = (int)InstructionCount;
+                                    _macroRing[mi2 * 7 + 1] = _ibFront;
+                                    _macroRing[mi2 * 7 + 2] = (_ibFront == 0xF8) ? _ib[((int)_ibPtr) & 0x1] : -1;
+                                    _macroRing[mi2 * 7 + 3] = _alu.R[5];
+                                    _macroRing[mi2 * 7 + 4] = _rh[5];
+                                    _macroRing[mi2 * 7 + 5] = ((_rh[3] & 0x1F) << 16) | _alu.R[3];  // frame L
+                                    _macroRing[mi2 * 7 + 6] = _stackP;
+                                    _macroRingPos++;
+                                }
                                 if (DispRingCPi != null && InstructionCount >= KfcbLogFrom && InstructionCount < KfcbLogTo)
                                 {
                                     int di = DispRingPos & 63;
