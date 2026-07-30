@@ -53,8 +53,101 @@ namespace D.CP
         /// is FIVE bits -- see the MAR splice; a 4-bit mask silently aliases any frame above real
         /// page 4096, which is most of them once demand paging is running.
         /// </summary>
+        /// <summary>
+        /// MDS-SWITCH PROBE.  GFI 217 -- the routine that calls the error module before MP 0935 --
+        /// decodes (archive) as a cross-MDS read/modify/write:
+        ///     zLI0 / zESC aPO / zESC aPI / zLIW 0370 zRDB 04 / ... / zESC aRRMDS (read MDS)
+        ///     zLIW 0370 zR0 / zESC aWRMDS (write MDS) / zLIW 0370 zW0 / ... / zLIW 0370 zWDB 04
+        /// It touches word 0x0370 on BOTH sides of the MDS switch, so if the switch takes effect those
+        /// accesses must land at DIFFERENT physical addresses.  If they all share the same high bits,
+        /// aWRMDS is updating a shadow copy without retargeting translation -- the write goes one
+        /// place, the read-back comes from another, and GFI 217 correctly reports a mismatch.
+        ///
+        /// Note there is no MDS base register anywhere in this class: every `mds` reference is
+        /// diagnostic, and the only base computation is `L &amp; 0xFF0000` inside a debug frame walk.  If
+        /// MDS is meant to be carried by the microcode through RH[rB] into the MAR splice then our
+        /// generic U-register machinery covers it; this probe decides which.
+        /// </summary>
+        public System.Collections.Generic.List<string> MdsProbe;
+
+        /// <summary>
+        /// UNFILTERED memory-access ring, snapshotted at the panel change alongside the macro ring.
+        ///
+        /// The offset-filtered MdsProbe above tests a hypothesis that rests on a GUESSED operand
+        /// grouping -- whether `zLIW 0370h` is followed by a memory op that USES 0x0370 as an address.
+        /// It found no writes and no bank change near the failure, but that is only evidence if the
+        /// premise holds, and the archive flagged the grouping as best-effort.  This ring assumes
+        /// nothing: every CP memory access, so GFI 217's actual footprint can be read off directly.
+        /// 4,096 entries covers far more than the 26-dispatch routine.
+        /// </summary>
+        private int[] _memRing;          // [mar, val, write] triples
+        private int _memRingPos;
+        private const int MemRingSize = 32768;   // must span GFI 217 -> the post: the idle loop alone
+                                                 // burns ~4,400 accesses before the panel is drawn.
+        public void EnableMemRing() { _memRing = new int[MemRingSize * 3]; }
+        private void NoteMem(bool write, int val)
+        {
+            if (_memRing == null) return;
+            int i = (_memRingPos & (MemRingSize - 1)) * 3;
+            _memRing[i] = _mar; _memRing[i + 1] = val & 0xFFFF; _memRing[i + 2] = write ? 1 : 0;
+            _memRingPos++;
+        }
+        /// <summary>Format the last n memory accesses, newest last.</summary>
+        public string RecentMem(int n)
+        {
+            if (_memRing == null) return " (memory ring not enabled)";
+            if (n > MemRingSize) n = MemRingSize;
+            int have = _memRingPos < MemRingSize ? _memRingPos : MemRingSize;
+            if (n > have) n = have;
+            return MemSlice(_memRingPos - n, n);
+        }
+
+        /// <summary>
+        /// Format memory accesses [from, from+count) in absolute ring-position terms.  Used with the
+        /// per-dispatch memory positions stored in the macro ring, so the accesses belonging to a
+        /// specific run of macro instructions can be extracted EXACTLY -- rather than printing a
+        /// guessed window off the newest end, which three times running showed only the idle loop.
+        /// </summary>
+        public string MemSlice(long from, int count)
+        {
+            if (_memRing == null) return " (memory ring not enabled)";
+            long oldest = _memRingPos - (_memRingPos < MemRingSize ? _memRingPos : MemRingSize);
+            if (from < oldest) { count -= (int)(oldest - from); from = oldest; }
+            if (count <= 0) return " (window has already been overwritten)";
+            if (count > 400) count = 400;
+            var sb = new System.Text.StringBuilder();
+            for (int k = 0; k < count; k++)
+            {
+                int i = (int)((from + k) & (MemRingSize - 1)) * 3;
+                if (k % 6 == 0) sb.Append(System.Environment.NewLine).Append("      ");
+                sb.Append(' ').Append(_memRing[i + 2] == 1 ? 'W' : 'R')
+                  .Append(_memRing[i].ToString("X5")).Append('=')
+                  .Append(_memRing[i + 1].ToString("X4"));
+            }
+            return sb.ToString();
+        }
+
+        private void NoteMds(bool write, int val)
+        {
+            NoteMem(write, val);
+            // A RING, not a first-N cap.  Capping from the start filled this by CPi 715M while the
+            // failure lands at 1.31B, so the whole sample missed the event -- the same mistake that
+            // made the read trace hide its last 70 reads and that gated the macro ring's memory words
+            // to the idle loop.  Interesting things happen at the END of these runs; keep the tail.
+            if (MdsProbe == null) return;
+            int off = _mar & 0xFFFF;
+            if (off != 0x0370 && off != 0x0371 && off != 0x0374 && off != 0x0375) return;
+            if (MdsProbe.Count >= 1200) MdsProbe.RemoveRange(0, 600);
+            MdsProbe.Add((write ? "W " : "R ") + "mar=0x" + _mar.ToString("X5")
+                + " bank=0x" + (_mar >> 16).ToString("X2")
+                + " off=0x" + off.ToString("X4")
+                + " val=0x" + (val & 0xFFFF).ToString("X4")
+                + " @CPi" + InstructionCount);
+        }
+
         // ---- freeze-on-MP-post: macro-dispatch ring + snapshots taken when the panel changes ----
         private const int MacroRingSize = 512;
+        private const int MacroRingFields = 8;
         private int[] _macroRing;
         private int _macroRingPos;
         /// <summary>The most recent few panel-change snapshots, oldest first (see CaptureMacroRing).</summary>
@@ -63,7 +156,7 @@ namespace D.CP
         /// <summary>Enable the always-on macro-dispatch ring.</summary>
         public void EnableMacroRing()
         {
-            _macroRing = new int[MacroRingSize * 7];
+            _macroRing = new int[MacroRingSize * MacroRingFields];
             MacroSnapshots = new System.Collections.Generic.List<string>();
         }
 
@@ -98,9 +191,9 @@ namespace D.CP
             for (int i = n; i > 0; i--)
             {
                 int k = (_macroRingPos - i) & (MacroRingSize - 1);
-                int op = _macroRing[k * 7 + 1], alpha = _macroRing[k * 7 + 2];
-                int r5 = _macroRing[k * 7 + 3], rh5 = _macroRing[k * 7 + 4];
-                int fl = _macroRing[k * 7 + 5];
+                int op = _macroRing[k * MacroRingFields + 1], alpha = _macroRing[k * MacroRingFields + 2];
+                int r5 = _macroRing[k * MacroRingFields + 3], rh5 = _macroRing[k * MacroRingFields + 4];
+                int fl = _macroRing[k * MacroRingFields + 5];
                 int fgl = -1;
                 if (ReadWord != null && fl > 0x100) fgl = ReadWord(fl - 2) >> 2;
                 if ((n - i) % 4 == 0) sb.Append(System.Environment.NewLine).Append("      ");
@@ -117,7 +210,7 @@ namespace D.CP
                   // sp per dispatch: in the germ's MP 0935 the SAME escape transferred at sp=6 and fell
                   // through at sp=7, so the eval-stack depth was the whole discriminator.  It was being
                   // recorded here from the start and simply not printed, which cost a run.
-                  .Append(" sp").Append(_macroRing[k * 7 + 6]);
+                  .Append(" sp").Append(_macroRing[k * MacroRingFields + 6]);
                 // EVERY entry, not a trailing window: the transition into the error module sat at ring
                 // index 150 of 512, so restricting this to the last 48 emitted words for the idle loop
                 // and nothing for the instruction that mattered.  1,024 reads at snapshot time is free.
@@ -131,6 +224,31 @@ namespace D.CP
                       .Append(',').Append(ReadWord(wa + 1).ToString("X4"));
                 }
             }
+            // Slice the memory ring to the dispatches AROUND the last GFI change, which is the
+            // transition into the error module.  Printing the newest N instead showed only the idle
+            // loop three runs in a row -- the panel is drawn hundreds of dispatches after the fact.
+            int lastChange = -1, prevGfi = -1;
+            for (int i = 0; i < n; i++)
+            {
+                int k2 = (_macroRingPos - n + i) & (MacroRingSize - 1);
+                int fl2 = _macroRing[k2 * MacroRingFields + 5];
+                int g2 = (ReadWord != null && fl2 > 0x100) ? (ReadWord(fl2 - 2) >> 2) : -1;
+                if (prevGfi >= 0 && g2 != prevGfi) lastChange = i;
+                prevGfi = g2;
+            }
+            if (lastChange > 0)
+            {
+                int kStart = (_macroRingPos - n + System.Math.Max(0, lastChange - 30)) & (MacroRingSize - 1);
+                int kEnd = (_macroRingPos - n + lastChange) & (MacroRingSize - 1);
+                long mFrom = (uint)_macroRing[kStart * MacroRingFields + 7];
+                long mTo = (uint)_macroRing[kEnd * MacroRingFields + 7];
+                sb.Append(System.Environment.NewLine)
+                  .Append("      memory accesses for the 30 dispatches INTO the last GFI change")
+                  .Append(" (ring ").Append(mFrom).Append("..").Append(mTo).Append("):")
+                  .Append(MemSlice(mFrom, (int)(mTo - mFrom)));
+            }
+            sb.Append(System.Environment.NewLine).Append("      newest 30 accesses:")
+              .Append(RecentMem(30));
             MacroSnapshots.Add(sb.ToString());
             while (MacroSnapshots.Count > 4) MacroSnapshots.RemoveAt(0);
         }
@@ -1207,7 +1325,7 @@ namespace D.CP
                 // the real page falls out of the register nibble/byte routing (map fmt |rp[5-12]|r|d|w|rp[0-4]|),
                 // GetMapFlags LRot12's out the flag bits.  A pre-decoded <-MD re-mangles it -> R5=EEEE / MP-0200.
                 if (_ioRefPending) { _xBus = Pit8254Read(); _ioRefPending = false; }
-                else _xBus = ReadWord(_mar);
+                else { _xBus = ReadWord(_mar); NoteMds(false, _xBus); }
                 MapWatchFollowRead();
                 if (WalkRdLog != null && InstructionCount >= WalkRdFrom && InstructionCount < WalkRdTo
                     && _mar >= 0x40000 && WalkRdLog.Count < 4000)
@@ -1569,7 +1687,7 @@ namespace D.CP
                         else if (WriteWord != null && !(_pageCrossCancelPending && _pageCrossMdrCancel))
                         {
                             MapWatch(_mar, _yBus);
-                            WriteWord(_mar, _yBus);
+                            WriteWord(_mar, _yBus); NoteMds(true, _yBus);
                         }
                         // StashPC watch (env DOVE_STASHWATCH): catch the write that saves GFI 99's PC.
                         if (StashWatchLog != null && StashWatchLog.Count < 2000
@@ -1922,14 +2040,17 @@ namespace D.CP
                                 // ring costs a handful of array stores per IB dispatch, not per cycle.
                                 if (_macroRing != null)
                                 {
-                                    int mi2 = _macroRingPos & (MacroRingSize - 1);
-                                    _macroRing[mi2 * 7 + 0] = (int)InstructionCount;
-                                    _macroRing[mi2 * 7 + 1] = _ibFront;
-                                    _macroRing[mi2 * 7 + 2] = (_ibFront == 0xF8) ? _ib[((int)_ibPtr) & 0x1] : -1;
-                                    _macroRing[mi2 * 7 + 3] = _alu.R[5];
-                                    _macroRing[mi2 * 7 + 4] = _rh[5];
-                                    _macroRing[mi2 * 7 + 5] = ((_rh[3] & 0x1F) << 16) | _alu.R[3];  // frame L
-                                    _macroRing[mi2 * 7 + 6] = _stackP;
+                                    int mi2 = (_macroRingPos & (MacroRingSize - 1)) * MacroRingFields;
+                                    _macroRing[mi2 + 0] = (int)InstructionCount;
+                                    _macroRing[mi2 + 1] = _ibFront;
+                                    _macroRing[mi2 + 2] = (_ibFront == 0xF8) ? _ib[((int)_ibPtr) & 0x1] : -1;
+                                    _macroRing[mi2 + 3] = _alu.R[5];
+                                    _macroRing[mi2 + 4] = _rh[5];
+                                    _macroRing[mi2 + 5] = ((_rh[3] & 0x1F) << 16) | _alu.R[3];  // frame L
+                                    _macroRing[mi2 + 6] = _stackP;
+                                    // Memory-ring position at THIS dispatch, so the accesses belonging
+                                    // to any run of macro instructions can be sliced out exactly.
+                                    _macroRing[mi2 + 7] = _memRingPos;
                                     _macroRingPos++;
                                 }
                                 if (DispRingCPi != null && InstructionCount >= KfcbLogFrom && InstructionCount < KfcbLogTo)

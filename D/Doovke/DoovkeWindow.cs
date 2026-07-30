@@ -1,4 +1,4 @@
-using System;
+﻿using System;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -110,6 +110,8 @@ namespace D.Doovke
                 _machine.Cp.IoPortCensus = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Cp.IoWriteLog = new System.Collections.Generic.List<string>();
                 _machine.Cp.EnableMacroRing();
+                _machine.Cp.EnableMemRing();
+                _machine.Cp.MdsProbe = new System.Collections.Generic.List<string>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
                 _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
@@ -454,6 +456,34 @@ namespace D.Doovke
                             if (msnaps.Count == 0)
                                 cpState += "  (none -- DOVE_MP_TRACE must also be set to arm the trigger)"
                                          + System.Environment.NewLine;
+                        }
+
+                        // ---- MDS-switch probe: same offset, different bank? ----
+                        var mdsp = _machine.Cp.MdsProbe;
+                        if (mdsp != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "MDS PROBE -- accesses to word offset 0x0370/0x0374 (" + mdsp.Count + "):"
+                                + System.Environment.NewLine;
+                            var banks = new System.Collections.Generic.Dictionary<int, int>();
+                            foreach (string s3 in mdsp)
+                            {
+                                int bi = s3.IndexOf("bank=0x");
+                                if (bi >= 0)
+                                {
+                                    int bv = Convert.ToInt32(s3.Substring(bi + 7, 2), 16);
+                                    int c2; banks.TryGetValue(bv, out c2); banks[bv] = c2 + 1;
+                                }
+                            }
+                            cpState += "  distinct banks seen: " + banks.Count + " ->";
+                            foreach (System.Collections.Generic.KeyValuePair<int, int> kv2 in banks)
+                                cpState += " 0x" + kv2.Key.ToString("X2") + "(x" + kv2.Value + ")";
+                            cpState += System.Environment.NewLine
+                                + "  (ONE bank => aWRMDS is not retargeting translation)"
+                                + System.Environment.NewLine;
+                            int from3 = mdsp.Count > 30 ? mdsp.Count - 30 : 0;
+                            for (int i = from3; i < mdsp.Count; i++)
+                                cpState += "    " + mdsp[i] + System.Environment.NewLine;
                         }
 
                         // ---- Mesa-bus I/O ports the CP referenced ----
@@ -1377,3 +1407,5 @@ namespace D.Doovke
         }
     }
 }
+
+
