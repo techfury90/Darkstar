@@ -266,8 +266,13 @@ namespace D.Doovke
                                 long[] r = brh[fo];
                                 string tag = fo == 8600 ? "<TYPE-hi>" : fo == 8601 ? "<TYPE-lo>"
                                            : fo == 8602 ? "<BODY>" : "";
-                                cpState += " " + fo + "=" + r[1].ToString("X2") + "x" + r[0] + tag;
-                                if (++col % 8 == 0) cpState += System.Environment.NewLine + "   ";
+                                // Print the READING PC.  IOPEINRAM 0x008F0-0x00EE9 is RAMFlpBt, the
+                                // PRODUCER; RamBoot -- the consumer that owns ProcessCPBlock and
+                                // IncrementSI -- is a separate .db image at another address.  So the PC
+                                // says which side is walking the boot file, and I had assumed consumer.
+                                cpState += " " + fo + "=" + r[1].ToString("X2") + "x" + r[0]
+                                         + "@" + r[2].ToString("X5") + tag;
+                                if (++col % 5 == 0) cpState += System.Environment.NewLine + "   ";
                             }
                             if (bk.Count == 0) cpState += " (no reads in 5400..6119)";
                             cpState += System.Environment.NewLine;

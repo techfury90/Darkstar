@@ -528,6 +528,9 @@ namespace D.IOP
                     // Daybreak CP microcode block in the .db (=> zero WCS writes).  So the
                     // low byte must expose b6 from _inputPortWord.  (b11/b13 are high-byte;
                     // see ReadWord.)
+                    //
+                    // b5 matters just as much: the downloaded loader gates CP WriteData blocks on
+                    // AND AX,0060 / CMP AX,0060, i.e. bits 5 AND 6 together.  See InitialInputPort.
                     return (byte)_inputPortWord;
 
                 case HostProm:
@@ -1073,9 +1076,42 @@ namespace D.IOP
         {
             string e = Environment.GetEnvironmentVariable("DOVE_INPUT_PORT");
             ushort v;
+            // NOTE: HexNumber rejects a "0x" prefix, so DOVE_INPUT_PORT takes BARE hex ("60", not
+            // "0x60").  A prefixed value parses as failure and silently falls back to the default,
+            // which once cost a run that looked like the override having no effect.
             if (!string.IsNullOrEmpty(e) &&
                 ushort.TryParse(e, System.Globalization.NumberStyles.HexNumber, null, out v)) return v;
-            return 0x0040;
+
+            // 0x0060, NOT 0x0040: bit 5 must be set as well as bit 6.
+            //
+            // Found by disassembling the downloaded loader out of the boot file itself.  Boot-file
+            // offsets 0..2047 land at linear 0x008F0..0x010EF, so segment offset = linear - 0x008F0,
+            // which puts ProcessCPBlock at +0x3C0 (= linear 0x00CB0, exactly where the trace shows
+            // CALL WORD PTR jumpTable.processBootBlock landing).  Dispatching a CP WriteData block
+            // (BlockType 0xD000 -> AH = 0xA0 after ProcessEmulatorFile's pre-shift) reaches +0x46E:
+            //
+            //     00D5E  E8 D3 00     CALL IncrementSI
+            //     00D61  D1 E0        SHL  AX,1
+            //     00D63  E5 80        IN   AX,80          ; ReadInputPort
+            //     00D65  25 60 00     AND  AX,0060        ; bits 5 AND 6
+            //     00D68  3D 60 00     CMP  AX,0060
+            //     00D6B  74 03        JZ   accept         ; read bank/uAddr/length, then load
+            //     00D6D  E9 E2 00     JMP  skip           ; else DUMP THE BLOCK
+            //
+            // With 0x0040 the compare fails and the block is skipped into a word-wise skip loop, so
+            // the walk consumes the two BlockType bytes and reads nothing further -- which is exactly
+            // the measured behaviour, and why the control store stayed empty while the block itself
+            // was provably delivered.  With 0x0060 the Medley installer loads all 23,574 byte OUTs
+            // (3,929 microinstructions x 6 lanes, ports 8000..DF58), bank0 occupancy = 3929, and the
+            // CP goes from CPi=12 with an init trap to 715M instructions executing Mesa.
+            //
+            // Safe for the path that already worked: the ViewPoint 2.0 installer is byte-identical at
+            // 0x40 and 0x60 -- same 19,950 byte OUTs, same 12 bank-register writes, same port range,
+            // zero faults -- so bit 5 is inert there.  Bit 5's hardware name is still unknown; it is
+            // recorded elsewhere as a Daisy-only display-type bit, which would make it free on a
+            // Daybreak (Daybreak reads display type from 0xECCC instead).  Real 6085s do boot these
+            // disks, so real hardware must present it set.
+            return 0x0060;
         }
         private byte _displayType = 0x0000;
         private byte _readDefault = 0x00;
