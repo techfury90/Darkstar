@@ -216,6 +216,7 @@ namespace D.Doovke
             // (memory timing, the RDC's host clock).  Leaving these at zero stalls POST.
             _mem.HostClock = IopInstructions;
             _mem.CurrentPC = _iop.InstructionAddress;
+            _io.CurrentPC = _iop.InstructionAddress;
             _io.RdcHostClock = IopInstructions;
 
             int clocks = _iop.Execute();
@@ -388,7 +389,15 @@ namespace D.Doovke
             // takes the whole process down -- so record it and leave the drive empty instead.
             try
             {
-                _io.Fdc.Drives[drive] = new D.IO.FloppyDisk(path);
+                var disk = new D.IO.FloppyDisk(path);
+                string wrongMachine = DescribeWrongMachineMedia(disk);
+                if (wrongMachine != null)
+                {
+                    _io.Fdc.Drives[drive] = null;
+                    LastFloppyError = System.IO.Path.GetFileName(path) + ": " + wrongMachine;
+                    return;
+                }
+                _io.Fdc.Drives[drive] = disk;
                 LastFloppyError = null;
             }
             catch (Exception e)
@@ -396,6 +405,48 @@ namespace D.Doovke
                 _io.Fdc.Drives[drive] = null;
                 LastFloppyError = path + ": " + e.Message;
             }
+        }
+
+        /// <summary>
+        /// Reject 8-inch DLion (Dandelion, 1108/8010) media, which is NOT readable by a 6085.
+        ///
+        /// A Daybreak has a 5.25-inch drive: 40 cylinders, 2 heads, 9 x 512-byte MFM sectors on
+        /// tracks 1-39 and a 16-sector FM/MFM IPL track 0.  Dandelion 8-inch media is 77 cylinders,
+        /// 15 x 512 with 26 x 128 / 26 x 256 tracks and 500 kbps FM -- ~10,624 bytes per track.
+        ///
+        /// Without this guard the mismatch is silent and expensive.  Mounting the 1108 Medley set
+        /// (dir "1108_medley_1.1_imd", header "IMD DMK Tracks:77x10624 DSMD") produces a boot that
+        /// looks like an emulator fault at every level: the ROM reads C=5 H=0 S=1 for the loader it
+        /// jumps into, gets Dandelion Mesa data instead of 8086 code (F1 00 6D 03 ... where a 6085
+        /// disk holds B8 00 00 8E C0 ... = MOV AX,0 / MOV ES,AX), executes it, branches out of the
+        /// 512-byte buffer, runs 5,862 instructions through zeroed memory, wraps 0x0FFFF -> 0x00000,
+        /// walks the interrupt vector table and takes an INT 3 off the first 0xCC byte it meets.  The
+        /// ROM's error reporter then spins ~500,000,000 times on the umbilical UART's TxRDY bit, and
+        /// the control store is never written.  Every one of those symptoms is downstream of the
+        /// wrong file being mounted, and each was chased as a bug in its own right.
+        /// </summary>
+        private static string DescribeWrongMachineMedia(D.IO.FloppyDisk disk)
+        {
+            int maxCyl = -1, sectors = 0, size = 0;
+            for (int c = 0; c < 77; c++)
+            {
+                for (int h = 0; h < 2; h++)
+                {
+                    D.IO.Track t = null;
+                    try { t = disk.GetTrack(c, h); } catch { }
+                    if (t == null) continue;
+                    if (c > maxCyl) { maxCyl = c; }
+                    if (c >= 1 && sectors == 0) { sectors = t.SectorCount; size = t.SectorSize; }
+                }
+            }
+            // 40-cylinder media is a Daybreak disk; a few images run a track or two long.  Anything
+            // reaching cylinder 44 is 8-inch geometry, and the 1108 set reaches 76.
+            if (maxCyl >= 44)
+                return "8-inch DLion (Dandelion 1108/8010) media -- " + (maxCyl + 1) + " cylinders"
+                     + (sectors > 0 ? ", " + sectors + "x" + size : "")
+                     + ".  The 6085 has a 5.25-inch drive (40 cylinders, 9x512); this disk cannot be"
+                     + " read by a Daybreak.  Use the 1186 floppy set, or run it under Darkstar (DLion).";
+            return null;
         }
 
         /// <summary>Why the last image failed to mount, or null if it mounted.</summary>
@@ -407,7 +458,11 @@ namespace D.Doovke
         /// </summary>
         public static string ValidateImage(string path)
         {
-            try { new D.IO.FloppyDisk(path); return null; }
+            try
+            {
+                var disk = new D.IO.FloppyDisk(path);
+                return DescribeWrongMachineMedia(disk);   // null when it is usable Daybreak media
+            }
             catch (Exception e) { return e.Message; }
         }
 

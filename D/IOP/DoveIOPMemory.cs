@@ -124,6 +124,24 @@ namespace D.IOP
             if (address < SramBase + SramSize)
             {
                 if (OnSramWrite != null) OnSramWrite(address, value);
+                // BOOTSTRAPIOR WATCH (0x03E00, IOP-local SRAM).  RamBoot's bootTask parks at
+                // %WaitForCondition(bootBufferFull, noTimeout) and FloppyRead only proceeds when
+                // flppyIOCB.OperationState (flppyIOCB+1) reads OperationCompleted = 6.  Every byte
+                // that decides this lives in this 1KB window, so instead of guessing where flppyIOCB
+                // sits, record the value SEQUENCE per address: the IOCB identifies itself by its
+                // static image (OperationIsQueued=TRUE then OperationState=OperationWaiting=3) and
+                // the question "does any byte here ever become 6?" is then answered by inspection.
+                // Condition words read 0x0000 idle / 0x0001 stored-wakeup / 0x8000|ptr waiter.
+                if (BootIorSeq != null && address >= 0x3C00 && address < 0x4000)
+                {
+                    System.Collections.Generic.List<byte> sq;
+                    if (!BootIorSeq.TryGetValue(address, out sq))
+                    { sq = new System.Collections.Generic.List<byte>(); BootIorSeq[address] = sq; }
+                    if (sq.Count < 24) sq.Add(value);
+                    if (BootIorLog != null && BootIorLog.Count < 600 && value >= 3 && value <= 7)
+                        BootIorLog.Add("W 0x" + address.ToString("X4") + " (IOR+0x" + (address - 0x3E00).ToString("X3")
+                            + ") <- " + value + StateName(value) + " PC=" + CurrentPC.ToString("X5") + " @IOP" + HostClock);
+                }
                 _sram[address - SramBase] = value;
                 return;
             }
@@ -254,6 +272,30 @@ namespace D.IOP
         public System.Collections.Generic.List<string> CmdByteLog;
         /// <summary>TEMP: snapshot of the floppy IOCB head-decision fields at each OperationState write.</summary>
         public System.Collections.Generic.List<string> IocbLog;
+
+        /// <summary>
+        /// BOOTSTRAPIOR (0x03E00) write history, per address -> the sequence of values stored.
+        /// NOTE the existing IocbLog above watches a DIFFERENT structure: it triggers on a write of
+        /// 6 or 7 anywhere in DRAM [0x80000,0xA0000) and treats (addr-23) as the head, which is the
+        /// rigid-disk IOCB layout.  The floppy boot IOCB puts OperationState at +1, in SRAM, and is
+        /// not covered by it.
+        /// </summary>
+        public System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<byte>> BootIorSeq;
+        /// <summary>BOOTSTRAPIOR writes carrying an OperationState enum value (3..7), in order.</summary>
+        public System.Collections.Generic.List<string> BootIorLog;
+
+        private static string StateName(byte v)
+        {
+            switch (v)
+            {
+                case 3: return "(Waiting)";
+                case 4: return "(InProgress)";
+                case 5: return "(Aborted)";
+                case 6: return "(COMPLETED)";
+                case 7: return "(Failed)";
+                default: return "";
+            }
+        }
         /// <summary>TEMP: current IOP instruction count, set by the harness for CmdByteLog timestamps.</summary>
         public long HostClock;
         /// <summary>Current IOP instruction address, set by the harness -- identifies WHO touches a watched cell.</summary>

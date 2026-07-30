@@ -97,6 +97,8 @@ namespace D.Doovke
             {
                 machine.LoadFloppy(0, floppy);
                 Console.WriteLine("  floppy 0 : " + floppy);
+                if (machine.LastFloppyError != null)
+                    Console.WriteLine("  REJECTED : " + machine.LastFloppyError);
             }
 
             // Diagnostics: did the IOP ever load/start the CP, and did it touch the floppy?

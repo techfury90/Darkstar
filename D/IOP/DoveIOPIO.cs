@@ -85,6 +85,16 @@ namespace D.IOP
                 int n = data.Length;
                 if (count > 0 && count < n) n = count;         // honor DMA count (bytes)
                 for (int i = 0; i < n; i++) _memory.WriteByte(dest + i, data[i]);
+                // WHERE the sector landed.  The 0149 rigid-disk bug was exactly this shape: the DMA
+                // put the data somewhere other than the buffer the ROM then jumped into, the read
+                // reported success, and the ROM executed an unfilled buffer.  Unlike the RDC path this
+                // one goes through _memory.WriteByte, so addresses below 0x4000 do reach the IOP-local
+                // SRAM -- but that only matters if `dest` points where the ROM expects.
+                if (DmaLog != null && DmaLog.Count < 200)
+                    DmaLog.Add("FDC DMA -> dest=0x" + dest.ToString("X5")
+                        + " count=" + count + " wrote=" + n + "B"
+                        + " (" + (dest < 0x4000 ? "IOP-local SRAM" : "shared DRAM") + ")"
+                        + " avail=" + data.Length + "B");
                 // Advance the DMA0 destination pointer and drain the transfer count,
                 // as the real DMA controller does (drivers poll FFC8==0 for completion).
                 int nd = dest + n;
@@ -455,13 +465,47 @@ namespace D.IOP
                 case 0x52: return _fdc.ReadData();
                 case 0x54: return _fdc.ReadDmaData();
 
-                // i8255 PPI (Burdock/Bindweed umbilical debugger interface): 0x70=Port A, 0x72=Port B,
-                // 0x74=Port C, 0x76=control.  No umbilical is connected, so all inputs read 0 -- in particular
-                // Port C bit3 (outReady) and bit4 (PC4 loopback) are clear, so the ROM's Bindweed debugger-detect
-                // fails (PC4 loopback mismatches + the PC3 IOPAlive poll times out) -> NoDebugger -> StartOPIE.
-                case 0x70: return 0x00;
-                case 0x72: return 0x00;
-                case 0x74: return 0x00;
+                // Umbilical serial console (Burdock/Bindweed debugger + the ROM's error reporter):
+                //   0x70 = TX data, 0x72 = RX data, 0x74 = status (b0 RX ready, b3 TX ready), 0x76 = control.
+                //
+                // This file previously carried TWO incompatible models of these ports -- an i8255 PPI
+                // (0x70/0x72/0x74 = Ports A/B/C) here, and a UART in the diagnostic block below -- and
+                // the PPI one won, returning a flat 0x00 with the rationale that a cleared "Port C bit3
+                // outReady" made the debugger-detect fail into StartOPIE.  The ROM settles it; at
+                // linear FFFBB and FFFC4 (ROM offset 0x3FBB / 0x3FC4) it reads:
+                //
+                //   GetChar:  IN AL,74 / TEST AL,01 / JZ GetChar   ;  IN AL,72 / RET
+                //   PutChar:  IN AL,74 / TEST AL,08 / JZ PutChar   ;  MOV AL,DL / OUT 70,AL / RET
+                //
+                // Bit-tested status plus separate data-in and data-out ports is a UART, and bit 3 is
+                // TxRDY -- this is the channel for the external MP-code/status readout box.  Measured:
+                // the Pilot 12 Medley installer takes an INT 3, enters the error reporter, and spins
+                // 522,172,637 times on the PutChar instruction trying to emit its first byte.
+                //
+                // BUT WE STILL RETURN 0x00.  InitDebugger's detect reads this same register during a
+                // normal boot and treats a high bit 3 as "debugger present", parking the boot at
+                // Start: JMP $.  Asserting TxRDY would trade this hang for an earlier one.  The spin is
+                // a SYMPTOM; the bug is whatever interrupt fired, and it fires either way.
+                case 0x70: NotePoll(0x70); return 0x00;
+                case 0x72:
+                    NotePoll(0x72);
+                    return DiagUartRx.Count > 0 ? DiagUartRx.Dequeue() : (byte)0x00;
+                case 0x74:
+                    {
+                        NotePoll(0x74);
+                        // DELIBERATELY 0x00.  Asserting bit 3 does let the stalled PutChar drain (tested:
+                        // 5 bytes came out, 03 03 00 30 CA, and the spin moved to the GetChar loop at
+                        // FFFBB) -- but InitDebugger's detect reads this same register during a NORMAL
+                        // boot, and a high bit 3 flips it to "debugger present", parking the boot at
+                        // Start: JMP $.  That trades this hang for an earlier one, so it stays low.
+                        //
+                        // Keeping it low costs nothing diagnostically: the spin here is a SYMPTOM.  The
+                        // fault that leads to it happens with 0x74 reading 0x00 or 0x08 alike.
+                        if (!Uart74TxReady) return 0x00;
+                        int st = 0x08;                              // b3 TX ready
+                        if (DiagUartRx.Count > 0) st |= 0x01;       // b0 RX ready
+                        return (byte)(st | DiagUartStatusExtra);
+                    }
 
                 case InputPort:
                     // Input port low byte: machine-ID and RS232/modem bits.  b6
@@ -641,7 +685,16 @@ namespace D.IOP
 
                 // i8255 PPI (Burdock/Bindweed umbilical): 0x70=Port A out, 0x76=control (mode/BSR).  No umbilical
                 // attached, so writes drive nothing; capture Port A output for debug only.
-                case 0x70: if (DiagUartTxRaw.Count < 40000) DiagUartTxRaw.Add(value); return;
+                case 0x70:
+                    if (DiagUartTxRaw.Count < 40000) DiagUartTxRaw.Add(value);
+                    // Keep a printable transcript too: this is the channel the ROM's error reporter
+                    // and the Burdock/Bindweed debugger write their messages to, so whatever the IOP
+                    // was trying to say when it stopped comes out here.
+                    if (DiagUartTx.Length < 40000)
+                        DiagUartTx.Append(value >= 0x20 && value < 0x7F ? (char)value
+                                          : value == 0x0D || value == 0x0A ? '\n' : '.');
+                    if (DiagUartLoopback && DiagUartRx.Count < 256) DiagUartRx.Enqueue(value);
+                    return;
                 case 0x76: return;
 
                 case HostProm:                 // hex LED display (low byte)
@@ -799,7 +852,46 @@ namespace D.IOP
         public readonly List<byte> DiagUartTxRaw = new List<byte>();
         public readonly Queue<byte> DiagUartRx = new Queue<byte>();
         public byte DiagUartStatusExtra = 0x00;   // extra status bits OR'd into 0x74 (e.g. 0x10) for probing
-        public bool DiagUartLoopback = true;       // loop TX back to RX so the UART self-test passes
+
+        // ---- 0x70/0x72/0x74 poll tracking ----
+        // The Pilot 12 Medley installer reads 0x74 352,338,950 times -- 4,000x the next busiest port --
+        // after exactly one floppy data read completes, and issues no further FDC command.  That is a
+        // ready-bit spin against a register we return 0x00 for.  We carry TWO incompatible models of
+        // this port (i8255 PPI Port C for the Burdock/Bindweed umbilical, where returning 0 is a
+        // DELIBERATE "no debugger attached"; and a diagnostic UART status where bit0=RX-ready and
+        // bit3=TX-ready, whose DiagUartStatusExtra is declared but never OR'd into the read).  Only one
+        // can be right.  Recording the polling PC says which code is asking.
+        public int CurrentPC;
+        public System.Collections.Generic.Dictionary<int, long[]> PollPcs;   // port -> unused; see PollSites
+        /// <summary>(port&lt;&lt;20)|PC -> {count, firstClock, lastClock} for reads of 0x70/0x72/0x74.</summary>
+        public System.Collections.Generic.Dictionary<int, long[]> PollSites;
+        private void NotePoll(int port)
+        {
+            if (PollSites == null) return;
+            int key = (port << 20) | (CurrentPC & 0xFFFFF);
+            long[] rec;
+            if (!PollSites.TryGetValue(key, out rec))
+            {
+                if (PollSites.Count > 4000) return;    // bound the map; a spin has few distinct PCs
+                rec = new long[3]; rec[1] = RdcHostClock; PollSites[key] = rec;
+            }
+            rec[0]++; rec[2] = RdcHostClock;
+        }
+        /// <summary>
+        /// Loop transmitted bytes back to the receiver.  DEFAULT OFF: with no umbilical attached there
+        /// is nothing to echo, and echoing would feed the debugger's own output back to it as operator
+        /// keystrokes.  Nothing depended on the old default of true -- while 0x74 read 0x00, PutChar
+        /// could never complete a single character, so no loopback ever occurred.
+        /// </summary>
+        public bool DiagUartLoopback = false;
+
+        /// <summary>
+        /// DIAGNOSTIC ONLY (DOVE_UART74_TXREADY=1): assert TxRDY on port 0x74 so the ROM's PutChar can
+        /// drain.  Off by default -- InitDebugger's detect reads the same register on a normal boot and
+        /// reads a high bit 3 as "debugger present", which parks the boot at Start: JMP $.
+        /// </summary>
+        public bool Uart74TxReady =
+            !string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("DOVE_UART74_TXREADY"));
 
         /// <summary>Set to a list to record input-port (0x80) reads -- the microcode-load gates.</summary>
         public List<string> GateLog;

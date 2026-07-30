@@ -245,6 +245,11 @@ namespace D.IOP
             _segOverride = -1;
             int rep = 0;                // 0 none, 1 REP/REPE/REPZ, 2 REPNE/REPNZ
             _cycles = 0;
+            // Start of the instruction about to be decoded, kept so a fault can name the opcode
+            // that caused it: by the time ServiceInterrupt runs, _ip has advanced past the bytes.
+            _curInstrStart = InstructionAddress;
+            _pcRing[_pcRingPos] = _curInstrStart;
+            _pcRingPos = (_pcRingPos + 1) & (PcRingSize - 1);
 
             while (true)
             {
@@ -1034,8 +1039,102 @@ namespace D.IOP
             return sb.Length == 0 ? " (none)" : sb.ToString();
         }
 
+        private int _curInstrStart;
+
+        /// <summary>
+        /// Instruction-address history compressed into straight-line runs: a new run starts wherever
+        /// the next address is not a short step forward from the last, i.e. at every taken branch,
+        /// call, return or interrupt dispatch.  A raw list of addresses is useless at this depth -- the
+        /// crash walks thousands of zero bytes (0x00 = ADD [BX+SI],AL decodes as a 2-byte instruction,
+        /// which is why an unfilled buffer produces a perfectly uniform 2-byte stride) and the one
+        /// thing worth seeing is where control left real code.
+        /// </summary>
+        public string RecentPcRuns(int count)
+        {
+            if (count > PcRingSize) count = PcRingSize;
+            var sb = new System.Text.StringBuilder();
+            int runStart = -1, prev = -1, runLen = 0;
+            for (int i = count; i > 0; i--)
+            {
+                int pc = _pcRing[(_pcRingPos - i) & (PcRingSize - 1)];
+                if (pc == 0 && runStart < 0) continue;             // ring not yet full
+                bool contiguous = prev >= 0 && pc > prev && pc - prev <= 16;
+                if (!contiguous)
+                {
+                    if (runStart >= 0)
+                        sb.Append(' ').Append(runStart.ToString("X5")).Append("..").Append(prev.ToString("X5"))
+                          .Append('(').Append(runLen).Append(')');
+                    runStart = pc; runLen = 1;
+                }
+                else runLen++;
+                prev = pc;
+            }
+            if (runStart >= 0)
+                sb.Append(' ').Append(runStart.ToString("X5")).Append("..").Append(prev.ToString("X5"))
+                  .Append('(').Append(runLen).Append(')');
+            return sb.ToString();
+        }
+
+        private const int PcRingSize = 16384;
+        private readonly int[] _pcRing = new int[PcRingSize];
+        private int _pcRingPos;
+
+        /// <summary>The last PcRingSize instruction addresses, oldest first.</summary>
+        public string RecentPcs(int count)
+        {
+            if (count > PcRingSize) count = PcRingSize;
+            var sb = new System.Text.StringBuilder();
+            for (int i = count; i > 0; i--)
+            {
+                int k = (_pcRingPos - i) & (PcRingSize - 1);
+                if (_pcRing[k] == 0 && i != 1) continue;
+                sb.Append(' ').Append(_pcRing[k].ToString("X5"));
+            }
+            return sb.ToString();
+        }
+
+        /// <summary>Lifetime count of every vector taken, by number.</summary>
+        public readonly long[] VectorCounts = new long[256];
+
+        /// <summary>
+        /// Set to a list to record CPU FAULTS -- vectors 0 (divide error), 1, 4 (INTO), 5 (BOUND)
+        /// and 6 (invalid opcode).  Vector 6 is the one to watch: Dispatch raises it both for
+        /// genuinely invalid encodings AND for anything this core has not implemented, so a missing
+        /// 80186 instruction is indistinguishable from a real fault to the guest -- it takes the
+        /// unhandled-exception path into the Burdock/Bindweed remote-debugger interface, which then
+        /// polls the umbilical i8255 (port 0x74) forever waiting for a host debugger to attach.
+        /// Logging the faulting instruction's own bytes names the opcode outright.
+        /// </summary>
+        public System.Collections.Generic.List<string> FaultLog;
+
         private void ServiceInterrupt(int vector)
         {
+            VectorCounts[vector & 0xFF]++;
+            if (FaultLog != null && FaultLog.Count < 64)
+            {
+                int v = vector & 0xFF;
+                if (v == 0 || v == 1 || v == 3 || v == 4 || v == 5 || v == 6)
+                {
+                    var sb = new System.Text.StringBuilder();
+                    sb.Append("FAULT vec ").Append(v).Append(" (").Append(
+                        v == 0 ? "divide error" : v == 1 ? "single step" : v == 3 ? "BREAKPOINT INT3"
+                        : v == 4 ? "INTO overflow"
+                        : v == 5 ? "BOUND range exceeded" : "INVALID/UNIMPLEMENTED OPCODE").Append(") at ");
+                    sb.Append(_seg[CS].ToString("X4")).Append(':').Append(_ip.ToString("X4"));
+                    sb.Append("  instr start lin=").Append(_curInstrStart.ToString("X5")).Append("  bytes:");
+                    for (int i = 0; i < 8; i++)
+                        sb.Append(' ').Append(MemReadByte((_curInstrStart + i) & 0xFFFFF).ToString("X2"));
+                    sb.Append("  #").Append(VectorCounts[v]);
+                    // Preceding vectors, for context on how it got here.  Read before the ring is
+                    // updated below, so this is strictly what came BEFORE this fault.
+                    sb.Append(System.Environment.NewLine).Append("        preceded by:").Append(RecentVectors());
+                    // The instruction trail into the fault: this is what names the wild branch.
+                    sb.Append(System.Environment.NewLine).Append("        last PCs:").Append(RecentPcs(48));
+                    sb.Append(System.Environment.NewLine).Append("        control-flow runs (oldest first):")
+                      .Append(RecentPcRuns(PcRingSize));
+                    FaultLog.Add(sb.ToString());
+                }
+            }
             _vecRing[_vecRingPos] = vector & 0xFF;
             _vecRing[_vecRingPos + 1] = _seg[CS];
             _vecRing[_vecRingPos + 2] = _ip;

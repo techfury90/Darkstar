@@ -99,6 +99,14 @@ namespace D.Doovke
                     _machine.Io.Fdc.ReadTrace = new System.Collections.Generic.List<string>();
                     _machine.Io.Fdc.SectorHeads = new System.Collections.Generic.List<string>();
                 }
+                // BOOTSTRAPIOR (0x03E00) write history -- the floppy boot handshake lives here.
+                _machine.Memory.BootIorSeq =
+                    new System.Collections.Generic.Dictionary<int, System.Collections.Generic.List<byte>>();
+                _machine.Memory.BootIorLog = new System.Collections.Generic.List<string>();
+                // CPU faults, and who polls the umbilical i8255.
+                _machine.Iop.FaultLog = new System.Collections.Generic.List<string>();
+                _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
+                _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
             }
 
             if (!string.IsNullOrEmpty(Environment.GetEnvironmentVariable("DOVE_MP_LOG")))
@@ -212,6 +220,95 @@ namespace D.Doovke
                             + "   (a full CP load = 23,574 byte OUTs)"
                             + System.Environment.NewLine;
 
+                        // ---- CPU faults ----
+                        // A flood of reads on port 0x74 is the IOP sitting in the Burdock/Bindweed
+                        // remote-debugger interface, polling the umbilical i8255 for a host debugger
+                        // that will never attach -- i.e. it took an unhandled x86 exception.  Vector 6
+                        // is the prime suspect because Dispatch raises it for UNIMPLEMENTED opcodes as
+                        // well as invalid ones, so a gap in this core presents to the guest as a crash.
+                        var flog = _machine.Iop.FaultLog;
+                        if (flog != null)
+                        {
+                            cpState += System.Environment.NewLine + "CPU faults (" + flog.Count + "):"
+                                     + System.Environment.NewLine;
+                            if (flog.Count == 0)
+                                cpState += "  (none -- no divide error, BOUND or invalid opcode was taken)"
+                                         + System.Environment.NewLine;
+                            foreach (string fl in flog) cpState += "  " + fl + System.Environment.NewLine;
+                        }
+                        var dmal = _machine.Io.DmaLog;
+                        if (dmal != null)
+                        {
+                            cpState += "floppy DMA transfers (" + dmal.Count + "):" + System.Environment.NewLine;
+                            foreach (string dl in dmal) cpState += "  " + dl + System.Environment.NewLine;
+                            if (dmal.Count == 0) cpState += "  (none)" + System.Environment.NewLine;
+                        }
+                        // Interrupt vector table (linear 0x000-0x1FF = vectors 00-7F).  Opie installs its
+                        // service calls here; an entry left at 0000:xxxx sends the INT that uses it into
+                        // low memory, where execution walks the table itself until it meets a 0xCC byte
+                        // (the low half of an offset like 0x00CC) and takes an INT 3.
+                        byte[] ivt = _machine.Memory.SramRaw;
+                        if (ivt != null && ivt.Length >= 0x200)
+                        {
+                            cpState += "IVT vectors 00-7F (seg:off, '-' = 0000:0000):" + System.Environment.NewLine;
+                            for (int v = 0; v < 0x80; v += 8)
+                            {
+                                string ln = "  " + v.ToString("X2") + ":";
+                                for (int i = 0; i < 8; i++)
+                                {
+                                    int a = (v + i) * 4;
+                                    int off = ivt[a] | (ivt[a + 1] << 8);
+                                    int seg = ivt[a + 2] | (ivt[a + 3] << 8);
+                                    ln += (off == 0 && seg == 0) ? "  ----:----"
+                                        : "  " + seg.ToString("X4") + ":" + off.ToString("X4");
+                                }
+                                cpState += ln + System.Environment.NewLine;
+                            }
+                        }
+                        long[] vc = _machine.Iop.VectorCounts;
+                        if (vc != null)
+                        {
+                            cpState += "vectors taken (nonzero):";
+                            for (int v = 0; v < vc.Length; v++)
+                                if (vc[v] != 0) cpState += " " + v.ToString("X2") + "=" + vc[v];
+                            cpState += System.Environment.NewLine;
+                        }
+                        var psites = _machine.Io.PollSites;
+                        if (psites != null && psites.Count > 0)
+                        {
+                            cpState += "umbilical i8255 poll sites (port/PC -> count, first..last IOP clock):"
+                                     + System.Environment.NewLine;
+                            var pk = new System.Collections.Generic.List<int>(psites.Keys);
+                            pk.Sort(delegate (int a, int b) { return psites[b][0].CompareTo(psites[a][0]); });
+                            for (int i = 0; i < pk.Count && i < 12; i++)
+                            {
+                                long[] r = psites[pk[i]];
+                                cpState += "  port 0x" + ((pk[i] >> 20) & 0xFFF).ToString("X2")
+                                         + " PC=" + (pk[i] & 0xFFFFF).ToString("X5")
+                                         + " -> " + r[0] + "  (" + r[1] + ".." + r[2] + ")"
+                                         + System.Environment.NewLine;
+                            }
+                            cpState += "  distinct sites=" + psites.Count + System.Environment.NewLine;
+                        }
+                        // Whatever the ROM's error reporter / debugger managed to say on the umbilical
+                        // serial console.  This is the payload of the whole 0x74 investigation.
+                        string uartTx = _machine.Io.DiagUartTx.ToString();
+                        cpState += "umbilical console TX (" + _machine.Io.DiagUartTxRaw.Count + " bytes):"
+                                 + System.Environment.NewLine;
+                        cpState += uartTx.Length == 0 ? "  (nothing transmitted)" + System.Environment.NewLine
+                                                     : uartTx + System.Environment.NewLine;
+                        // Raw hex as well: this channel feeds the external MP-code/status readout box,
+                        // so the payload is a status protocol rather than ASCII and the printable
+                        // rendering above loses it.
+                        if (_machine.Io.DiagUartTxRaw.Count > 0)
+                        {
+                            cpState += "  raw:";
+                            var rawTx = _machine.Io.DiagUartTxRaw;
+                            for (int i = 0; i < rawTx.Count && i < 64; i++)
+                                cpState += " " + rawTx[i].ToString("X2");
+                            cpState += System.Environment.NewLine;
+                        }
+
                         var fdc = _machine.Io.Fdc;
                         if (fdc != null)
                         {
@@ -265,6 +362,88 @@ namespace D.Doovke
                             int f = 0;   // ALL reads: the last 12 hid where the sequence STARTED
                             for (int i = f; i < fdc.ReadTrace.Count; i++)
                                 cpState += "  " + fdc.ReadTrace[i] + System.Environment.NewLine;
+                        }
+
+                        // ---- BOOTSTRAPIOR (0x03E00): the floppy boot handshake ----
+                        // RamBoot's bootTask emits MP 0199 two instructions after it releases the
+                        // producer, then parks at %WaitForCondition(bootBufferFull, noTimeout).  So 0199
+                        // is a normal progress marker, not a stuck code, and the task IS running.  The
+                        // one value that decides whether it ever moves on is
+                        // flppyIOCB.OperationState (flppyIOCB+1), which FloppyRead compares against
+                        // OperationCompleted = 6.  Every requested byte can be delivered -- and we have
+                        // proven they are, header and all -- without that byte ever being stored.
+                        var bseq = _machine.Memory.BootIorSeq;
+                        if (bseq != null)
+                        {
+                            byte[] sramNow = _machine.Memory.SramRaw;
+                            cpState += System.Environment.NewLine
+                                + "BOOTSTRAPIOR window 0x3C00-0x3FFF: " + bseq.Count + " addresses written"
+                                + System.Environment.NewLine;
+
+                            // The headline question, answered by one scan.
+                            var completedAt = new System.Collections.Generic.List<int>();
+                            foreach (System.Collections.Generic.KeyValuePair<int,
+                                     System.Collections.Generic.List<byte>> kv in bseq)
+                                if (kv.Value.Contains((byte)6)) completedAt.Add(kv.Key);
+                            completedAt.Sort();
+                            cpState += "  OperationCompleted(6) ever stored: "
+                                + (completedAt.Count == 0 ? "NO -- at no address in the window"
+                                   : "yes, at " + completedAt.Count + " address(es)");
+                            for (int i = 0; i < completedAt.Count && i < 12; i++)
+                                cpState += " 0x" + completedAt[i].ToString("X4");
+                            cpState += System.Environment.NewLine;
+
+                            // Per-address value sequences, but only where a state enum or a condition
+                            // encoding appears -- printing all 1024 addresses would bury the answer.
+                            var keys = new System.Collections.Generic.List<int>(bseq.Keys);
+                            keys.Sort();
+                            cpState += "  value sequences (addresses carrying 3..7, or a 0x80/0x01 condition byte):"
+                                + System.Environment.NewLine;
+                            int shown = 0;
+                            foreach (int a in keys)
+                            {
+                                System.Collections.Generic.List<byte> sq = bseq[a];
+                                bool interesting = false;
+                                foreach (byte v in sq)
+                                    if ((v >= 3 && v <= 7) || v == 0x80 || v == 0x01) { interesting = true; break; }
+                                if (!interesting || shown >= 48) continue;
+                                shown++;
+                                string line = "    0x" + a.ToString("X4") + " (IOR"
+                                    + (a >= 0x3E00 ? "+0x" + (a - 0x3E00).ToString("X3")
+                                                   : "-0x" + (0x3E00 - a).ToString("X3")) + ") :";
+                                foreach (byte v in sq) line += " " + v.ToString("X2");
+                                if (sq.Count >= 24) line += " ...";
+                                int idx = a - 0; // SramBase is 0
+                                if (sramNow != null && idx >= 0 && idx < sramNow.Length)
+                                    line += "   [now " + sramNow[idx].ToString("X2") + "]";
+                                cpState += line + System.Environment.NewLine;
+                            }
+                            if (shown == 0) cpState += "    (none)" + System.Environment.NewLine;
+
+                            var blog = _machine.Memory.BootIorLog;
+                            if (blog != null)
+                            {
+                                cpState += "  ordered state-valued writes (" + blog.Count + "):"
+                                    + System.Environment.NewLine;
+                                int from = blog.Count > 40 ? blog.Count - 40 : 0;
+                                for (int i = from; i < blog.Count; i++)
+                                    cpState += "    " + blog[i] + System.Environment.NewLine;
+                                if (blog.Count == 0) cpState += "    (none)" + System.Environment.NewLine;
+                            }
+
+                            // Final image of the two structures named in the source: the conditions at
+                            // the base and FloppyBootArea at +0x30 (floppyIOCBDone is its offset 0).
+                            if (sramNow != null && sramNow.Length >= 0x3E80)
+                            {
+                                cpState += "  final bytes 0x3E00-0x3E7F:" + System.Environment.NewLine;
+                                for (int row = 0x3E00; row < 0x3E80; row += 16)
+                                {
+                                    string h = "    " + row.ToString("X4") + " (+0x"
+                                             + (row - 0x3E00).ToString("X2") + "): ";
+                                    for (int i = 0; i < 16; i++) h += sramNow[row + i].ToString("X2") + " ";
+                                    cpState += h + System.Environment.NewLine;
+                                }
+                            }
                         }
 
                         var rl = _machine.Io.ConfigEeprom.ReadLog;
