@@ -245,6 +245,7 @@ namespace D.IOP
             _segOverride = -1;
             int rep = 0;                // 0 none, 1 REP/REPE/REPZ, 2 REPNE/REPNZ
             _cycles = 0;
+            _busCycles = 0; _fetchBytes = 0; _branchPenalty = 0;
             // Start of the instruction about to be decoded, kept so a fault can name the opcode
             // that caused it: by the time ServiceInterrupt runs, _ip has advanced past the bytes.
             _curInstrStart = InstructionAddress;
@@ -267,7 +268,17 @@ namespace D.IOP
                     case 0xF3: rep = 1; continue;    // REP / REPE
                     default:
                         Dispatch(b, rep);
-                        return _cycles > 0 ? _cycles : 4;
+                        // Explicit costs (MUL/DIV, string ops, INT/IRET) set _cycles directly and are
+                        // taken as authoritative; everything else is derived.
+                        if (_cycles > 0) return _cycles;
+                        // Taken-transfer detection without annotating every branch site: if the PC did
+                        // not land at (instruction start + bytes fetched), control transferred and the
+                        // prefetch queue was flushed.  Catches Jcc/JMP/CALL/RET/LOOP/INT uniformly,
+                        // including the ones reached through the ModRM group handlers.
+                        int expected = (_curInstrStart + _fetchBytes) & 0xFFFFF;
+                        if (InstructionAddress != expected) _branchPenalty += 8;
+                        int c = 2 + 4 * _busCycles + _fetchBytes + _branchPenalty;
+                        return c > 2 ? c : 2;
                 }
             }
         }
@@ -444,17 +455,18 @@ namespace D.IOP
                 case 0xC9: Leave(); break;                           // LEAVE
                 case 0xCA: { int n = Fetch16(); _ip = Pop16(); _seg[CS] = Pop16(); _reg[SP] = (ushort)(_reg[SP] + n); } break; // RET far imm16
                 case 0xCB: { _ip = Pop16(); _seg[CS] = Pop16(); } break;  // RET far
-                case 0xCC: ServiceInterrupt(3); break;               // INT3
+                case 0xCC: ServiceInterrupt(3); _cycles = CostIntN; break;               // INT3
                 case 0xCD:                                           // INT imm8
                     {
                         int v = Fetch8();
                         if (OnSoftwareInterrupt != null)
                             OnSoftwareInterrupt(v, ((_seg[CS] << 4) + ((_ip - 2) & 0xFFFF)) & 0xFFFFF);
                         ServiceInterrupt(v);
+                        _cycles = CostIntN;
                     }
                     break;
                 case 0xCE: if (GetFlag(OF)) ServiceInterrupt(4); break; // INTO
-                case 0xCF: Iret(); break;                            // IRET
+                case 0xCF: Iret(); _cycles = CostIret; break;                            // IRET
 
                 case 0xD4: Aam(Fetch8()); break;  // AAM
                 case 0xD5: Aad(Fetch8()); break;  // AAD
@@ -752,6 +764,7 @@ namespace D.IOP
                         int dividend = _reg[AX];
                         int q = dividend / d, r = dividend % d;
                         if (q > 0xFF) { ServiceInterrupt(0); break; }
+                        _cycles = CostDiv8 + 4 * _busCycles;
                         SetReg8(AL, (byte)q); SetReg8(AH, (byte)r);
                     }
                     else
@@ -761,6 +774,7 @@ namespace D.IOP
                         uint dividend = (uint)((_reg[DX] << 16) | _reg[AX]);
                         uint q = dividend / (uint)d, r = dividend % (uint)d;
                         if (q > 0xFFFF) { ServiceInterrupt(0); break; }
+                        _cycles = CostDiv16 + 4 * _busCycles;
                         _reg[AX] = (ushort)q; _reg[DX] = (ushort)r;
                     }
                     break;
@@ -773,6 +787,7 @@ namespace D.IOP
                         int dividend = (short)_reg[AX];
                         int q = dividend / d, r = dividend % d;
                         if (q > 127 || q < -128) { ServiceInterrupt(0); break; }
+                        _cycles = CostDiv8 + 4 * _busCycles;
                         SetReg8(AL, (byte)q); SetReg8(AH, (byte)r);
                     }
                     else
@@ -782,6 +797,7 @@ namespace D.IOP
                         int dividend = (_reg[DX] << 16) | _reg[AX];
                         int q = dividend / d, r = dividend % d;
                         if (q > 32767 || q < -32768) { ServiceInterrupt(0); break; }
+                        _cycles = CostDiv16 + 4 * _busCycles;
                         _reg[AX] = (ushort)q; _reg[DX] = (ushort)r;
                     }
                     break;
@@ -1145,6 +1161,9 @@ namespace D.IOP
             return sb.ToString();
         }
 
+        /// <summary>Prefetch-queue flush on a taken control transfer (~8 clocks on the 80186).</summary>
+        private void BranchTaken() { _branchPenalty += 8; }
+
         private void ServiceInterrupt(int vector)
         {
             VectorCounts[vector & 0xFF]++;
@@ -1202,6 +1221,10 @@ namespace D.IOP
         }
 
         // -------- Decimal / ASCII adjust --------
+
+        /// <summary>Published 80186 timings for operations whose cost is internal, not bus-bound.</summary>
+        private const int CostMul8 = 26, CostMul16 = 35, CostDiv8 = 29, CostDiv16 = 38;
+        private const int CostIntN = 47, CostIret = 28;
 
         private void Daa()
         {
@@ -1367,8 +1390,25 @@ namespace D.IOP
 
         // -------- Instruction fetch --------
 
+        // ---- 80186 CYCLE MODEL ----
+        // Before: _cycles was zeroed each instruction and NEVER assigned, so every instruction cost a
+        // flat 4 clocks (interrupts 45, halt 4).  A real 80186 averages 10-15 clocks on mixed code, so
+        // ElapsedClocks -- and therefore every "emulated second", the display field rate, media timing
+        // and the 8254 -- ran several times fast.  That is what let a 10.5x-fast retrace hack look
+        // necessary and left the two 8254 anchors irreconcilable.
+        //
+        // Rather than annotate 256 opcodes, cost is derived from what the instruction actually DID,
+        // which is close to how the part behaves: the 80186 completes a bus cycle in 4 clocks over a
+        // 16-bit bus, so
+        //     cycles = base + 4*(data bus cycles) + (instruction bytes fetched) + branch penalty
+        // Checked against the published timings: MOV r,r 4 vs 2; MOV r,mem 10 vs 9; MOV mem,r 10 vs 12;
+        // PUSH r 7+ vs 10; Jcc taken 12 vs 13, not taken 4 vs 4.  Good to a few clocks across the mix,
+        // which is what matters for a timebase.  The expensive outliers are charged explicitly below.
+        private int _busCycles, _fetchBytes, _branchPenalty;
+
         private byte Fetch8()
         {
+            _fetchBytes++;
             byte b = ReadSeg8(CS, _ip);
             _ip = (ushort)(_ip + 1);
             _cycles++;
@@ -1384,11 +1424,13 @@ namespace D.IOP
 
         private byte ReadSeg8(int seg, int off)
         {
+            _busCycles++;
             return MemReadByte(((_seg[seg] << 4) + (off & 0xFFFF)) & 0xFFFFF);
         }
 
         private ushort ReadSeg16(int seg, int off)
         {
+            _busCycles++;
             off &= 0xFFFF;
             int lo = ReadSeg8(seg, off);
             int hi = ReadSeg8(seg, (off + 1) & 0xFFFF);
@@ -1397,11 +1439,13 @@ namespace D.IOP
 
         private void WriteSeg8(int seg, int off, int value)
         {
+            _busCycles++;
             MemWriteByte(((_seg[seg] << 4) + (off & 0xFFFF)) & 0xFFFFF, (byte)value);
         }
 
         private void WriteSeg16(int seg, int off, int value)
         {
+            _busCycles++;
             off &= 0xFFFF;
             WriteSeg8(seg, off, value & 0xFF);
             WriteSeg8(seg, (off + 1) & 0xFFFF, (value >> 8) & 0xFF);

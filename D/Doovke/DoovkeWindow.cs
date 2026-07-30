@@ -251,6 +251,10 @@ namespace D.Doovke
                                 + "  retrace fields=" + fields + "  period=" + _machine.Io.RetracePeriod
                                 + " cycles (" + (fieldSec * 1000.0).ToString("F2") + " ms/field)"
                                 + "  => emulated " + secs.ToString("F2") + " s" + System.Environment.NewLine
+                                + "  ElapsedClocks=" + _machine.ElapsedClocks
+                                + "  => " + (iop > 0 ? (_machine.ElapsedClocks / (double)iop).ToString("F2") : "-")
+                                + " clocks/IOP instr (real 80186 averages 10-15)"
+                                + System.Environment.NewLine
                                 + "  IOP instrs=" + iop + "  CP instrs=" + cpi
                                 + "  CP:IOP ratio=" + (iop > 0 ? ((double)cpi / iop).ToString("F2") : "-")
                                 + System.Environment.NewLine;
