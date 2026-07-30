@@ -201,9 +201,34 @@ namespace D.CP
         private bool _ioRefPending; private int _ioPort;
         public long IoRefCount, PitReadCount;
         private long _timerCounter;
+        /// <summary>
+        /// Census of Mesa-bus I/O references by port: {reads, writes, UNHANDLED reads, UNHANDLED writes}.
+        ///
+        /// This exists because the last MP 0935 was caused by exactly this shape of gap.  `fYNorm 0xC`
+        /// is `IO&lt;-` on Daybreak but carried the stale DLion name `ClrDPRq`, so it silently swallowed
+        /// every I/O reference; `aRRIT` then read literal zeros forever and the germ branched on a
+        /// phantom value.  The hole is still open in a narrower form: only ports 0x41/0x42 are readable
+        /// and only 0x43 is writable, and everything else falls through `default: return 0` -- no error,
+        /// no log, just a plausible wrong value.  The Mesa I/O bus is not only the timer:
+        /// `aINPUT`/`aOUTPUT` (ESC alphas 200B/201B) are microcode-implemented via ESC8n, so guest code
+        /// can reference arbitrary device ports.  ViewPoint 2.0 (Pilot 14, 1988) apparently touches only
+        /// the timer; the Medley installer is Pilot 12 (copyright 1985) and runs a different microcode
+        /// build (3,929 microinstructions vs ViewPoint's 3,325), so it is free to reference more.
+        /// </summary>
+        public System.Collections.Generic.Dictionary<int, long[]> IoPortCensus;
+        private void NoteIo(int port, bool write, bool handled)
+        {
+            if (IoPortCensus == null) return;
+            long[] r;
+            if (!IoPortCensus.TryGetValue(port, out r)) { r = new long[4]; IoPortCensus[port] = r; }
+            r[write ? 1 : 0]++;
+            if (!handled) r[write ? 3 : 2]++;
+        }
+
         private ushort Pit8254Read()
         {
             PitReadCount++;
+            NoteIo(_ioPort, false, _ioPort == 0x41 || _ioPort == 0x42);
             switch (_ioPort)
             {
                 case 0x41:
@@ -224,8 +249,22 @@ namespace D.CP
                 default: return 0;
             }
         }
+        /// <summary>
+        /// Every Mesa-bus I/O WRITE in order, as "port=value".  We honour only 0x43/0xDC (the latch)
+        /// and discard everything else -- including the counter reloads the guest writes to 0x40/0x41/
+        /// 0x42 as LSB-then-MSB pairs.  `_pit32` instead free-runs from 0xFFFFFFFF at a rate hard-coded
+        /// from an ASSUMED counter-0 reload of 0x0C35 (3125 = 50 ms).  If a Pilot 12 build programs
+        /// different values, every timer value the guest reads back is wrong -- not zero, just wrong,
+        /// which is the same silent-plausible-value failure that produced the previous MP 0935.
+        /// </summary>
+        public System.Collections.Generic.List<string> IoWriteLog;
+
         private void Pit8254Write(ushort v)
         {
+            NoteIo(_ioPort, true, _ioPort == 0x43);
+            if (IoWriteLog != null && IoWriteLog.Count < 120)
+                IoWriteLog.Add("0x" + _ioPort.ToString("X2") + "=0x" + (v & 0xFFFF).ToString("X4")
+                    + " @CPi" + InstructionCount);
             if (_ioPort == 0x43 && (v & 0xFF) == 0xDC)
             {
                 _pitLatch1 = (ushort)(_pit32 & 0xFFFF);

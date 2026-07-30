@@ -107,6 +107,8 @@ namespace D.Doovke
                 // CPU faults, and who polls the umbilical i8255.
                 _machine.Iop.FaultLog = new System.Collections.Generic.List<string>();
                 _machine.Iop.ForwardTrace = new System.Collections.Generic.List<int>();
+                _machine.Cp.IoPortCensus = new System.Collections.Generic.Dictionary<int, long[]>();
+                _machine.Cp.IoWriteLog = new System.Collections.Generic.List<string>();
                 _machine.Io.PollSites = new System.Collections.Generic.Dictionary<int, long[]>();
                 _machine.Io.DmaLog = new System.Collections.Generic.List<string>();
                 _machine.Io.FdcDestLog = new System.Collections.Generic.List<string>();
@@ -434,6 +436,39 @@ namespace D.Doovke
                         // flppyIOCB.OperationState (flppyIOCB+1), which FloppyRead compares against
                         // OperationCompleted = 6.  Every requested byte can be delivered -- and we have
                         // proven they are, header and all -- without that byte ever being stored.
+                        // ---- Mesa-bus I/O ports the CP referenced ----
+                        var ioc = _machine.Cp.IoPortCensus;
+                        if (ioc != null)
+                        {
+                            cpState += System.Environment.NewLine
+                                + "Mesa-bus I/O (IO<- refs by port; only 0x41/0x42 readable, 0x43 writable):"
+                                + System.Environment.NewLine;
+                            var pk = new System.Collections.Generic.List<int>(ioc.Keys);
+                            pk.Sort();
+                            long unh = 0;
+                            foreach (int p in pk)
+                            {
+                                long[] r = ioc[p];
+                                bool bad = r[2] != 0 || r[3] != 0;
+                                if (bad) unh++;
+                                cpState += "  port 0x" + p.ToString("X2")
+                                    + " reads=" + r[0] + " writes=" + r[1]
+                                    + (bad ? "   *** UNMODELLED: " + r[2] + " reads returned 0, "
+                                             + r[3] + " writes discarded ***" : "")
+                                    + System.Environment.NewLine;
+                            }
+                            if (pk.Count == 0) cpState += "  (no I/O references)" + System.Environment.NewLine;
+                            cpState += "  ports with unmodelled traffic: " + unh + System.Environment.NewLine;
+                            var iwl = _machine.Cp.IoWriteLog;
+                            if (iwl != null)
+                            {
+                                cpState += "  I/O writes in order (" + iwl.Count + "):"
+                                         + System.Environment.NewLine + "   ";
+                                for (int i = 0; i < iwl.Count && i < 40; i++) cpState += " " + iwl[i];
+                                cpState += System.Environment.NewLine;
+                            }
+                        }
+
                         // ---- 80186 integrated interrupt controller ----
                         // Vector 0x60 fired 83,631,176 times in one 130-second run, straight into
                         // IVT[0x60] = FC00:035D, which the IVT dump shows is the ROM's DEFAULT handler
