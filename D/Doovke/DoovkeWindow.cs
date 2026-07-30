@@ -229,6 +229,61 @@ namespace D.Doovke
                                 : "")
                             + System.Environment.NewLine;
 
+                        // ---- TIMING CALIBRATION ----
+                        // Is the CP:IOP instruction ratio plausible, and is the 8254 ticking at the
+                        // rate the guest programs for?  The display retrace is the one anchor we have
+                        // to real time (one field per RetracePeriod CPU cycles at 8 MHz), so it gives
+                        // an independent clock to check both processors and the timer against.
+                        //
+                        // This matters because the guest loads counter 0 with 0x0C35 = 3125 for a 50 ms
+                        // period, i.e. it expects the 8254 input clock to be 62.5 kHz.  Our _pit32
+                        // advances once per 12.8 CP instructions (_pitAccum += 10, wraps at 128), so the
+                        // implied tick rate is entirely a function of how fast we run the CP.  If that
+                        // does not land near 62.5 kHz then every Pilot timeout is scaled wrong -- which
+                        // is exactly the family the germ's MP 0935 belonged to.
+                        {
+                            long iop = _machine.IopInstructions;
+                            long cpi = _machine.Cp.InstructionCount;
+                            long fields = _machine.Io.RetraceCount;
+                            double fieldSec = _machine.Io.RetracePeriod / 8000000.0;
+                            double secs = fields * fieldSec;
+                            cpState += System.Environment.NewLine + "TIMING CALIBRATION" + System.Environment.NewLine
+                                + "  retrace fields=" + fields + "  period=" + _machine.Io.RetracePeriod
+                                + " cycles (" + (fieldSec * 1000.0).ToString("F2") + " ms/field)"
+                                + "  => emulated " + secs.ToString("F2") + " s" + System.Environment.NewLine
+                                + "  IOP instrs=" + iop + "  CP instrs=" + cpi
+                                + "  CP:IOP ratio=" + (iop > 0 ? ((double)cpi / iop).ToString("F2") : "-")
+                                + System.Environment.NewLine;
+                            if (secs > 0.01)
+                            {
+                                double ips = iop / secs, cps = cpi / secs;
+                                cpState += "  => IOP " + (ips / 1e6).ToString("F2") + " M instr/s"
+                                    + "   CP " + (cps / 1e6).ToString("F2") + " M instr/s"
+                                    + System.Environment.NewLine
+                                    // Report what the code ACTUALLY did -- count the ticks rather than
+                                    // recomputing from a constant.  The previous version printed
+                                    // "CP rate / 12.8" and kept printing it after the PIT stopped being
+                                    // CP-paced, i.e. it described a model no longer in use.
+                                    + "  8254 domain=" + (_machine.Cp.PitFromCpInstructions
+                                        ? "CP instructions" : "IOP clocks")
+                                    + "  divisor=" + (_machine.Cp.PitDivisor > 0
+                                        ? _machine.Cp.PitDivisor.ToString() : "legacy 12.8")
+                                    + "  counts=" + _machine.Cp.PitCounts
+                                    + "  => measured " + (_machine.Cp.PitCounts / secs / 1000.0).ToString("F1")
+                                    + " kHz   (guest programs 3125 for 50 ms => expects 62.5 kHz)"
+                                    + System.Environment.NewLine
+                                    + "  => " + (_machine.Cp.PitCounts / secs / 62500.0).ToString("F2")
+                                    + "x the intended rate;  work per tick = "
+                                    + (_machine.Cp.PitCounts > 0 ? (iop / (double)_machine.Cp.PitCounts).ToString("F1") : "-")
+                                    + " IOP instrs (real hardware ~16)"
+                                    + System.Environment.NewLine;
+                            }
+                            cpState += "  timer edges=" + _machine.Cp.TimerFireCount
+                                + "  IntStat reads=" + _machine.Cp.IntStatReads
+                                + "  PIT reads=" + _machine.Cp.PitReadCount
+                                + "  IO refs=" + _machine.Cp.IoRefCount + System.Environment.NewLine;
+                        }
+
                         var pc = _machine.Io.PortCounts;
                         if (pc != null && pc.Count > 0)
                         {

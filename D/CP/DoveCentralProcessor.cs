@@ -468,6 +468,53 @@ namespace D.CP
         public bool Io8254Enabled = true;
         private uint _pit32 = 0xFFFFFFFF;
         private int _pitAccum;
+        private int _pitClockAccum;
+
+        /// <summary>
+        /// WHICH CLOCK DOMAIN DRIVES THE 8254 IS AN OPEN QUESTION -- operator, 2026-07-30: the Mesa PIT
+        /// is on the CP board, so it may not be in the IOP's timing domain at all.  If so, CP pacing is
+        /// architecturally right and the original code had the right DOMAIN with the wrong RATE.
+        ///
+        /// Measured facts, so whichever the documentation says can be applied directly:
+        ///   * the guest programs counter 0 = 3125 for a 50 ms period, so the input is 62.5 kHz;
+        ///   * 8,000,000 / 128 = 62,500 exactly, which is why IOP-clock /128 is tempting;
+        ///   * but our clock model is NOT faithful -- 2.48 IOP clocks per IOP instruction where a real
+        ///     80186 averages 10-15 -- so emulated seconds are compressed ~4-6x per unit of guest work;
+        ///   * work-per-tick on real hardware is ~16 IOP instructions per count (8 MHz, ~1 MIPS,
+        ///     62.5 kHz).  CP pacing at 12.8 CP instr/count gives ~3.5 (4.6x short); IOP-clock /128
+        ///     gives ~51.6 (3.2x long).  Neither matches, and they disagree BECAUSE the cycle model is
+        ///     wrong -- correcting the 80186 per-instruction cycle counts is the only fix that makes
+        ///     both anchors agree.
+        ///
+        /// DEFAULT IS CP PACING: the pre-existing, ViewPoint-proven behaviour.  An unverified guess must
+        /// not be the default.  DOVE_PIT_IOPCLK=1 selects IOP-clock pacing; DOVE_PIT_DIV=&lt;n&gt; sets the
+        /// divisor for whichever domain is active, so a documented rate needs no rebuild.
+        /// </summary>
+        public bool PitFromCpInstructions =
+            string.IsNullOrEmpty(System.Environment.GetEnvironmentVariable("DOVE_PIT_IOPCLK"));
+
+        /// <summary>Divisor for the active PIT domain.  Default 128 for IOP clocks; for CP pacing the
+        /// legacy accumulator is used unless this is set, in which case it is CP instructions/count.</summary>
+        public int PitDivisor = ParsePitDiv();
+        private static int ParsePitDiv()
+        {
+            int v;
+            return int.TryParse(System.Environment.GetEnvironmentVariable("DOVE_PIT_DIV"), out v) && v > 0
+                ? v : 0;
+        }
+        public long PitCounts;
+
+        /// <summary>
+        /// Advance the 8254 by IOP clocks.  Input is the 8 MHz system clock / 128 = exactly 62.5 kHz,
+        /// which is what the guest's counter-0 reload of 3125 for a 50 ms period implies.
+        /// </summary>
+        public void AdvancePitClocks(int clocks)
+        {
+            if (!Io8254Enabled || PitFromCpInstructions) return;
+            int div = PitDivisor > 0 ? PitDivisor : 128;
+            _pitClockAccum += clocks;
+            while (_pitClockAccum >= div) { _pitClockAccum -= div; _pit32--; PitCounts++; }
+        }
         private ushort _pitLatch1, _pitLatch2;
         private bool _pitLatched, _pitMsb1, _pitMsb2;
         private bool _ioRefPending; private int _ioPort;
@@ -2766,7 +2813,26 @@ namespace D.CP
             // germ's waitForInterrupt idles on; without it MesaIntBr never fires and @666 spins.
             if (++_timerCounter >= TimerPeriod) { _timerCounter = 0; _timerInt = true; TimerFireCount++; }
             // 8254 channels 1+2: ~12.8 CP instructions per count (62.5 kHz), counting DOWN.
-            if (Io8254Enabled) { _pitAccum += 10; if (_pitAccum >= 128) { _pitAccum -= 128; _pit32--; } }
+            // The old model advanced the 8254 once per 12.8 CP INSTRUCTIONS, which only yields the
+            // 62.5 kHz the guest programs for (3125 counts = 50 ms) if the CP runs at 800 kHz.  Measured
+            // against the corrected retrace anchor it runs 11.94 M instr/s, so the timer ticked at
+            // 932.9 kHz -- 14.93x fast, i.e. every Pilot timeout expired ~15x early.  There is an exact
+            // answer instead of a tuned one: 8,000,000 / 128 = 62,500, so the 8254's input is the IOP
+            // clock divided by 128.  AdvancePitClocks drives it from IOP clocks, sharing one timebase
+            // with the display.  DOVE_PIT_CPINSTR=1 restores the old behaviour for A/B.
+            if (Io8254Enabled && PitFromCpInstructions)
+            {
+                if (PitDivisor > 0)
+                {
+                    if (++_pitClockAccum >= PitDivisor)
+                    { _pitClockAccum -= PitDivisor; _pit32--; PitCounts++; }
+                }
+                else
+                {
+                    _pitAccum += 10;
+                    if (_pitAccum >= 128) { _pitAccum -= 128; _pit32--; PitCounts++; }
+                }
+            }
 
             // Bank<- takes effect one instruction late: the write at N leaves N+1 still
             // fetching the old bank, N+2 the new one.

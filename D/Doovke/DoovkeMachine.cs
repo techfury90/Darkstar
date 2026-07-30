@@ -105,7 +105,24 @@ namespace D.Doovke
             // Vertical-retrace period in IOP clocks.  The boot polls the keyboard off retrace,
             // so this paces the boot-device selection; 20000 is the value the proven boot uses
             // (the 210400 default is the true ~26.3 ms field rate and is far slower).
-            _io.RetracePeriod = 20000;
+            // ★MEASURED 2026-07-30: this 10.5x-fast value is a bring-up hack with real consequences.
+            // The true field is 210,400 cycles (~26.3 ms at 8 MHz); 20,000 makes retrace fire 10.5x too
+            // often, and the firmware COUNTS retrace fields to time the 35 s boot-device timeout, so
+            // that becomes ~3.3 s.  Against the true anchor the CP runs 1.13 M instr/s and the IOP
+            // 0.32 M instr/s -- a 3.54:1 ratio, which is right (an 8 MHz 80186 does ~1-2 MIPS against a
+            // Daybreak CP at ~7.3 M microinstructions/s) -- but the 8254, hard-coded at 12.8 CP
+            // instructions per count, then ticks at ~88 kHz where the guest programs 3125 for 50 ms and
+            // therefore expects 62.5 kHz.  So Pilot gets two timebases that disagree with each other and
+            // with real time, by DIFFERENT factors.  That is the family the germ's MP 0935 came from.
+            //
+            // DOVE_RETRACE=<cycles> overrides it, so the true rate can be tested without disturbing the
+            // proven ViewPoint boot that was tuned around 20,000.
+            {
+                string rp = Environment.GetEnvironmentVariable("DOVE_RETRACE");
+                int rpv;
+                _io.RetracePeriod = (!string.IsNullOrEmpty(rp) && int.TryParse(rp, out rpv) && rpv > 0)
+                    ? rpv : 20000;
+            }
 
             // The CP takes its microcode from the writable control store the IOP loads.
             _cp = new DoveCentralProcessor(_io.ControlStore);
@@ -229,6 +246,7 @@ namespace D.Doovke
 
             int clocks = _iop.Execute();
             _io.Tick(clocks);
+            _cp.AdvancePitClocks(clocks);   // 8254 shares the display's 8 MHz timebase
             ElapsedClocks += clocks;
 
             // Fire any keystrokes that have come due.
